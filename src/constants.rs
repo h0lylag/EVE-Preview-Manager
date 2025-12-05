@@ -35,7 +35,7 @@ pub mod input {
     /// Key repeat event value (when held down)
     pub const KEY_REPEAT: i32 = 2;
 
-    /// Key code for Tab key (from Linux input-event-codes.h)
+    /// Key code for Tab key - used to identify keyboard devices (from Linux input-event-codes.h)
     pub const KEY_TAB: u16 = 15;
     
     /// Key code for Left Shift key

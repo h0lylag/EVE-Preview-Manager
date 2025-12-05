@@ -194,7 +194,7 @@ pub fn ui(ui: &mut egui::Ui, global: &mut GlobalSettings) -> bool {
         }
         
         ui.label(egui::RichText::new(
-            "When enabled, Tab/Shift+Tab only work when an EVE window is focused")
+            "When enabled, cycle hotkeys only work when an EVE window is focused")
             .small()
             .weak());
         

@@ -1,6 +1,6 @@
 //! Hotkey cycle state management
 //!
-//! Tracks active EVE windows and their cycle order for Tab/Shift+Tab navigation.
+//! Tracks active EVE windows and their cycle order for hotkey-based navigation.
 //! Only characters listed in the profile's cycle_group are included in cycling.
 
 use std::collections::HashMap;
@@ -35,8 +35,7 @@ impl CycleState {
         self.active_windows
             .insert(character_name.clone(), window);
 
-        // DO NOT auto-add to config order - only configured characters can be cycled
-        // Characters not in hotkey_order config will be ignored for Tab/Shift+Tab
+        // Only characters in cycle_group can be cycled via hotkeys
     }
 
     /// Remove window (called from DestroyNotify)
@@ -72,9 +71,9 @@ impl CycleState {
         self.add_window(new_name, window);
     }
 
-    /// Move to next character in config order (Tab)
+    /// Move to next character in config order (forward cycle hotkey)
     /// Returns (window, character_name) to activate, or None if no active characters
-    /// Only cycles through characters in the configured hotkey_order list
+    /// Only cycles through characters in the configured cycle_group list
     ///
     /// # Parameters
     /// - `logged_out_map`: Optional window→last_character mapping for including logged-out windows
@@ -85,7 +84,7 @@ impl CycleState {
         }
 
         if self.config_order.is_empty() {
-            warn!(config_order_len = self.config_order.len(), "Config order is empty - add character names to hotkey_order in config");
+            warn!(config_order_len = self.config_order.len(), "Config order is empty - add character names to cycle_group in profile settings");
             return None;
         }
 
@@ -117,9 +116,9 @@ impl CycleState {
         }
     }
 
-    /// Move to previous character in config order (Shift+Tab)
+    /// Move to previous character in config order (backward cycle hotkey)
     /// Returns (window, character_name) to activate, or None if no active characters
-    /// Only cycles through characters in the configured hotkey_order list
+    /// Only cycles through characters in the configured cycle_group list
     ///
     /// # Parameters
     /// - `logged_out_map`: Optional window→last_character mapping for including logged-out windows
@@ -130,7 +129,7 @@ impl CycleState {
         }
 
         if self.config_order.is_empty() {
-            warn!(config_order_len = self.config_order.len(), "Config order is empty - add character names to hotkey_order in config");
+            warn!(config_order_len = self.config_order.len(), "Config order is empty - add character names to cycle_group in profile settings");
             return None;
         }
 

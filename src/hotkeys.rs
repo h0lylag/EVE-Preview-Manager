@@ -18,7 +18,7 @@ pub enum CycleCommand {
     Backward,
 }
 
-/// Find all keyboard devices that support Tab key
+/// Find all keyboard devices (devices that have a Tab key)
 /// Returns Vec of (Device, PathBuf) tuples to preserve path information
 fn find_all_keyboard_devices() -> Result<Vec<(Device, std::path::PathBuf)>> {
     info!(path = %paths::DEV_INPUT, "Scanning for keyboard devices...");
@@ -33,7 +33,7 @@ fn find_all_keyboard_devices() -> Result<Vec<(Device, std::path::PathBuf)>> {
 
         // Try to open device
         if let Ok(device) = Device::open(&path) {
-            // Check if it has Tab key (indicates keyboard)
+            // Check if it has Tab key (standard keyboard indicator)
             if let Some(keys) = device.supported_keys()
                     && keys.contains(KeyCode(input::KEY_TAB)) {
                     let key_count = keys.iter().count();

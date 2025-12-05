@@ -103,7 +103,7 @@ pub struct Profile {
     #[serde(default)]
     pub cycle_group: Vec<String>,
 
-    /// Include logged-out characters in Tab/Shift+Tab cycle if they were previously logged in during this session
+    /// Include logged-out characters in hotkey cycle if they were previously logged in during this session
     #[serde(default)]
     pub include_logged_out_in_cycle: bool,
 

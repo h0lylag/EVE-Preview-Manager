@@ -257,7 +257,7 @@ fn capture_key_blocking(state_tx: Sender<CaptureState>) -> Result<CaptureResult>
     }
 }
 
-/// Find all keyboard devices that support Tab key
+/// Find all keyboard devices (devices that have a Tab key)
 fn find_all_keyboard_devices() -> Result<Vec<Device>> {
     info!(path = %paths::DEV_INPUT, "Scanning for keyboard devices for key capture...");
 
@@ -270,7 +270,7 @@ fn find_all_keyboard_devices() -> Result<Vec<Device>> {
         let path = entry.path();
 
         if let Ok(device) = Device::open(&path) {
-            // Check if it has Tab key (indicates keyboard)
+            // Check if it has Tab key (standard keyboard indicator)
             if let Some(keys) = device.supported_keys() {
                 if keys.contains(KeyCode(input::KEY_TAB)) {
                     let key_count = keys.iter().count();

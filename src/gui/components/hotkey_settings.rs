@@ -93,7 +93,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         
         match state.editor_mode {
             EditorMode::TextEdit => {
-                ui.label("Enter character names (one per line, Tab/Shift+Tab to cycle):");
+                ui.label("Enter character names (one per line, in cycle order):");
                 
                 ui.add_space(ITEM_SPACING / 2.0);
                 
