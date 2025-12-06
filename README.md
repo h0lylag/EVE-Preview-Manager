@@ -6,5 +6,68 @@ EVE Preview Manager — Yet another EVE-O-Preview clone for Linux, written in Ru
 
 This is still under active development and should be working. But keep in mind it's primarily designed around my own workflow and environment.
 
+## Features
+
+- Live thumbnail previews of all EVE client windows
+- Click thumbnails to switch windows
+- Customizable thumbnail size, opacity, and positioning
+- Configurable hotkeys for cycling through characters
+- Drag and snap thumbnails to screen edges
+- System tray integration
+- Profile-based configuration
+
+## Requirements
+
+- Linux x86_64 with X11 (Wayland users: works via XWayland)
+- User must be in `input` group for hotkey detection (`sudo usermod -aG input $USER`) - Requires re-logging to take effect
+- Runtime dependencies: OpenGL, fontconfig, dbus, libxkbcommon (should already be installed on most modern Linux distributions)
+
+## Installation
+
+### NixOS / Nix
+
+```bash
+# Run directly
+nix run github:h0lylag/EVE-Preview-Manager
+
+# Or build
+nix build github:h0lylag/EVE-Preview-Manager
+./result/bin/eve-preview-manager
+```
+
+### Other Distros (Ubuntu, Arch, Fedora, etc.)
+
+Download the latest release from the [Releases](https://github.com/h0lylag/EVE-Preview-Manager/releases) page:
+
+```bash
+tar xzf eve-preview-manager-*-x86_64.tar.gz
+cd eve-preview-manager-*-x86_64
+./eve-preview-manager
+```
+
+### Build from Source
+
+```bash
+git clone https://github.com/h0lylag/EVE-Preview-Manager.git
+cd EVE-Preview-Manager
+cargo build --release
+sudo install -Dm755 target/release/eve-preview-manager /usr/local/bin/eve-preview-manager
+```
+
+## Usage
+
+1. Launch EVE Preview Manager — it starts in GUI mode with a system tray icon
+2. Open your EVE Online clients
+3. Thumbnail previews will appear for each EVE window
+4. Click a thumbnail to switch to that window
+5. Drag thumbnails to reposition them
+6. Use the system tray menu or GUI to configure settings
+
+### Hotkeys
+
+Configure hotkeys in the GUI to cycle through EVE windows:
+- **Cycle Next**: Move to next EVE character
+- **Cycle Previous**: Move to previous EVE character
+
 ## Screenshots
 Coming soon
