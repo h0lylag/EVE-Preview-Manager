@@ -53,15 +53,15 @@ fn get_eves<'a>(
     for w in windows {
         if let Some(eve) = check_and_create_window(ctx, daemon_config, w, state)
             .context(format!("Failed to process window {} during initial scan", w))? {
-            
+
             // Save initial position and dimensions (important for first-time characters)
             // Query geometry to get actual position from X11
             let geom = ctx.conn.get_geometry(eve.window)
                 .context("Failed to query geometry during initial scan")?
                 .reply()
                 .context("Failed to get geometry reply during initial scan")?;
-            
-            // ALWAYS update character_thumbnails in memory (for manual saves)
+
+            // Update character_thumbnails in memory
             let settings = crate::types::CharacterSettings::new(
                 geom.x,
                 geom.y,
@@ -69,16 +69,17 @@ fn get_eves<'a>(
                 eve.dimensions.height,
             );
             daemon_config.character_thumbnails.insert(eve.character_name.clone(), settings);
-            
-            // Conditionally persist to disk based on auto-save setting
-            if daemon_config.profile.thumbnail_auto_save_position {
-                daemon_config.save()
-                    .context(format!("Failed to save initial position during scan for '{}'", eve.character_name))?;
-            }
-            
+
             eves.insert(w, eve);
         }
     }
+
+    // Save once after processing all windows (avoids repeated disk writes)
+    if daemon_config.profile.thumbnail_auto_save_position && !eves.is_empty() {
+        daemon_config.save()
+            .context("Failed to save initial positions after startup scan")?;
+    }
+
     ctx.conn.flush()
         .context("Failed to flush X11 connection after creating thumbnails")?;
     Ok(eves)
