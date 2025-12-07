@@ -1,4 +1,4 @@
-.github/
+.github/*.md
 CLAUDE.md
 target/
 dist/
