@@ -4,7 +4,7 @@ EVE Preview Manager — Yet another EVE-O-Preview clone for Linux, written in Ru
 
 ## Status
 
-This is project is under active development and should be working. Keep in mind it's primarily designed around my own workflow and environment on NixOS. I built this for myself first and foremost. I will try to provide binaries for people to run but I don't have extensive testing infrastructure in place to test all edge cases. You can always try building it from source if you have issues.
+This project is under active development and should be working. Keep in mind it's primarily designed around my own workflow and environment on NixOS. I built this for myself first and foremost. I will try to provide binaries for people to run but I don't have extensive testing infrastructure in place to test all edge cases. You can always try building it from source if you have issues.
 
 ## Features
 
@@ -55,8 +55,7 @@ environment.systemPackages = [
 Download the latest release from the [Releases](https://github.com/h0lylag/EVE-Preview-Manager/releases) page:
 
 ```bash
-tar xzf eve-preview-manager-*-x86_64.tar.gz
-cd eve-preview-manager-*-x86_64
+unzip eve-preview-manager-v*.zip
 chmod +x ./eve-preview-manager
 ./eve-preview-manager
 ```
