@@ -84,7 +84,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
 
         // Preserve thumbnail position on character swap
         if ui.checkbox(&mut profile.thumbnail_preserve_position_on_swap,
-            "Keep thumbnail position when switching characters").changed() {
+            "New characters inherit thumbnail position").changed() {
             changed = true;
         }
 
