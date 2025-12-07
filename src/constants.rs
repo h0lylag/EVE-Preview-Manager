@@ -124,10 +124,10 @@ pub mod gui {
     
     /// Status colors
     pub const STATUS_RUNNING: egui::Color32 = egui::Color32::from_rgb(100, 200, 100);
+    pub const STATUS_STARTING: egui::Color32 = egui::Color32::from_rgb(255, 200, 0);
     pub const STATUS_STOPPED: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
-    pub const STATUS_STARTING: egui::Color32 = egui::Color32::from_rgb(200, 200, 0);
     
-    /// Alert level colors (consistent across UI)
+    /// Alert level colors
     pub const COLOR_SUCCESS: egui::Color32 = egui::Color32::from_rgb(100, 200, 100);  // Green - success messages
     pub const COLOR_WARNING: egui::Color32 = egui::Color32::from_rgb(255, 200, 0);    // Yellow - warnings/unsaved
     pub const COLOR_ERROR: egui::Color32 = egui::Color32::from_rgb(200, 100, 100);    // Red - errors/discard
