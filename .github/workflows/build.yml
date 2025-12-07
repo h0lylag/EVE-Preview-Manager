@@ -58,5 +58,5 @@ jobs:
       # if: steps.version_check.outputs.changed == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: eve-preview-linux-binary
+        name: eve-preview-manager-binary
         path: target/release/eve-preview-manager
