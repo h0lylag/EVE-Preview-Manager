@@ -3,3 +3,4 @@ CLAUDE.md
 target/
 dist/
 result
+build-dist.sh
