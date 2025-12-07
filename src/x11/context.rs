@@ -124,3 +124,49 @@ impl CachedFormats {
 pub fn to_fixed(v: f32) -> Fixed {
     (v * fixed_point::MULTIPLIER).round() as Fixed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_fixed_whole_numbers() {
+        assert_eq!(to_fixed(1.0), 65536);
+        assert_eq!(to_fixed(2.0), 131072);
+        assert_eq!(to_fixed(0.0), 0);
+    }
+
+    #[test]
+    fn test_to_fixed_fractional() {
+        // 0.5 * 65536 = 32768
+        assert_eq!(to_fixed(0.5), 32768);
+        
+        // 1.5 * 65536 = 98304
+        assert_eq!(to_fixed(1.5), 98304);
+        
+        // 0.25 * 65536 = 16384
+        assert_eq!(to_fixed(0.25), 16384);
+    }
+
+    #[test]
+    fn test_to_fixed_negative() {
+        assert_eq!(to_fixed(-1.0), -65536);
+        assert_eq!(to_fixed(-0.5), -32768);
+    }
+
+    #[test]
+    fn test_to_fixed_rounding() {
+        // Test that rounding works correctly
+        let result = to_fixed(1.0 / 3.0);
+        // 1/3 * 65536 ≈ 21845.33, should round to 21845
+        assert_eq!(result, 21845);
+    }
+
+    #[test]
+    fn test_to_fixed_large_values() {
+        // Test with screen coordinate scale values
+        assert_eq!(to_fixed(1920.0), 1920 * 65536);
+        assert_eq!(to_fixed(1080.0), 1080 * 65536);
+    }
+}
+

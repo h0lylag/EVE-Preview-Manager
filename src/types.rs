@@ -316,4 +316,71 @@ mod tests {
         assert!(state.is_visible());
         assert!(!state.is_focused());
     }
+
+    #[test]
+    fn test_eve_window_type_logged_in() {
+        let window = EveWindowType::LoggedIn("TestCharacter".to_string());
+        assert_eq!(window.character_name(), "TestCharacter");
+        
+        let window2 = EveWindowType::LoggedIn("AnotherChar".to_string());
+        assert_ne!(window, window2);
+    }
+
+    #[test]
+    fn test_eve_window_type_logged_out() {
+        let window = EveWindowType::LoggedOut;
+        assert_eq!(window.character_name(), "");
+        
+        let window2 = EveWindowType::LoggedOut;
+        assert_eq!(window, window2);
+    }
+
+    #[test]
+    fn test_eve_window_type_equality() {
+        let logged_in1 = EveWindowType::LoggedIn("Char1".to_string());
+        let logged_in2 = EveWindowType::LoggedIn("Char1".to_string());
+        let logged_in3 = EveWindowType::LoggedIn("Char2".to_string());
+        let logged_out = EveWindowType::LoggedOut;
+        
+        assert_eq!(logged_in1, logged_in2);
+        assert_ne!(logged_in1, logged_in3);
+        assert_ne!(logged_in1, logged_out);
+    }
+
+    #[test]
+    fn test_character_settings_new() {
+        let settings = CharacterSettings::new(100, 200, 640, 480);
+        assert_eq!(settings.x, 100);
+        assert_eq!(settings.y, 200);
+        assert_eq!(settings.dimensions.width, 640);
+        assert_eq!(settings.dimensions.height, 480);
+    }
+
+    #[test]
+    fn test_character_settings_position() {
+        let settings = CharacterSettings::new(150, 250, 800, 600);
+        let pos = settings.position();
+        assert_eq!(pos.x, 150);
+        assert_eq!(pos.y, 250);
+    }
+
+    #[test]
+    fn test_character_settings_serialization() {
+        let settings = CharacterSettings::new(50, 75, 1920, 1080);
+        let json = serde_json::to_string(&settings).unwrap();
+        let deserialized: CharacterSettings = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.x, settings.x);
+        assert_eq!(deserialized.y, settings.y);
+        assert_eq!(deserialized.dimensions.width, settings.dimensions.width);
+        assert_eq!(deserialized.dimensions.height, settings.dimensions.height);
+    }
+
+    #[test]
+    fn test_character_settings_zero_dimensions() {
+        // Zero dimensions mean "use auto-detect"
+        let settings = CharacterSettings::new(100, 100, 0, 0);
+        assert_eq!(settings.dimensions.width, 0);
+        assert_eq!(settings.dimensions.height, 0);
+    }
 }

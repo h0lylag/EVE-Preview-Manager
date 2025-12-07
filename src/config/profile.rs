@@ -311,3 +311,118 @@ impl Default for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_profile_default_with_name() {
+        let profile = Profile::default_with_name(
+            "Test Profile".to_string(),
+            "A test profile".to_string(),
+        );
+        
+        assert_eq!(profile.name, "Test Profile");
+        assert_eq!(profile.description, "A test profile");
+        assert_eq!(profile.opacity_percent, crate::constants::defaults::thumbnail::OPACITY_PERCENT);
+        assert_eq!(profile.border_size, crate::constants::defaults::border::SIZE);
+        assert!(profile.character_positions.is_empty());
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(config.global.selected_profile, crate::constants::defaults::behavior::PROFILE_NAME);
+        assert_eq!(config.global.window_width, crate::constants::defaults::manager::WINDOW_WIDTH);
+        assert_eq!(config.global.window_height, crate::constants::defaults::manager::WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn test_profile_serialization() {
+        let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.character_positions.insert(
+            "TestChar".to_string(),
+            CharacterSettings::new(100, 200, 480, 270),
+        );
+        
+        let json = serde_json::to_string(&profile).unwrap();
+        let deserialized: Profile = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.name, "Test");
+        assert_eq!(deserialized.character_positions.len(), 1);
+        assert!(deserialized.character_positions.contains_key("TestChar"));
+    }
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let mut config = Config::default();
+        config.profiles[0].character_positions.insert(
+            "Character1".to_string(),
+            CharacterSettings::new(50, 100, 640, 360),
+        );
+        
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.profiles.len(), config.profiles.len());
+        assert_eq!(
+            deserialized.profiles[0].character_positions.len(),
+            config.profiles[0].character_positions.len()
+        );
+    }
+
+    #[test]
+    fn test_global_settings_defaults() {
+        let settings = GlobalSettings::default();
+        
+        assert_eq!(settings.window_width, crate::constants::defaults::manager::WINDOW_WIDTH);
+        assert_eq!(settings.window_height, crate::constants::defaults::manager::WINDOW_HEIGHT);
+        assert_eq!(settings.snap_threshold, crate::constants::defaults::behavior::SNAP_THRESHOLD);
+        assert_eq!(
+            settings.preserve_thumbnail_position_on_swap,
+            crate::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
+        );
+        assert_eq!(settings.default_thumbnail_width, crate::constants::defaults::thumbnail::WIDTH);
+        assert_eq!(settings.default_thumbnail_height, crate::constants::defaults::thumbnail::HEIGHT);
+    }
+
+    #[test]
+    fn test_save_strategy_preserve_character_positions() {
+        // This tests the strategy concept - actual file I/O is integration test territory
+        let strategy = SaveStrategy::PreserveCharacterPositions;
+        assert_eq!(strategy, SaveStrategy::PreserveCharacterPositions);
+        assert_ne!(strategy, SaveStrategy::OverwriteCharacterPositions);
+    }
+
+    #[test]
+    fn test_profile_with_hotkeys() {
+        let mut profile = Profile::default_with_name("Hotkey Test".to_string(), String::new());
+        profile.cycle_forward_keys = Some(crate::config::HotkeyBinding::new(15, false, false, false, false));
+        profile.cycle_backward_keys = Some(crate::config::HotkeyBinding::new(15, false, true, false, false));
+        
+        assert!(profile.cycle_forward_keys.is_some());
+        assert!(profile.cycle_backward_keys.is_some());
+        
+        let json = serde_json::to_string(&profile).unwrap();
+        let deserialized: Profile = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(deserialized.cycle_forward_keys, profile.cycle_forward_keys);
+        assert_eq!(deserialized.cycle_backward_keys, profile.cycle_backward_keys);
+    }
+
+    #[test]
+    fn test_profile_cycle_group() {
+        let mut profile = Profile::default_with_name("Cycle Test".to_string(), String::new());
+        profile.cycle_group = vec![
+            "Character1".to_string(),
+            "Character2".to_string(),
+            "Character3".to_string(),
+        ];
+        
+        assert_eq!(profile.cycle_group.len(), 3);
+        assert_eq!(profile.cycle_group[0], "Character1");
+    }
+}
