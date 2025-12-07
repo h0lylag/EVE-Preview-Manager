@@ -145,12 +145,12 @@ impl DaemonStatus {
 
     fn label(&self) -> String {
         match self {
-            DaemonStatus::Running => "\u{25CF}  Running".to_string(),
-            DaemonStatus::Starting => "\u{25CF}  Starting...".to_string(),
-            DaemonStatus::Stopped => "\u{25CF}  Stopped".to_string(),
+            DaemonStatus::Running => "Preview daemon running".to_string(),
+            DaemonStatus::Starting => "Preview daemon starting...".to_string(),
+            DaemonStatus::Stopped => "Preview daemon stopped".to_string(),
             DaemonStatus::Crashed(code) => match code {
-                Some(code) => format!("\u{25CF}  Crashed (exit {code})"),
-                None => "\u{25CF}  Crashed".to_string(),
+                Some(code) => format!("Preview daemon crashed (exit {code})"),
+                None => "Preview daemon crashed".to_string(),
             },
         }
     }
@@ -316,10 +316,6 @@ impl ManagerApp {
 
         self.daemon = Some(child);
         self.daemon_status = DaemonStatus::Starting;
-        self.status_message = Some(StatusMessage {
-            text: format!("Preview daemon starting (PID: {pid})"),
-            color: STATUS_STARTING,
-        });
         Ok(())
     }
 
@@ -335,10 +331,6 @@ impl ManagerApp {
             } else {
                 DaemonStatus::Crashed(status.code())
             };
-            self.status_message = Some(StatusMessage {
-                text: "Preview daemon stopped".to_string(),
-                color: STATUS_STOPPED,
-            });
         }
         Ok(())
     }
@@ -405,7 +397,7 @@ impl ManagerApp {
         self.settings_changed = false;
         self.config_status_message = Some(StatusMessage {
             text: "Configuration saved successfully".to_string(),
-            color: egui::Color32::from_rgb(100, 200, 100),
+            color: STATUS_RUNNING,
         });
         info!("Configuration saved to disk");
         Ok(())
@@ -453,7 +445,7 @@ impl ManagerApp {
         self.settings_changed = false;
         self.config_status_message = Some(StatusMessage {
             text: "Changes discarded".to_string(),
-            color: egui::Color32::from_rgb(200, 100, 100),
+            color: COLOR_ERROR,
         });
         info!("Configuration changes discarded");
     }
@@ -493,18 +485,10 @@ impl ManagerApp {
                     } else {
                         DaemonStatus::Crashed(status.code())
                     };
-                    self.status_message = Some(StatusMessage {
-                        text: "Preview daemon exited".to_string(),
-                        color: STATUS_STOPPED,
-                    });
                 }
                 Ok(None) => {
                     if matches!(self.daemon_status, DaemonStatus::Starting) {
                         self.daemon_status = DaemonStatus::Running;
-                        self.status_message = Some(StatusMessage {
-                            text: "Preview daemon running".to_string(),
-                            color: STATUS_RUNNING,
-                        });
                         // Reload config when daemon transitions to running to pick up any new characters
                         self.reload_character_list();
                     }
@@ -595,7 +579,7 @@ impl ManagerApp {
                         error!(error = ?err, "Failed to save config");
                         self.status_message = Some(StatusMessage {
                             text: format!("Save failed: {err}"),
-                            color: STATUS_STOPPED,
+                            color: COLOR_ERROR,
                         });
                     } else {
                         self.reload_daemon_config();
@@ -622,7 +606,7 @@ impl ManagerApp {
                     ui.colored_label(message.color, &message.text);
                 } else if self.settings_changed {
                     ui.colored_label(
-                        egui::Color32::from_rgb(255, 200, 0),
+                        COLOR_WARNING,
                         "Unsaved changes"
                     );
                 }
@@ -652,7 +636,7 @@ impl ManagerApp {
                     error!(error = ?err, "Failed to save config after profile switch");
                     self.status_message = Some(StatusMessage {
                         text: format!("Save failed: {err}"),
-                        color: STATUS_STOPPED,
+                        color: COLOR_ERROR,
                     });
                 } else {
                     self.reload_daemon_config();
@@ -664,7 +648,7 @@ impl ManagerApp {
                     error!(error = ?err, "Failed to save config after profile action");
                     self.status_message = Some(StatusMessage {
                         text: format!("Save failed: {err}"),
-                        color: STATUS_STOPPED,
+                        color: COLOR_ERROR,
                     });
                 } else {
                     self.reload_daemon_config();
@@ -753,13 +737,12 @@ impl eframe::App for ManagerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Slim status bar at top
             ui.horizontal(|ui| {
-                ui.label("Daemon:");
                 ui.colored_label(self.daemon_status.color(), self.daemon_status.label());
                 if let Some(child) = &self.daemon {
-                    ui.label(format!("PID: {}", child.id()));
+                    ui.label(format!("(PID: {})", child.id()));
                 }
-                ui.add_space(10.0);
                 if let Some(message) = &self.status_message {
+                    ui.add_space(10.0);
                     ui.colored_label(message.color, &message.text);
                 }
             });
