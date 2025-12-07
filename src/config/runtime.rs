@@ -216,7 +216,7 @@ mod tests {
                 thumbnail_text_y: text_y,
                 thumbnail_text_color: text_color.to_string(),
                 thumbnail_text_font: String::new(),
-                thumbnail_auto_save_position: true,
+                thumbnail_auto_save_position: false,
                 thumbnail_snap_threshold: snap_threshold,
                 thumbnail_hide_not_focused: hide_when_no_focus,
                 thumbnail_preserve_position_on_swap: false,
