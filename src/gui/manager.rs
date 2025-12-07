@@ -171,7 +171,7 @@ struct ManagerApp {
     #[cfg(target_os = "linux")]
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
     should_quit: bool,
-    
+
     // Configuration state with profiles
     config: Config,
     selected_profile_idx: usize,
@@ -181,6 +181,7 @@ struct ManagerApp {
     visual_settings_state: components::visual_settings::VisualSettingsState,
     cycle_order_settings_state: components::cycle_order_settings::CycleOrderSettingsState,
     settings_changed: bool,
+    config_status_message: Option<StatusMessage>,
 }
 
 impl ManagerApp {
@@ -272,6 +273,7 @@ impl ManagerApp {
             visual_settings_state,
             cycle_order_settings_state,
             settings_changed: false,
+            config_status_message: None,
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -289,6 +291,7 @@ impl ManagerApp {
             visual_settings_state,
             cycle_order_settings_state,
             settings_changed: false,
+            config_status_message: None,
         };
 
         if let Err(err) = app.start_daemon() {
@@ -400,9 +403,9 @@ impl ManagerApp {
         self.config = Config::load().unwrap_or(final_config);
 
         self.settings_changed = false;
-        self.status_message = Some(StatusMessage {
+        self.config_status_message = Some(StatusMessage {
             text: "Configuration saved successfully".to_string(),
-            color: STATUS_RUNNING,
+            color: egui::Color32::from_rgb(100, 200, 100),
         });
         info!("Configuration saved to disk");
         Ok(())
@@ -440,17 +443,17 @@ impl ManagerApp {
 
     fn discard_changes(&mut self) {
         self.config = Config::load().unwrap_or_default();
-        
+
         // Re-find selected profile index after reload
         self.selected_profile_idx = self.config.profiles
             .iter()
             .position(|p| p.name == self.config.global.selected_profile)
             .unwrap_or(0);
-        
+
         self.settings_changed = false;
-        self.status_message = Some(StatusMessage {
+        self.config_status_message = Some(StatusMessage {
             text: "Changes discarded".to_string(),
-            color: STATUS_STOPPED,
+            color: egui::Color32::from_rgb(100, 200, 100),
         });
         info!("Configuration changes discarded");
     }
@@ -615,7 +618,9 @@ impl ManagerApp {
 
             // Status text aligned to the right
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.settings_changed {
+                if let Some(message) = &self.config_status_message {
+                    ui.colored_label(message.color, &message.text);
+                } else if self.settings_changed {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 200, 0),
                         "● Unsaved changes"
@@ -667,20 +672,24 @@ impl ManagerApp {
             // Column 1: Behavior Settings
             if components::behavior_settings::ui(&mut columns[0], &mut self.config.global, current_profile, &mut self.behavior_settings_state) {
                 self.settings_changed = true;
+                self.config_status_message = None;
             }
 
             // Column 2: Visual Settings + Hotkey Settings
             if components::visual_settings::ui(&mut columns[1], current_profile, &mut self.visual_settings_state) {
                 self.settings_changed = true;
+                self.config_status_message = None;
             }
             columns[1].add_space(SECTION_SPACING);
             if components::hotkey_settings::ui(&mut columns[1], current_profile, &mut self.hotkey_settings_state) {
                 self.settings_changed = true;
+                self.config_status_message = None;
             }
 
             // Column 3: Character Cycle Order
             if components::cycle_order_settings::ui(&mut columns[2], current_profile, &mut self.cycle_order_settings_state) {
                 self.settings_changed = true;
+                self.config_status_message = None;
             }
         });
     }
