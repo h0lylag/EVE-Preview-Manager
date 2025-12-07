@@ -67,6 +67,21 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
 
         ui.add_space(ITEM_SPACING);
 
+        // Auto-save thumbnail positions
+        if ui.checkbox(
+            &mut profile.thumbnail_auto_save_position,
+            "Automatically save thumbnail positions"
+        ).changed() {
+            changed = true;
+        }
+
+        ui.label(egui::RichText::new(
+            "When disabled, positions are only saved when you use 'Save Thumbnail Positions' from the system tray menu")
+            .small()
+            .weak());
+
+        ui.add_space(ITEM_SPACING);
+
         // Preserve thumbnail position on character swap
         if ui.checkbox(&mut profile.thumbnail_preserve_position_on_swap,
             "Keep thumbnail position when switching characters").changed() {
