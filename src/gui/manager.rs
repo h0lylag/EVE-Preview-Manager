@@ -787,7 +787,7 @@ impl eframe::App for ManagerApp {
             height = self.config.global.window_height,
             "Saving window geometry"
         );
-        if let Err(err) = self.config.save_with_strategy(SaveStrategy::OverwriteCharacterPositions) {
+        if let Err(err) = self.config.save_with_strategy(SaveStrategy::PreserveCharacterPositions) {
             error!(error = ?err, "Failed to save window geometry on exit");
         }
 
