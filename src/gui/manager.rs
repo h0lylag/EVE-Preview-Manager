@@ -185,19 +185,8 @@ struct ManagerApp {
 }
 
 impl ManagerApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         info!("Initializing egui manager");
-
-        // Configure egui style for larger text
-        let style = (*cc.egui_ctx.style()).clone();
-
-        // Increase all text sizes by 2 points
-        //let mut style_modified = style.clone();
-        //style_modified.text_styles.iter_mut().for_each(|(_, font_id)| {
-        //    font_id.size += 2.0;
-        //});
-
-        cc.egui_ctx.set_style(style);
 
         // Create channel for tray icon commands
         #[cfg(target_os = "linux")]
@@ -397,7 +386,7 @@ impl ManagerApp {
         self.settings_changed = false;
         self.config_status_message = Some(StatusMessage {
             text: "Configuration saved successfully".to_string(),
-            color: STATUS_RUNNING,
+            color: COLOR_SUCCESS,
         });
         info!("Configuration saved to disk");
         Ok(())
