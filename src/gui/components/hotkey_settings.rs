@@ -220,7 +220,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
 
         // Require EVE focus checkbox
         if ui.checkbox(&mut profile.hotkey_require_eve_focus,
-            "Require EVE window focused for hotkeys to work").changed() {
+            "Require EVE window focus").changed() {
             changed = true;
         }
 
@@ -243,23 +243,6 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
 
         ui.label(egui::RichText::new(
             "When enabled, characters that log out will remain in the cycle using their last position")
-            .small()
-            .weak());
-
-        ui.add_space(ITEM_SPACING);
-
-        // Auto-save thumbnail positions checkbox
-        if ui.checkbox(
-            &mut profile.thumbnail_auto_save_position,
-            "Automatically save thumbnail positions"
-        ).changed() {
-            changed = true;
-        }
-
-        ui.add_space(ITEM_SPACING / 4.0);
-
-        ui.label(egui::RichText::new(
-            "When disabled, positions are only saved when you use 'Save Thumbnail Positions' from the system tray menu")
             .small()
             .weak());
     });
