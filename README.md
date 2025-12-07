@@ -8,13 +8,13 @@ This is still under active development and should be working. But keep in mind i
 
 ## Features
 
-- Live thumbnail previews of all EVE client windows
-- Click thumbnails to switch windows
-- Customizable thumbnail size, opacity, and positioning
-- Configurable hotkeys for cycling through characters
-- Drag and snap thumbnails to screen edges
-- System tray integration
-- Profile-based configuration
+- Real-time thumbnail previews of all EVE client windows
+- Click thumbnails to activate windows or drag to reposition
+- Hotkey-based character cycling with configurable key bindings
+- Customizable thumbnail appearance including size, opacity, fonts, colors, and borders
+- Profile-based configuration system for managing multiple setups
+- One-click character import for cycle groups
+- Optional features: cycle through logged-off clients, auto-minimize inactive windows, position inheritance for new characters
 
 ## Screenshots
 <p align="center">
