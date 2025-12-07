@@ -16,6 +16,16 @@ This is still under active development and should be working. But keep in mind i
 - System tray integration
 - Profile-based configuration
 
+## Screenshots
+<p align="center">
+  <a href="https://i.imgur.com/rSvkvbG.png">
+    <img src="https://i.imgur.com/rSvkvbG.png" alt="EVE Preview Manager in action" width="400">
+  </a>
+  <a href="https://i.imgur.com/tfztoAt.png">
+    <img src="https://i.imgur.com/tfztoAt.png" alt="EVE Preview Manager Settings" width="400">
+  </a>
+</p>
+
 ## Requirements
 
 - Linux x86_64 with X11 (Wayland users: works via XWayland)
@@ -75,6 +85,3 @@ sudo install -Dm755 target/release/eve-preview-manager /usr/local/bin/eve-previe
 Configure hotkeys in the GUI to cycle through EVE windows:
 - **Cycle Next**: Move to next EVE character
 - **Cycle Previous**: Move to previous EVE character
-
-## Screenshots
-Coming soon
