@@ -47,15 +47,15 @@ jobs:
         echo "Version changed? ${{ steps.version_check.outputs.changed }}"
     
     - name: Build
-      if: steps.version_check.outputs.changed == 'true'
+      # if: steps.version_check.outputs.changed == 'true'
       run: cargo build --release --verbose
     
     - name: Run tests
-      if: steps.version_check.outputs.changed == 'true'
+      # if: steps.version_check.outputs.changed == 'true'
       run: cargo test --verbose
     
     - name: Upload binary
-      if: steps.version_check.outputs.changed == 'true'
+      # if: steps.version_check.outputs.changed == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: eve-preview-manager-linux-binary
