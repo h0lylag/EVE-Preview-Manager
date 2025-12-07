@@ -4,7 +4,7 @@ EVE Preview Manager — Yet another EVE-O-Preview clone for Linux, written in Ru
 
 ## Status
 
-This is still under active development and should be working. But keep in mind it's primarily designed around my own workflow and environment.
+This is project is under active development and should be working. Keep in mind it's primarily designed around my own workflow and environment on NixOS. I built this for myself first and foremost. I will try to provide binaries for people to run but I don't have extensive testing infrastructure in place to test all edge cases. You can always try building it from source if you have issues.
 
 ## Features
 
@@ -46,7 +46,7 @@ Add the repo to your flake inputs:
 Then add it to your packages:
 ```nix
 environment.systemPackages = [ 
-  eve-preview-manager.packages.${pkgs.system}.default 
+  eve-preview-manager.packages.${pkgs.stdenv.hostPlatform.system}.default
 ];
 ```
 
@@ -57,6 +57,7 @@ Download the latest release from the [Releases](https://github.com/h0lylag/EVE-P
 ```bash
 tar xzf eve-preview-manager-*-x86_64.tar.gz
 cd eve-preview-manager-*-x86_64
+chmod +x ./eve-preview-manager
 ./eve-preview-manager
 ```
 
@@ -79,9 +80,4 @@ sudo install -Dm755 target/release/eve-preview-manager /usr/local/bin/eve-previe
 4. Click a thumbnail to switch to that window
 5. Drag thumbnails to reposition them
 6. Use the system tray menu or GUI to configure settings
-
-### Hotkeys
-
-Configure hotkeys in the GUI to cycle through EVE windows:
-- **Cycle Next**: Move to next EVE character
-- **Cycle Previous**: Move to previous EVE character
+7. Config file is stored at `~/.config/eve-preview-manager/config.json`
