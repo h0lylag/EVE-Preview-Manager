@@ -389,10 +389,43 @@ mod tests {
     fn test_serialization_roundtrip() {
         let binding = HotkeyBinding::new(15, false, true, false, false);
         let json = serde_json::to_string(&binding).unwrap();
-        assert_eq!(json, r#"["KEY_LEFTSHIFT","KEY_TAB"]"#);
+        // New object format includes keys and source_devices
+        assert_eq!(json, r#"{"keys":["KEY_LEFTSHIFT","KEY_TAB"],"source_devices":[]}"#);
 
         let deserialized: HotkeyBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, binding);
+    }
+
+    #[test]
+    fn test_legacy_array_format_deserialization() {
+        // Test that we can still deserialize old array format configs
+        let legacy_json = r#"["KEY_LEFTSHIFT","KEY_TAB"]"#;
+        let binding: HotkeyBinding = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(binding.key_code, 15);
+        assert!(binding.shift);
+        assert!(!binding.ctrl);
+        assert!(binding.source_devices.is_empty());
+    }
+
+    #[test]
+    fn test_object_format_with_devices() {
+        let binding = HotkeyBinding::with_devices(
+            15,
+            false,
+            true,
+            false,
+            false,
+            vec!["device1".to_string(), "device2".to_string()],
+        );
+        let json = serde_json::to_string(&binding).unwrap();
+        assert_eq!(
+            json,
+            r#"{"keys":["KEY_LEFTSHIFT","KEY_TAB"],"source_devices":["device1","device2"]}"#
+        );
+
+        let deserialized: HotkeyBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, binding);
+        assert_eq!(deserialized.source_devices, vec!["device1", "device2"]);
     }
 
     #[test]
