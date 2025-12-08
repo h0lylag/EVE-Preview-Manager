@@ -78,4 +78,5 @@ cargo build --release
 4. Click a thumbnail to switch to that window
 5. Drag thumbnails to reposition them
 6. Use the system tray menu or GUI to configure settings
-7. Config file is stored at `~/.config/eve-preview-manager/config.json`
+7. Configure hotkeys and select your preferred input device in the GUI
+8. Config file is stored at `~/.config/eve-preview-manager/config.json`
