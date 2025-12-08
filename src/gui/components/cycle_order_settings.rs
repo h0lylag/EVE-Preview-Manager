@@ -184,28 +184,29 @@ fn render_unified_cycle_group_tab(
 
                             // Right-aligned buttons (not draggable)
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                // Delete hotkey button
                                 let has_binding = profile.character_hotkeys.contains_key(character);
+                                
+                                // Delete hotkey button (only when binding exists)
                                 if has_binding
                                     && ui.small_button("✖").on_hover_text("Remove hotkey").clicked() {
                                     profile.character_hotkeys.remove(character);
                                     *changed = true;
                                 }
 
-                                // Bind button
-                                let bind_text = if hotkey_state.is_capturing_for(character) {
-                                    "Capturing..."
-                                } else {
-                                    "Bind"
-                                };
-
-                                if ui.small_button(bind_text).on_hover_text("Click to capture hotkey").clicked() {
-                                    hotkey_state.start_key_capture_for_character(character.clone());
-                                }
-
-                                // Show hotkey if assigned
+                                // Show hotkey if assigned, OR show bind button if no hotkey
                                 if let Some(binding) = profile.character_hotkeys.get(character) {
                                     ui.label(egui::RichText::new(format!("[{}]", binding.display_name())).weak());
+                                } else {
+                                    // Bind button (only when no binding exists)
+                                    let bind_text = if hotkey_state.is_capturing_for(character) {
+                                        "Capturing..."
+                                    } else {
+                                        "Bind"
+                                    };
+
+                                    if ui.small_button(bind_text).on_hover_text("Click to capture hotkey").clicked() {
+                                        hotkey_state.start_key_capture_for_character(character.clone());
+                                    }
                                 }
                             });
 
