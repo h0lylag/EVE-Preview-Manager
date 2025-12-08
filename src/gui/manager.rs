@@ -672,7 +672,12 @@ impl ManagerApp {
             }
 
             // Column 3: Character Cycle Order
-            if components::cycle_order_settings::ui(&mut columns[2], current_profile, &mut self.cycle_order_settings_state) {
+            if components::cycle_order_settings::ui(
+                &mut columns[2], 
+                current_profile, 
+                &mut self.cycle_order_settings_state,
+                Some(&mut self.hotkey_settings_state)
+            ) {
                 self.settings_changed = true;
                 self.config_status_message = None;
             }

@@ -10,12 +10,19 @@ enum EditorMode {
     DragDrop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewTab {
+    CycleGroup,
+    PerCharacterHotkeys,
+}
+
 /// State for cycle order settings UI
 pub struct CycleOrderSettingsState {
     cycle_group_text: String,
     editor_mode: EditorMode,
     show_add_characters_popup: bool,
     character_selections: std::collections::HashMap<String, bool>,
+    active_tab: ViewTab,
 }
 
 impl CycleOrderSettingsState {
@@ -25,6 +32,7 @@ impl CycleOrderSettingsState {
             editor_mode: EditorMode::DragDrop,
             show_add_characters_popup: false,
             character_selections: std::collections::HashMap::new(),
+            active_tab: ViewTab::CycleGroup,
         }
     }
 
@@ -51,12 +59,44 @@ impl Default for CycleOrderSettingsState {
 }
 
 /// Renders cycle order settings UI and returns true if changes were made
-pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettingsState) -> bool {
+/// hotkey_state is optional and only needed for per-character hotkeys tab
+pub fn ui(
+    ui: &mut egui::Ui, 
+    profile: &mut Profile, 
+    state: &mut CycleOrderSettingsState,
+    hotkey_state: Option<&mut crate::gui::components::hotkey_settings::HotkeySettingsState>
+) -> bool {
     let mut changed = false;
 
     ui.group(|ui| {
-        ui.label(egui::RichText::new("Character Cycle Order").strong());
+        // Tab selector buttons
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut state.active_tab, ViewTab::CycleGroup, "Cycle Group");
+            ui.selectable_value(&mut state.active_tab, ViewTab::PerCharacterHotkeys, "Per-Character Hotkeys");
+        });
+        
         ui.add_space(ITEM_SPACING);
+        ui.separator();
+        ui.add_space(ITEM_SPACING);
+
+        // Show content based on active tab
+        match state.active_tab {
+            ViewTab::CycleGroup => {
+                render_cycle_group_tab(ui, profile, state, &mut changed);
+            }
+            ViewTab::PerCharacterHotkeys => {
+                render_per_character_hotkeys_tab(ui, profile, hotkey_state, &mut changed);
+            }
+        }
+    });
+
+    changed
+}
+
+/// Renders the cycle group order tab
+fn render_cycle_group_tab(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettingsState, changed: &mut bool) {
+    ui.label(egui::RichText::new("Character Cycle Order").strong());
+    ui.add_space(ITEM_SPACING);
 
         // Mode selector
         ui.horizontal(|ui| {
@@ -106,7 +146,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettin
                 if ui.add(text_edit).changed() {
                     // Update profile's cycle_group on every change
                     state.save_to_profile(profile);
-                    changed = true;
+                    *changed = true;
                 }
             }
 
@@ -175,7 +215,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettin
                                 // Item was dropped here
                                 from_idx = Some(*dragged_payload);
                                 to_idx = Some(insert_row_idx);
-                                changed = true;
+                                *changed = true;
                             }
                         }
 
@@ -183,7 +223,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettin
                         response.context_menu(|ui| {
                             if ui.button("🗑 Delete").clicked() {
                                 to_delete = Some(row_idx);
-                                changed = true;
+                                *changed = true;
                                 ui.close();
                             }
                         });
@@ -194,7 +234,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettin
                 if let Some(dragged_payload) = dropped_payload {
                     from_idx = Some(*dragged_payload);
                     to_idx = Some(profile.hotkey_cycle_group.len());
-                    changed = true;
+                    *changed = true;
                 }
 
                 // Perform deletion
@@ -224,15 +264,190 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettin
             format!("Current cycle order: {} character(s)", profile.hotkey_cycle_group.len()))
             .small()
             .weak());
-    });
+}
 
-    // Add Characters popup modal
-    if state.show_add_characters_popup {
-        egui::Window::new("Add Characters")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ui.ctx(), |ui| {
+/// Renders the per-character hotkeys tab
+fn render_per_character_hotkeys_tab(
+    ui: &mut egui::Ui,
+    profile: &mut Profile,
+    hotkey_state: Option<&mut crate::gui::components::hotkey_settings::HotkeySettingsState>,
+    changed: &mut bool
+) {
+    ui.label(egui::RichText::new("Per-Character Hotkeys").strong());
+    ui.add_space(ITEM_SPACING);
+
+    ui.label(egui::RichText::new(
+        "Assign unique hotkeys to jump directly to specific characters. Drag to reorder.")
+        .small()
+        .weak());
+
+    ui.add_space(ITEM_SPACING);
+
+    // Get character names - use custom order if available, otherwise alphabetical
+    let all_char_names: std::collections::HashSet<String> = profile.character_thumbnails.keys().cloned().collect();
+    
+    // Build ordered list: first use saved order (filtering out removed chars), then add any new chars alphabetically
+    let mut char_names: Vec<String> = profile.character_hotkey_order.iter()
+        .filter(|name| all_char_names.contains(*name))
+        .cloned()
+        .collect();
+    
+    // Add any new characters not in the order list
+    let mut new_chars: Vec<String> = all_char_names.iter()
+        .filter(|name| !char_names.contains(name))
+        .cloned()
+        .collect();
+    new_chars.sort();
+    char_names.extend(new_chars);
+
+    // Update the order list if it changed (new chars added or removed chars filtered)
+    if char_names != profile.character_hotkey_order {
+        profile.character_hotkey_order = char_names.clone();
+        *changed = true;
+    }
+
+    if char_names.is_empty() {
+        ui.label(egui::RichText::new("No characters configured yet")
+            .weak()
+            .italics());
+    } else if let Some(hotkey_state) = hotkey_state {
+        let mut from_idx: Option<usize> = None;
+        let mut to_idx: Option<usize> = None;
+
+        let frame = egui::Frame::default()
+            .inner_margin(4.0)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke);
+
+        // Drag-drop zone containing all items
+        let (_, dropped_payload) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
+            ui.set_min_height(100.0);
+
+            for (idx, char_name) in char_names.iter().enumerate() {
+                let item_id = egui::Id::new("per_char_hotkey").with(idx);
+
+                // Get binding info
+                let has_binding = profile.character_hotkeys.get(char_name).is_some();
+                let binding_text = if let Some(binding) = profile.character_hotkeys.get(char_name) {
+                    binding.display_name()
+                } else {
+                    "Not Set".to_string()
+                };
+
+                // Build the row with draggable handle
+                let response = ui.horizontal(|ui| {
+                    // Make only the drag handle draggable
+                    let drag_handle = ui.dnd_drag_source(item_id, idx, |ui| {
+                        ui.label(egui::RichText::new("☰").weak());
+                    }).response;
+                    
+                    ui.label(egui::RichText::new(char_name).strong());
+                    
+                    ui.add_space(ITEM_SPACING);
+
+                    // Show current binding
+                    let color = if !has_binding {
+                        egui::Color32::from_rgb(150, 150, 150)
+                    } else {
+                        ui.style().visuals.text_color()
+                    };
+                    ui.label(egui::RichText::new(&binding_text).color(color));
+
+                    // Buttons on the right
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Clear button if bound
+                        if has_binding {
+                            if ui.button("✖").clicked() {
+                                profile.character_hotkeys.remove(char_name);
+                                *changed = true;
+                            }
+                        }
+
+                        // Bind/Change button
+                        let button_text = if has_binding {
+                            "🔄 Change"
+                        } else {
+                            "🎹 Bind Key"
+                        };
+
+                        if ui.button(button_text).clicked() {
+                            hotkey_state.start_key_capture_for_character(char_name.clone());
+                        }
+                    });
+                    
+                    drag_handle
+                }).inner;
+
+                // Add separator line between items
+                if idx < char_names.len() - 1 {
+                    ui.separator();
+                }
+
+                // Detect drops onto this item for insertion preview
+                if let (Some(pointer), Some(hovered_payload)) = (
+                    ui.input(|i| i.pointer.interact_pos()),
+                    response.dnd_hover_payload::<usize>(),
+                ) {
+                    let rect = response.rect;
+                    let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+
+                    let insert_idx = if *hovered_payload == idx {
+                        // Dragged onto ourselves - show line at current position
+                        ui.painter().hline(rect.x_range(), rect.center().y, stroke);
+                        idx
+                    } else if pointer.y < rect.center().y {
+                        // Above this item
+                        ui.painter().hline(rect.x_range(), rect.top(), stroke);
+                        idx
+                    } else {
+                        // Below this item
+                        ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
+                        idx + 1
+                    };
+
+                    if let Some(dragged_payload) = response.dnd_release_payload::<usize>() {
+                        // Item was dropped here
+                        from_idx = Some(*dragged_payload);
+                        to_idx = Some(insert_idx);
+                        *changed = true;
+                    }
+                }
+            }
+        });
+
+        // Handle drop onto empty area (append to end)
+        if let Some(dragged_payload) = dropped_payload {
+            from_idx = Some(*dragged_payload);
+            to_idx = Some(char_names.len());
+            *changed = true;
+        }
+
+        // Perform reordering if drag completed
+        if let (Some(from), Some(to)) = (from_idx, to_idx) {
+            if from != to && from < char_names.len() {
+                let char_to_move = char_names.remove(from);
+                let insert_pos = if to > from { to - 1 } else { to };
+                char_names.insert(insert_pos, char_to_move);
+                profile.character_hotkey_order = char_names;
+            }
+        }
+    } else {
+        ui.label(egui::RichText::new("Hotkey capture not available")
+            .weak()
+            .italics());
+    }
+}
+
+fn handle_add_characters_popup(
+    ctx: &egui::Context,
+    profile: &mut Profile,
+    state: &mut CycleOrderSettingsState,
+    changed: &mut bool
+) {
+    egui::Window::new("Add Characters")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
                 ui.label("Select characters to add to cycle order:");
                 ui.add_space(ITEM_SPACING / 2.0);
 
@@ -290,7 +505,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettin
                         for (char_name, selected) in &state.character_selections {
                             if *selected && !profile.hotkey_cycle_group.contains(char_name) {
                                 profile.hotkey_cycle_group.push(char_name.clone());
-                                changed = true;
+                                *changed = true;
                             }
                         }
 
@@ -307,7 +522,4 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut CycleOrderSettin
                     }
                 });
             });
-    }
-
-    changed
 }

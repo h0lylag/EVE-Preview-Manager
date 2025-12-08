@@ -163,6 +163,44 @@ impl CycleState {
         }
     }
 
+    /// Activate specific character by name (per-character hotkey)
+    /// Returns (window, character_name) to activate, or None if character not active
+    /// Updates current_index to maintain consistency with cycle state
+    ///
+    /// # Parameters
+    /// - `character_name`: Character to activate
+    /// - `logged_out_map`: Optional window→last_character mapping for including logged-out windows
+    pub fn activate_character<'a>(&mut self, character_name: &'a str, logged_out_map: Option<&HashMap<Window, String>>) -> Option<(Window, &'a str)> {
+        // Check logged-in characters first
+        if let Some(&window) = self.active_windows.get(character_name) {
+            debug!(character = %character_name, window = window, "Activating logged-in character via per-character hotkey");
+
+            // Update current_index if this character is in config_order
+            if let Some(index) = self.config_order.iter().position(|c| c == character_name) {
+                self.current_index = index;
+            }
+
+            return Some((window, character_name));
+        }
+
+        // If enabled, check for logged-out windows with this character's last identity
+        if let Some(map) = logged_out_map
+            && let Some((&window, _)) = map.iter().find(|(_, last_char)| *last_char == character_name) {
+                debug!(character = %character_name, window = window, "Activating logged-out character via per-character hotkey");
+
+                // Update current_index if this character is in config_order
+                if let Some(index) = self.config_order.iter().position(|c| c == character_name) {
+                    self.current_index = index;
+                }
+
+                return Some((window, character_name));
+            }
+
+        // Character not found or not active
+        debug!(character = %character_name, "Character not active, cannot activate");
+        None
+    }
+
     /// Set current character (called when clicking thumbnail)
     /// Returns true if character exists in config order
     pub fn set_current(&mut self, character_name: &str) -> bool {

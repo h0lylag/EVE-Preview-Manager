@@ -6,10 +6,11 @@ use crate::constants::gui::*;
 use crate::gui::key_capture::{self, CaptureResult, CaptureState};
 use std::sync::mpsc::Receiver;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureTarget {
     Forward,
     Backward,
+    Character(String), // Character name for per-character hotkey
 }
 
 /// State for hotkey settings UI
@@ -26,6 +27,9 @@ pub struct HotkeySettingsState {
     current_capture_state: Option<CaptureState>,
     capture_result: Option<CaptureResult>,
     capture_error: Option<String>,
+    
+    // Per-character hotkey UI state
+    show_character_hotkeys: bool,
 }
 
 impl HotkeySettingsState {
@@ -49,6 +53,7 @@ impl HotkeySettingsState {
             current_capture_state: None,
             capture_result: None,
             capture_error: None,
+            show_character_hotkeys: false,
         }
     }
 
@@ -78,6 +83,12 @@ impl HotkeySettingsState {
         self.capture_result_rx = None;
         self.current_capture_state = None;
         self.capture_result = None;
+    }
+
+    /// Public method for starting character-specific hotkey capture
+    /// Used by cycle_order_settings component's per-character hotkeys tab
+    pub fn start_key_capture_for_character(&mut self, character_name: String) {
+        self.start_key_capture(CaptureTarget::Character(character_name));
     }
 }
 
@@ -287,9 +298,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
             .show(ui.ctx(), |ui| {
 
                 let target_name = match state.capture_target {
-                    Some(CaptureTarget::Forward) => "Forward Cycle",
-                    Some(CaptureTarget::Backward) => "Backward Cycle",
-                    None => "Unknown",
+                    Some(CaptureTarget::Forward) => "Forward Cycle".to_string(),
+                    Some(CaptureTarget::Backward) => "Backward Cycle".to_string(),
+                    Some(CaptureTarget::Character(ref name)) => format!("Character: {}", name),
+                    None => "Unknown".to_string(),
                 };
 
                 ui.label(format!("Binding key for: {}", target_name));
@@ -366,7 +378,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     match result {
                         CaptureResult::Captured(binding) => {
                             let binding_clone = binding.clone();
-                            let target = state.capture_target;
+                            let target = state.capture_target.clone();
 
                             ui.separator();
                             ui.add_space(ITEM_SPACING / 2.0);
@@ -404,15 +416,20 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                                         profile.hotkey_cycle_backward = Some(binding_clone);
                                         changed = true;
                                     }
+                                    Some(CaptureTarget::Character(ref char_name)) => {
+                                        profile.character_hotkeys.insert(char_name.clone(), binding_clone);
+                                        changed = true;
+                                    }
                                     None => {}
                                 }
                                 state.cancel_capture();
                             }
 
-                            if should_retry
-                                && let Some(t) = target {
-                                    state.start_key_capture(t);
+                            if should_retry {
+                                if let Some(ref t) = target {
+                                    state.start_key_capture(t.clone());
                                 }
+                            }
                         }
                         CaptureResult::Cancelled => {
                             // Handled automatically above

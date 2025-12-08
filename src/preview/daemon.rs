@@ -131,24 +131,72 @@ pub fn run_preview_daemon() -> Result<()> {
     
     // Create channel for hotkey thread → main loop
     let (hotkey_tx, hotkey_rx) = mpsc::channel();
-    
-    // Spawn hotkey listener (optional - skip if permissions denied or not configured)
-    let _hotkey_handle = if let (Some(forward_key), Some(backward_key)) =
-        (&daemon_config.profile.hotkey_cycle_forward, &daemon_config.profile.hotkey_cycle_backward)
-    {
+
+    // Build character hotkey list from character_hotkeys HashMap, preserving display order
+    let character_hotkeys: Vec<_> = daemon_config.profile.character_hotkey_order
+        .iter()
+        .filter_map(|char_name| {
+            if let Some(binding) = daemon_config.profile.character_hotkeys.get(char_name) {
+                debug!(
+                    character = %char_name,
+                    binding = %binding.display_name(),
+                    "Loaded per-character hotkey"
+                );
+                Some(binding.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Build hotkey groups: map each unique hotkey binding to ordered list of characters
+    // When multiple characters share a hotkey, pressing it cycles through them
+    let mut hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>> = HashMap::new();
+    let mut hotkey_group_indices: HashMap<crate::config::HotkeyBinding, usize> = HashMap::new();
+
+    for char_name in &daemon_config.profile.character_hotkey_order {
+        if let Some(binding) = daemon_config.profile.character_hotkeys.get(char_name) {
+            hotkey_groups.entry(binding.clone())
+                .or_default()
+                .push(char_name.clone());
+        }
+    }
+
+    info!(
+        unique_hotkeys = hotkey_groups.len(),
+        total_characters = daemon_config.profile.character_hotkey_order.len(),
+        "Built per-character hotkey groups"
+    );
+
+    // Debug: log each hotkey group
+    for (binding, chars) in &hotkey_groups {
+        debug!(
+            binding = %binding.display_name(),
+            characters = ?chars,
+            "Hotkey group"
+        );
+    }
+
+    // Spawn hotkey listener (start if any hotkeys configured: cycle or per-character)
+    let has_cycle_keys = daemon_config.profile.hotkey_cycle_forward.is_some()
+        && daemon_config.profile.hotkey_cycle_backward.is_some();
+    let has_character_hotkeys = !character_hotkeys.is_empty();
+
+    let _hotkey_handle = if has_cycle_keys || has_character_hotkeys {
         if hotkeys::check_permissions() {
             match spawn_listener(
                 hotkey_tx,
-                forward_key.clone(),
-                backward_key.clone(),
+                daemon_config.profile.hotkey_cycle_forward.clone(),
+                daemon_config.profile.hotkey_cycle_backward.clone(),
+                character_hotkeys.clone(),
                 daemon_config.profile.hotkey_input_device.clone(),
             ) {
                 Ok(handle) => {
                     info!(
                         enabled = true,
-                        forward = %forward_key.display_name(),
-                        backward = %backward_key.display_name(),
-                        "Hotkey support enabled with configured bindings"
+                        has_cycle_keys = has_cycle_keys,
+                        has_character_hotkeys = has_character_hotkeys,
+                        "Hotkey support enabled"
                     );
                     Some(handle)
                 }
@@ -163,7 +211,7 @@ pub fn run_preview_daemon() -> Result<()> {
             None
         }
     } else {
-        info!("Hotkey bindings not configured - hotkey support disabled");
+        info!("No hotkeys configured - hotkey support disabled");
         None
     };
     
@@ -281,6 +329,77 @@ pub fn run_preview_daemon() -> Result<()> {
                 let result = match command {
                     CycleCommand::Forward => cycle_state.cycle_forward(logged_out_map),
                     CycleCommand::Backward => cycle_state.cycle_backward(logged_out_map),
+                    CycleCommand::CharacterHotkey(ref binding) => {
+                        debug!(
+                            binding = %binding.display_name(),
+                            "Received per-character hotkey command"
+                        );
+
+                        // Find the group of characters sharing this hotkey
+                        if let Some(char_group) = hotkey_groups.get(binding) {
+                            debug!(
+                                binding = %binding.display_name(),
+                                group = ?char_group,
+                                "Found hotkey group"
+                            );
+                            if char_group.is_empty() {
+                                warn!(binding = %binding.display_name(), "Character hotkey group is empty");
+                                None
+                            } else if char_group.len() == 1 {
+                                // Single character - direct activation
+                                let char_name = &char_group[0];
+                                cycle_state.activate_character(char_name, logged_out_map)
+                            } else {
+                                // Multiple characters share this hotkey - cycle through them
+                                let current_idx = hotkey_group_indices.entry(binding.clone()).or_insert(0);
+
+                                // Find next active window in the cycle group, starting from current position
+                                let mut result = None;
+                                let max_attempts = char_group.len();
+
+                                for _ in 0..max_attempts {
+                                    let char_name = &char_group[*current_idx];
+                                    *current_idx = (*current_idx + 1) % char_group.len();
+
+                                    if let Some(activation_result) = cycle_state.activate_character(char_name, logged_out_map) {
+                                        info!(
+                                            binding = %binding.display_name(),
+                                            character = %char_name,
+                                            group_size = char_group.len(),
+                                            "Per-character hotkey cycling"
+                                        );
+                                        result = Some(activation_result);
+                                        break;
+                                    }
+                                }
+
+                                if result.is_none() {
+                                    warn!(
+                                        binding = %binding.display_name(),
+                                        group_size = char_group.len(),
+                                        "No active windows in character hotkey group"
+                                    );
+                                }
+
+                                result
+                            }
+                        } else {
+                            warn!(
+                                binding = %binding.display_name(),
+                                available_groups = hotkey_groups.len(),
+                                "Character hotkey binding not found in groups - this shouldn't happen!"
+                            );
+                            // Debug: log all available groups for comparison
+                            for (available_binding, _) in &hotkey_groups {
+                                debug!(
+                                    available = %available_binding.display_name(),
+                                    matches = (available_binding == binding),
+                                    "Available hotkey group"
+                                );
+                            }
+                            None
+                        }
+                    }
                 };
 
                 if let Some((window, character_name)) = result {

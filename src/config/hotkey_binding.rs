@@ -2,12 +2,12 @@
 
 use evdev::KeyCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde::de::{self, Visitor};
+use serde::de;
 use std::str::FromStr;
 
 /// A keyboard hotkey binding with modifiers
 /// Serializes to/from object format: {"keys": [...], "source_devices": [...]}
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HotkeyBinding {
     /// evdev key code (e.g., KEY_TAB = 15, KEY_F1 = 59)
     pub key_code: u16,

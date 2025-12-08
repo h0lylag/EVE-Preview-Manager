@@ -14,17 +14,20 @@ use crate::config::HotkeyBinding;
 use crate::constants::{input, paths, permissions};
 use crate::input::device_detection;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleCommand {
     Forward,
     Backward,
+    /// Per-character hotkey pressed - includes the binding for cycle group lookup
+    CharacterHotkey(HotkeyBinding),
 }
 
 /// Spawn background threads to listen for configured hotkeys on input devices (keyboards and mice)
 pub fn spawn_listener(
     sender: Sender<CycleCommand>,
-    forward_key: HotkeyBinding,
-    backward_key: HotkeyBinding,
+    forward_key: Option<HotkeyBinding>,
+    backward_key: Option<HotkeyBinding>,
+    character_hotkeys: Vec<HotkeyBinding>,
     selected_device_id: Option<String>,
 ) -> Result<Vec<thread::JoinHandle<()>>> {
     // Get all device paths for cross-device modifier state queries
@@ -50,10 +53,17 @@ pub fn spawn_listener(
             // Auto-detect mode: use devices from the hotkey bindings
             info!("Auto-detect mode: using devices from hotkey bindings");
 
-            // Collect all unique device IDs from both bindings
+            // Collect all unique device IDs from all bindings (cycle + per-character)
             let mut required_devices = std::collections::HashSet::new();
-            required_devices.extend(forward_key.source_devices.iter().cloned());
-            required_devices.extend(backward_key.source_devices.iter().cloned());
+            if let Some(ref fwd) = forward_key {
+                required_devices.extend(fwd.source_devices.iter().cloned());
+            }
+            if let Some(ref bwd) = backward_key {
+                required_devices.extend(bwd.source_devices.iter().cloned());
+            }
+            for binding in &character_hotkeys {
+                required_devices.extend(binding.source_devices.iter().cloned());
+            }
 
             if required_devices.is_empty() {
                 warn!("Auto-detect mode but no source devices found in bindings, listening on all devices");
@@ -108,22 +118,38 @@ pub fn spawn_listener(
     // Share all device paths so each listener can query modifier state from all devices
     let all_device_paths = Arc::new(all_device_paths);
 
-    info!(
-        forward = %forward_key.display_name(),
-        backward = %backward_key.display_name(),
-        device_count = devices.len(),
-        "Starting hotkey listeners with configured bindings"
-    );
+    let cycle_configured = forward_key.is_some() && backward_key.is_some();
+    let has_character_hotkeys = !character_hotkeys.is_empty();
+
+    if cycle_configured {
+        info!(
+            forward = %forward_key.as_ref().unwrap().display_name(),
+            backward = %backward_key.as_ref().unwrap().display_name(),
+            character_hotkey_count = character_hotkeys.len(),
+            device_count = devices.len(),
+            "Starting hotkey listeners with cycle and per-character bindings"
+        );
+    } else if has_character_hotkeys {
+        info!(
+            character_hotkey_count = character_hotkeys.len(),
+            device_count = devices.len(),
+            "Starting hotkey listeners with per-character bindings only"
+        );
+    } else {
+        warn!("No hotkeys configured - hotkey listener will not be started");
+        return Ok(Vec::new());
+    }
 
     for (device, device_path) in devices {
         let sender = sender.clone();
         let forward_key = forward_key.clone();
         let backward_key = backward_key.clone();
+        let character_hotkeys = character_hotkeys.clone();
         let all_device_paths = Arc::clone(&all_device_paths);
 
         let handle = thread::spawn(move || {
             info!(device = ?device.name(), path = %device_path.display(), "Hotkey listener started");
-            if let Err(e) = listen_for_hotkeys(device, sender, forward_key, backward_key, all_device_paths) {
+            if let Err(e) = listen_for_hotkeys(device, sender, forward_key, backward_key, character_hotkeys, all_device_paths) {
                 error!(error = %e, "Hotkey listener error");
             }
         });
@@ -137,8 +163,9 @@ pub fn spawn_listener(
 fn listen_for_hotkeys(
     mut device: Device,
     sender: Sender<CycleCommand>,
-    forward_key: HotkeyBinding,
-    backward_key: HotkeyBinding,
+    forward_key: Option<HotkeyBinding>,
+    backward_key: Option<HotkeyBinding>,
+    character_hotkeys: Vec<HotkeyBinding>,
     all_device_paths: Arc<Vec<std::path::PathBuf>>,
 ) -> Result<()> {
     loop {
@@ -159,8 +186,14 @@ fn listen_for_hotkeys(
             debug!(key_code = key_code, value = event.value(), "Key event");
 
             // Collect non-modifier key presses that might be hotkeys
-            if pressed && (key_code == forward_key.key_code || key_code == backward_key.key_code) {
-                potential_hotkey_presses.push(key_code);
+            if pressed {
+                let is_cycle_key = forward_key.as_ref().map_or(false, |fwd| fwd.key_code == key_code)
+                    || backward_key.as_ref().map_or(false, |bwd| bwd.key_code == key_code);
+                let is_character_key = character_hotkeys.iter().any(|hk| hk.key_code == key_code);
+
+                if is_cycle_key || is_character_key {
+                    potential_hotkey_presses.push(key_code);
+                }
             }
         }
 
@@ -174,32 +207,58 @@ fn listen_for_hotkeys(
             let mut super_pressed = false;
 
             for device_path in all_device_paths.iter() {
-                if let Ok(dev) = Device::open(device_path) {
-                    if let Ok(key_state) = dev.get_key_state() {
-                        ctrl_pressed |= key_state.contains(KeyCode(29)) || key_state.contains(KeyCode(97));
-                        shift_pressed |= key_state.contains(KeyCode(input::KEY_LEFTSHIFT))
-                            || key_state.contains(KeyCode(input::KEY_RIGHTSHIFT));
-                        alt_pressed |= key_state.contains(KeyCode(56)) || key_state.contains(KeyCode(100));
-                        super_pressed |= key_state.contains(KeyCode(125)) || key_state.contains(KeyCode(126));
+                if let Ok(dev) = Device::open(device_path)
+                    && let Ok(key_state) = dev.get_key_state() {
+                    ctrl_pressed |= key_state.contains(KeyCode(29)) || key_state.contains(KeyCode(97));
+                    shift_pressed |= key_state.contains(KeyCode(input::KEY_LEFTSHIFT))
+                        || key_state.contains(KeyCode(input::KEY_RIGHTSHIFT));
+                    alt_pressed |= key_state.contains(KeyCode(56)) || key_state.contains(KeyCode(100));
+                    super_pressed |= key_state.contains(KeyCode(125)) || key_state.contains(KeyCode(126));
+                }
+            }
+
+            // Check cycle hotkeys first (Forward/Backward take priority)
+            let mut handled = false;
+
+            if let Some(ref fwd) = forward_key {
+                if fwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                    info!(
+                        binding = %fwd.display_name(),
+                        "Forward hotkey pressed, sending command"
+                    );
+                    sender.send(CycleCommand::Forward)
+                        .context("Failed to send cycle command")?;
+                    handled = true;
+                }
+            }
+
+            if !handled {
+                if let Some(ref bwd) = backward_key {
+                    if bwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                        info!(
+                            binding = %bwd.display_name(),
+                            "Backward hotkey pressed, sending command"
+                        );
+                        sender.send(CycleCommand::Backward)
+                            .context("Failed to send cycle command")?;
+                        handled = true;
                     }
                 }
             }
 
-            if forward_key.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
-                info!(
-                    binding = %forward_key.display_name(),
-                    "Forward hotkey pressed, sending command"
-                );
-                sender.send(CycleCommand::Forward)
-                    .context("Failed to send cycle command")?;
-            }
-            else if backward_key.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
-                info!(
-                    binding = %backward_key.display_name(),
-                    "Backward hotkey pressed, sending command"
-                );
-                sender.send(CycleCommand::Backward)
-                    .context("Failed to send cycle command")?;
+            if !handled {
+                // Check per-character hotkeys
+                for char_hotkey in &character_hotkeys {
+                    if char_hotkey.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                        info!(
+                            binding = %char_hotkey.display_name(),
+                            "Per-character hotkey pressed, sending command"
+                        );
+                        sender.send(CycleCommand::CharacterHotkey(char_hotkey.clone()))
+                            .context("Failed to send character hotkey command")?;
+                        break; // Only send one command per keypress
+                    }
+                }
             }
         }
     }
