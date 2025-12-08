@@ -133,49 +133,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         ui.label(egui::RichText::new("Hotkey Settings").strong());
         ui.add_space(ITEM_SPACING);
 
-        // Hotkey Bindings
-        ui.label("Configure keys for cycling through characters:");
-        ui.add_space(ITEM_SPACING / 2.0);
-
-        // Forward key binding
-        ui.horizontal(|ui| {
-            ui.label("Forward cycle:");
-            let binding_text = profile.hotkey_cycle_forward.as_ref()
-                .map(|b| b.display_name())
-                .unwrap_or_else(|| "Not set".to_string());
-            let color = if profile.hotkey_cycle_forward.is_none() {
-                egui::Color32::from_rgb(200, 100, 100)
-            } else {
-                ui.style().visuals.text_color()
-            };
-            ui.label(egui::RichText::new(binding_text).strong().color(color));
-            if ui.button("🎹 Bind Key").clicked() {
-                state.start_key_capture(CaptureTarget::Forward);
-            }
-        });
-
-        ui.add_space(ITEM_SPACING / 2.0);
-
-        // Backward key binding
-        ui.horizontal(|ui| {
-            ui.label("Backward cycle:");
-            let binding_text = profile.hotkey_cycle_backward.as_ref()
-                .map(|b| b.display_name())
-                .unwrap_or_else(|| "Not set".to_string());
-            let color = if profile.hotkey_cycle_backward.is_none() {
-                egui::Color32::from_rgb(200, 100, 100)
-            } else {
-                ui.style().visuals.text_color()
-            };
-            ui.label(egui::RichText::new(binding_text).strong().color(color));
-            if ui.button("🎹 Bind Key").clicked() {
-                state.start_key_capture(CaptureTarget::Backward);
-            }
-        });
-
-        ui.add_space(ITEM_SPACING);
-
-        // Input device selector
+        // Input device selector - moved to top
         ui.label("Input device to monitor:");
         ui.add_space(ITEM_SPACING / 2.0);
 
@@ -224,33 +182,90 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         ui.separator();
         ui.add_space(ITEM_SPACING);
 
-        // Require EVE focus checkbox
-        if ui.checkbox(&mut profile.hotkey_require_eve_focus,
-            "Require EVE window focus").changed() {
-            changed = true;
+        // Check if device is selected - disable rest of settings if not
+        let device_selected = profile.hotkey_input_device.is_some();
+
+        ui.add_enabled_ui(device_selected, |ui| {
+            // Hotkey Bindings
+            ui.label("Configure keys for cycling through characters:");
+            ui.add_space(ITEM_SPACING / 2.0);
+
+            // Forward key binding
+            ui.horizontal(|ui| {
+                ui.label("Forward cycle:");
+                let binding_text = profile.hotkey_cycle_forward.as_ref()
+                    .map(|b| b.display_name())
+                    .unwrap_or_else(|| "Not set".to_string());
+                let color = if profile.hotkey_cycle_forward.is_none() {
+                    egui::Color32::from_rgb(200, 100, 100)
+                } else {
+                    ui.style().visuals.text_color()
+                };
+                ui.label(egui::RichText::new(binding_text).strong().color(color));
+                if ui.button("🎹 Bind Key").clicked() {
+                    state.start_key_capture(CaptureTarget::Forward);
+                }
+            });
+
+            ui.add_space(ITEM_SPACING / 2.0);
+
+            // Backward key binding
+            ui.horizontal(|ui| {
+                ui.label("Backward cycle:");
+                let binding_text = profile.hotkey_cycle_backward.as_ref()
+                    .map(|b| b.display_name())
+                    .unwrap_or_else(|| "Not set".to_string());
+                let color = if profile.hotkey_cycle_backward.is_none() {
+                    egui::Color32::from_rgb(200, 100, 100)
+                } else {
+                    ui.style().visuals.text_color()
+                };
+                ui.label(egui::RichText::new(binding_text).strong().color(color));
+                if ui.button("🎹 Bind Key").clicked() {
+                    state.start_key_capture(CaptureTarget::Backward);
+                }
+            });
+
+            ui.add_space(ITEM_SPACING);
+            ui.separator();
+            ui.add_space(ITEM_SPACING);
+
+            // Require EVE focus checkbox
+            if ui.checkbox(&mut profile.hotkey_require_eve_focus,
+                "Require EVE window focus").changed() {
+                changed = true;
+            }
+
+            ui.label(egui::RichText::new(
+                "When enabled, cycle hotkeys only work when an EVE window is focused")
+                .small()
+                .weak());
+
+            ui.add_space(ITEM_SPACING);
+
+            // Logged-out cycling checkbox
+            if ui.checkbox(
+                &mut profile.hotkey_logged_out_cycle,
+                "Include logged-out characters in cycle"
+            ).changed() {
+                changed = true;
+            }
+
+            ui.add_space(ITEM_SPACING / 4.0);
+
+            ui.label(egui::RichText::new(
+                "When enabled, characters that log out will remain in the cycle using their last position")
+                .small()
+                .weak());
+        });
+
+        // Show message when device not selected
+        if !device_selected {
+            ui.add_space(ITEM_SPACING);
+            ui.label(egui::RichText::new("Select an input device above to configure hotkeys")
+                .italics()
+                .weak());
         }
-
-        ui.label(egui::RichText::new(
-            "When enabled, cycle hotkeys only work when an EVE window is focused")
-            .small()
-            .weak());
-
-        ui.add_space(ITEM_SPACING);
-
-        // Logged-out cycling checkbox
-        if ui.checkbox(
-            &mut profile.hotkey_logged_out_cycle,
-            "Include logged-out characters in cycle"
-        ).changed() {
-            changed = true;
-        }
-
-        ui.add_space(ITEM_SPACING / 4.0);
-
-        ui.label(egui::RichText::new(
-            "When enabled, characters that log out will remain in the cycle using their last position")
-            .small()
-            .weak());
     });
 
     // Key Capture Dialog
@@ -279,8 +294,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                             ui.add_space(ITEM_SPACING);
                             ui.label(egui::RichText::new(&capture_state.description)
                                 .size(20.0)
-                                .strong()
-                                .color(egui::Color32::from_rgb(0, 200, 0)));
+                                .strong());
                             ui.add_space(ITEM_SPACING);
                         });
                     });
@@ -309,18 +323,28 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
 
                             let mut should_accept = false;
                             let mut should_retry = false;
+                            let mut should_cancel = false;
+
+                            // Check for Escape key to cancel at confirmation step
+                            ui.input(|i| {
+                                if i.key_pressed(egui::Key::Escape) {
+                                    should_cancel = true;
+                                }
+                            });
 
                             ui.horizontal(|ui| {
-                                if ui.button("✓ Accept").clicked() {
+                                if ui.button("💾 Accept").clicked() {
                                     should_accept = true;
                                 }
 
-                                if ui.button("✗ Try Again").clicked() {
+                                if ui.button("⟲ Try Again").clicked() {
                                     should_retry = true;
                                 }
                             });
 
-                            if should_accept {
+                            if should_cancel {
+                                state.cancel_capture();
+                            } else if should_accept {
                                 match target {
                                     Some(CaptureTarget::Forward) => {
                                         profile.hotkey_cycle_forward = Some(binding_clone);
@@ -361,7 +385,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                 } else {
                     ui.separator();
                     ui.add_space(ITEM_SPACING / 2.0);
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("✖ Cancel").clicked() {
                         state.cancel_capture();
                     }
                 }

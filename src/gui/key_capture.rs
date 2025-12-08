@@ -170,14 +170,7 @@ fn capture_key_blocking(state_tx: Sender<CaptureState>) -> Result<CaptureResult>
 
                         debug!(key_code = key_code, value = event_value, "Key event during capture");
 
-                        // Check if it's Escape (cancel) - only on initial press
-                        if key_code == 1 && is_press {
-                            // KEY_ESC = 1
-                            info!("Key capture cancelled by user (Escape)");
-                            return Ok(CaptureResult::Cancelled);
-                        }
-
-                        // Update modifier state
+                        // Update modifier state first
                         // For modifiers: set true on press/repeat, false on release
                         let is_modifier = match key_code {
                             29 | 97 => {
@@ -203,8 +196,22 @@ fn capture_key_blocking(state_tx: Sender<CaptureState>) -> Result<CaptureResult>
                             _ => false,
                         };
 
-                        // If it's a non-modifier key press (not repeat!), capture it
+                        // If it's a non-modifier key press (not repeat!), process it
                         if !is_modifier && is_press {
+                            // Check if it's Escape (cancel)
+                            if key_code == 1 {
+                                // KEY_ESC = 1
+                                info!("Key capture cancelled by user (Escape)");
+                                return Ok(CaptureResult::Cancelled);
+                            }
+
+                            // Block left and right mouse buttons (they interfere with UI interaction)
+                            if key_code == input::BTN_LEFT || key_code == input::BTN_RIGHT {
+                                debug!("Ignoring mouse button {} (not allowed as hotkey)", key_code);
+                                continue;
+                            }
+
+                            // Otherwise, capture the key
                             state.key_code = Some(key_code);
                             state.update_description();
                             let _ = state_tx.send(state.clone());

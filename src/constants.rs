@@ -43,6 +43,8 @@ pub mod input {
 
     /// Button code for left mouse button - used to identify mouse devices (BTN_LEFT = 0x110)
     pub const BTN_LEFT: u16 = 272;
+    /// Button code for right mouse button (BTN_RIGHT = 0x111)
+    pub const BTN_RIGHT: u16 = 273;
 }
 
 /// Mouse button constants
