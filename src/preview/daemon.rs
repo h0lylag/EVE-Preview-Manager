@@ -178,10 +178,6 @@ pub fn run_preview_daemon() -> Result<()> {
         );
     }
 
-    // Track the last-activated character for each multi-character hotkey
-    // Maps HotkeyBinding → character_name of last activated character in that group
-    let mut hotkey_last_character: HashMap<crate::config::HotkeyBinding, String> = HashMap::new();
-
     // Spawn hotkey listener (start if any hotkeys configured: cycle or per-character)
     let has_cycle_keys = daemon_config.profile.hotkey_cycle_forward.is_some()
         && daemon_config.profile.hotkey_cycle_backward.is_some();
