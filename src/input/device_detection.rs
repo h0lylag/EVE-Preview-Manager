@@ -5,50 +5,10 @@
 
 use anyhow::{Context, Result};
 use evdev::{Device, KeyCode};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use crate::constants::{input, paths, permissions};
-
-/// Find all input devices (keyboards and mice)
-/// Returns devices without their paths
-pub fn find_all_input_devices() -> Result<Vec<Device>> {
-    info!(path = %paths::DEV_INPUT, "Scanning for input devices...");
-
-    let mut devices = Vec::new();
-
-    for entry in std::fs::read_dir(paths::DEV_INPUT)
-        .context(format!("Failed to read {} directory", paths::DEV_INPUT))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-
-        if let Ok(device) = Device::open(&path)
-            && let Some(device_type) = classify_input_device(&device) {
-                let key_count = device.supported_keys().map(|k| k.iter().count()).unwrap_or(0);
-                info!(
-                    device_path = %path.display(),
-                    name = ?device.name(),
-                    device_type = device_type,
-                    key_count = key_count,
-                    "Found input device"
-                );
-                devices.push(device);
-            }
-    }
-
-    if devices.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No input device found. Ensure you're in '{}' group:\n{}\nThen log out and back in.",
-            permissions::INPUT_GROUP,
-            permissions::ADD_TO_INPUT_GROUP
-        ));
-    }
-
-    info!(count = devices.len(), "Found input devices");
-
-    Ok(devices)
-}
 
 /// Find all input devices with their device paths
 /// Returns devices along with their /dev/input paths (needed for hotkey listener)
@@ -113,7 +73,7 @@ fn classify_input_device(device: &Device) -> Option<&'static str> {
 
 /// Extract device ID from a /dev/input/eventX path by resolving through /dev/input/by-id
 /// Returns a human-readable device ID (e.g., "usb-Logitech_G502-event-kbd")
-pub fn extract_device_id(event_path: &PathBuf) -> String {
+pub fn extract_device_id(event_path: &Path) -> String {
     let by_id_path = "/dev/input/by-id";
     
     // Try to find this device in /dev/input/by-id/
@@ -125,15 +85,14 @@ pub fn extract_device_id(event_path: &PathBuf) -> String {
                 } else {
                     std::path::Path::new(by_id_path).join(&target)
                 };
-                
+
                 // Canonicalize both paths for comparison
-                if let (Ok(resolved_canonical), Ok(event_canonical)) = 
-                    (resolved.canonicalize(), event_path.canonicalize()) {
-                    if resolved_canonical == event_canonical {
-                        // Found the matching by-id symlink
-                        if let Some(name) = entry.file_name().to_str() {
-                            return name.to_string();
-                        }
+                if let (Ok(resolved_canonical), Ok(event_canonical)) =
+                    (resolved.canonicalize(), event_path.canonicalize())
+                    && resolved_canonical == event_canonical {
+                    // Found the matching by-id symlink
+                    if let Some(name) = entry.file_name().to_str() {
+                        return name.to_string();
                     }
                 }
             }

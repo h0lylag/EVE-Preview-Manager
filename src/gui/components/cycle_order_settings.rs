@@ -3,7 +3,6 @@
 use eframe::egui;
 use crate::config::profile::Profile;
 use crate::constants::gui::*;
-use crate::gui::key_capture::CaptureResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditorMode {
@@ -186,11 +185,10 @@ fn render_unified_cycle_group_tab(
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 // Delete hotkey button
                                 let has_binding = profile.character_hotkeys.contains_key(character);
-                                if has_binding {
-                                    if ui.small_button("✖").on_hover_text("Remove hotkey").clicked() {
-                                        profile.character_hotkeys.remove(character);
-                                        *changed = true;
-                                    }
+                                if has_binding
+                                    && ui.small_button("✖").on_hover_text("Remove hotkey").clicked() {
+                                    profile.character_hotkeys.remove(character);
+                                    *changed = true;
                                 }
 
                                 // Bind button
@@ -287,118 +285,10 @@ fn render_unified_cycle_group_tab(
             }
         }
 
-    // Handle hotkey capture results (outside the drag-drop EditorMode match)
-    if hotkey_state.has_capture_result() {
-        if let Some((target, result)) = hotkey_state.take_capture_result() {
-            match result {
-                CaptureResult::Captured(binding) => {
-                    profile.character_hotkeys.insert(target, binding);
-                    *changed = true;
-                }
-                CaptureResult::Cancelled => {
-                    // User cancelled, do nothing
-                }
-                CaptureResult::Timeout => {
-                    // Timeout occurred, do nothing
-                }
-                CaptureResult::Error(_) => {
-                    // Error occurred, do nothing (error was already displayed)
-                }
-            }
-        }
-    }
-
     ui.add_space(ITEM_SPACING / 2.0);
 
     ui.label(egui::RichText::new(
         format!("Current cycle order: {} character(s)", profile.hotkey_cycle_group.len()))
         .small()
         .weak());
-}
-
-fn handle_add_characters_popup(
-    ctx: &egui::Context,
-    profile: &mut Profile,
-    state: &mut CycleOrderSettingsState,
-    changed: &mut bool
-) {
-    egui::Window::new("Add Characters")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-                ui.label("Select characters to add to cycle order:");
-                ui.add_space(ITEM_SPACING / 2.0);
-
-                // Select All / None toggle
-                ui.horizontal(|ui| {
-                    let all_selected = state.character_selections.values().all(|&v| v);
-                    let any_selected = state.character_selections.values().any(|&v| v);
-
-                    if ui.button(if all_selected { "Deselect All" } else { "Select All" }).clicked() {
-                        let new_state = !all_selected;
-                        for selected in state.character_selections.values_mut() {
-                            *selected = new_state;
-                        }
-                    }
-
-                    if any_selected {
-                        ui.label(format!("({} selected)", state.character_selections.values().filter(|&&v| v).count()));
-                    }
-                });
-
-                ui.add_space(ITEM_SPACING / 2.0);
-                ui.separator();
-                ui.add_space(ITEM_SPACING / 2.0);
-
-                // Scrollable list of checkboxes
-                egui::ScrollArea::vertical()
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        // Sort character names for consistent display
-                        let mut char_names: Vec<_> = state.character_selections.keys().cloned().collect();
-                        char_names.sort();
-
-                        for char_name in char_names {
-                            if let Some(selected) = state.character_selections.get_mut(&char_name) {
-                                // Show if already in cycle group
-                                let already_in_cycle = profile.hotkey_cycle_group.contains(&char_name);
-                                let label = if already_in_cycle {
-                                    format!("{} (already in cycle)", char_name)
-                                } else {
-                                    char_name.clone()
-                                };
-
-                                ui.checkbox(selected, label);
-                            }
-                        }
-                    });
-
-                ui.add_space(ITEM_SPACING);
-                ui.separator();
-
-                // OK and Cancel buttons
-                ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() {
-                        // Add selected characters that aren't already in cycle group
-                        for (char_name, selected) in &state.character_selections {
-                            if *selected && !profile.hotkey_cycle_group.contains(char_name) {
-                                profile.hotkey_cycle_group.push(char_name.clone());
-                                *changed = true;
-                            }
-                        }
-
-                        // Update text buffer if in text mode
-                        if state.editor_mode == EditorMode::TextEdit {
-                            state.load_from_profile(profile);
-                        }
-
-                        state.show_add_characters_popup = false;
-                    }
-
-                    if ui.button("Cancel").clicked() {
-                        state.show_add_characters_popup = false;
-                    }
-                });
-            });
 }

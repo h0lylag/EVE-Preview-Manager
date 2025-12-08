@@ -187,8 +187,8 @@ fn listen_for_hotkeys(
 
             // Collect non-modifier key presses that might be hotkeys
             if pressed {
-                let is_cycle_key = forward_key.as_ref().map_or(false, |fwd| fwd.key_code == key_code)
-                    || backward_key.as_ref().map_or(false, |bwd| bwd.key_code == key_code);
+                let is_cycle_key = forward_key.as_ref().is_some_and(|fwd| fwd.key_code == key_code)
+                    || backward_key.as_ref().is_some_and(|bwd| bwd.key_code == key_code);
                 let is_character_key = character_hotkeys.iter().any(|hk| hk.key_code == key_code);
 
                 if is_cycle_key || is_character_key {
@@ -220,30 +220,27 @@ fn listen_for_hotkeys(
             // Check cycle hotkeys first (Forward/Backward take priority)
             let mut handled = false;
 
-            if let Some(ref fwd) = forward_key {
-                if fwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
-                    info!(
-                        binding = %fwd.display_name(),
-                        "Forward hotkey pressed, sending command"
-                    );
-                    sender.send(CycleCommand::Forward)
-                        .context("Failed to send cycle command")?;
-                    handled = true;
-                }
+            if let Some(ref fwd) = forward_key
+                && fwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                info!(
+                    binding = %fwd.display_name(),
+                    "Forward hotkey pressed, sending command"
+                );
+                sender.send(CycleCommand::Forward)
+                    .context("Failed to send cycle command")?;
+                handled = true;
             }
 
-            if !handled {
-                if let Some(ref bwd) = backward_key {
-                    if bwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
-                        info!(
-                            binding = %bwd.display_name(),
-                            "Backward hotkey pressed, sending command"
-                        );
-                        sender.send(CycleCommand::Backward)
-                            .context("Failed to send cycle command")?;
-                        handled = true;
-                    }
-                }
+            if !handled
+                && let Some(ref bwd) = backward_key
+                && bwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                info!(
+                    binding = %bwd.display_name(),
+                    "Backward hotkey pressed, sending command"
+                );
+                sender.send(CycleCommand::Backward)
+                    .context("Failed to send cycle command")?;
+                handled = true;
             }
 
             if !handled {

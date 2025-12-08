@@ -27,9 +27,6 @@ pub struct HotkeySettingsState {
     current_capture_state: Option<CaptureState>,
     capture_result: Option<CaptureResult>,
     capture_error: Option<String>,
-    
-    // Per-character hotkey UI state
-    show_character_hotkeys: bool,
 }
 
 impl HotkeySettingsState {
@@ -53,7 +50,6 @@ impl HotkeySettingsState {
             current_capture_state: None,
             capture_result: None,
             capture_error: None,
-            show_character_hotkeys: false,
         }
     }
 
@@ -97,26 +93,6 @@ impl HotkeySettingsState {
             target == character_name && self.show_key_capture_dialog
         } else {
             false
-        }
-    }
-
-    /// Check if there's a capture result ready
-    pub fn has_capture_result(&self) -> bool {
-        self.capture_result.is_some() && self.capture_target.is_some()
-    }
-
-    /// Take the capture result, clearing it from state
-    /// Returns (character_name, result) if result was for a character
-    pub fn take_capture_result(&mut self) -> Option<(String, CaptureResult)> {
-        if let (Some(CaptureTarget::Character(char_name)), Some(result)) =
-            (self.capture_target.take(), self.capture_result.take())
-        {
-            Some((char_name, result))
-        } else {
-            // Clear state if not a character target
-            self.capture_target = None;
-            self.capture_result = None;
-            None
         }
     }
 }
@@ -356,28 +332,20 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
 
                 // Reserve space for device list (shown after capture)
                 // This prevents the modal from shifting when devices are displayed
-                if let Some(ref result) = state.capture_result {
-                    if let CaptureResult::Captured(binding) = result {
-                        if !binding.source_devices.is_empty() {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.label(egui::RichText::new("Detected on:").weak().small());
-                            for device_id in &binding.source_devices {
-                                // Format device ID to be more readable
-                                let friendly_device = device_id
-                                    .replace("-event-kbd", " (Keyboard)")
-                                    .replace("-event-mouse", " (Mouse)")
-                                    .replace("_", " ")
-                                    .replace("-", " ");
-                                ui.label(egui::RichText::new(format!("  • {}", friendly_device)).weak().small());
-                            }
-                            ui.spacing_mut().item_spacing.y = 4.0;
-                        } else {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.label("");
-                            ui.label("");
-                            ui.label("");
-                            ui.spacing_mut().item_spacing.y = 4.0;
+                if let Some(CaptureResult::Captured(binding)) = &state.capture_result {
+                    if !binding.source_devices.is_empty() {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(egui::RichText::new("Detected on:").weak().small());
+                        for device_id in &binding.source_devices {
+                            // Format device ID to be more readable
+                            let friendly_device = device_id
+                                .replace("-event-kbd", " (Keyboard)")
+                                .replace("-event-mouse", " (Mouse)")
+                                .replace("_", " ")
+                                .replace("-", " ");
+                            ui.label(egui::RichText::new(format!("  • {}", friendly_device)).weak().small());
                         }
+                        ui.spacing_mut().item_spacing.y = 4.0;
                     } else {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.label("");
@@ -454,10 +422,9 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                                 state.cancel_capture();
                             }
 
-                            if should_retry {
-                                if let Some(ref t) = target {
-                                    state.start_key_capture(t.clone());
-                                }
+                            if should_retry
+                                && let Some(ref t) = target {
+                                state.start_key_capture(t.clone());
                             }
                         }
                         CaptureResult::Cancelled => {

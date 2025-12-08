@@ -390,7 +390,7 @@ pub fn run_preview_daemon() -> Result<()> {
                                 "Character hotkey binding not found in groups - this shouldn't happen!"
                             );
                             // Debug: log all available groups for comparison
-                            for (available_binding, _) in &hotkey_groups {
+                            for available_binding in hotkey_groups.keys() {
                                 debug!(
                                     available = %available_binding.display_name(),
                                     matches = (available_binding == binding),
