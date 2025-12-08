@@ -704,16 +704,9 @@ impl eframe::App for ManagerApp {
             (content_rect.width() as u16, content_rect.height() as u16)
         };
 
-        // Update config if size changed
+        // Update config if size changed (will be saved on exit)
         if new_width > 0 && new_height > 0
             && (new_width != self.config.global.window_width || new_height != self.config.global.window_height) {
-            info!(
-                old_width = self.config.global.window_width,
-                old_height = self.config.global.window_height,
-                new_width = new_width,
-                new_height = new_height,
-                "Window size changed"
-            );
             self.config.global.window_width = new_width;
             self.config.global.window_height = new_height;
         }
@@ -758,9 +751,13 @@ impl eframe::App for ManagerApp {
             error!(error = ?err, "Failed to stop daemon during shutdown");
         }
 
-        // Note: Window geometry is saved when changed via save_config()
-        // Thumbnail positions are saved by the daemon when dragged (auto-save)
-        // No need to save on exit - prevents race conditions with daemon writes
+        // Save window geometry on exit (avoids flooding disk during resize drag)
+        // Use simple config save since daemon is stopped (no merge needed)
+        if let Err(err) = self.config.save_with_strategy(SaveStrategy::PreserveCharacterPositions) {
+            error!(error = ?err, "Failed to save window geometry on exit");
+        } else {
+            info!("Window geometry saved on exit");
+        }
 
         // Signal tray thread to shutdown
         #[cfg(target_os = "linux")]
