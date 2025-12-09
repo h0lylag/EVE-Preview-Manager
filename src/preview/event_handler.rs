@@ -118,13 +118,19 @@ fn handle_destroy_notify(
 }
 
 /// Handle FocusIn events - update focused state and visibility
-#[tracing::instrument(skip(ctx, eves))]
+#[tracing::instrument(skip(ctx, eves, cycle_state))]
 fn handle_focus_in(
     ctx: &AppContext,
     eves: &mut HashMap<Window, Thumbnail>,
     event: FocusInEvent,
+    cycle_state: &mut CycleState,
 ) -> Result<()> {
     debug!(window = event.event, "FocusIn received");
+
+    // Sync cycle state with the focused window
+    if cycle_state.set_current_by_window(event.event) {
+        debug!(window = event.event, "Synced cycle state to focused window");
+    }
     if let Some(thumbnail) = eves.get_mut(&event.event) {
         // Transition to focused normal state (from minimized or unfocused)
         thumbnail.state = ThumbnailState::Normal { focused: true };
@@ -426,7 +432,7 @@ pub fn handle_event<'a>(
         DamageNotify(event) => handle_damage_notify(ctx, eves, event),
         CreateNotify(event) => handle_create_notify(ctx, daemon_config, eves, event, session_state, cycle_state),
         DestroyNotify(event) => handle_destroy_notify(eves, event, session_state, cycle_state),
-        Event::FocusIn(event) => handle_focus_in(ctx, eves, event),
+        Event::FocusIn(event) => handle_focus_in(ctx, eves, event, cycle_state),
         Event::FocusOut(event) => handle_focus_out(ctx, eves, event),
         Event::ButtonPress(event) => handle_button_press(ctx, eves, event, cycle_state),
         Event::ButtonRelease(event) => handle_button_release(ctx, daemon_config, eves, event, session_state),

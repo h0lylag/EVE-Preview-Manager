@@ -35,7 +35,8 @@ impl CycleState {
         self.active_windows
             .insert(character_name.clone(), window);
 
-        // Only characters in cycle_group can be cycled via hotkeys
+        // Only characters in cycle_group can be cycled via hotkeys.
+        // Characters not in the explicit configuration are ignored for cycling.
     }
 
     /// Remove window (called from DestroyNotify)
@@ -212,6 +213,16 @@ impl CycleState {
             warn!(character = %character_name, "Character not in config order");
             false
         }
+    }
+
+    /// Set current cycle position based on focused window
+    /// Returns true if window was found and state updated
+    pub fn set_current_by_window(&mut self, window: Window) -> bool {
+        if let Some((character_name, _)) = self.active_windows.iter().find(|&(_, &w)| w == window) {
+            let character_name = character_name.clone();
+            return self.set_current(&character_name);
+        }
+        false
     }
 
     /// Clamp index to valid range after removing characters
