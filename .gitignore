@@ -1,4 +1,5 @@
 .github/*.md
+.agent/
 CLAUDE.md
 target/
 dist/
