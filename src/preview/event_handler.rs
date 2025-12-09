@@ -320,6 +320,7 @@ fn handle_button_release(
     }
     
     // After releasing mutable borrow, optionally minimize other EVE clients
+    // This implements the "minimize on switch" feature to keep the workspace clean
     if is_left_click
         && ctx.daemon_config.profile.client_minimize_on_switch
         && let Some(clicked_src) = clicked_src
@@ -529,11 +530,10 @@ pub fn handle_event(
         Event::ConfigureNotify(event) => {
             // Update cached position if window manager moves the thumbnail
             if let Some(_thumbnail) = ctx.eve_clients.get_mut(&event.window) {
-                // WARNING: Do NOT update current_position from ConfigureNotify events.
-                // Depending on the WM and window type (override-redirect), coordinates might be
-                // relative to a parent frame (e.g. 0,0) instead of absolute root coordinates.
-                // Since we manage position explicitly via reposition(), we trust our own state
-                // more than these events for hit-testing.
+                // WARNING: We ignore ConfigureNotify position updates to prevent feedback loops.
+                // We are the authority on thumbnail position; the Window Manager might send us weird
+                // coordinates (e.g. relative to parent frame) that would corrupt our state if trusted blindly.
+                // We only update position via explicit user drag actions.
                 /*
                 // Only update if position actually changed
                 if thumbnail.current_position.x != event.x || thumbnail.current_position.y != event.y {

@@ -25,7 +25,9 @@ impl ProfileSelector {
         }
     }
 
-    /// Clear any pending profile selection (called when profile is switched externally)
+    /// Clear any pending profile selection.
+    /// This is called when a profile switch is confirmed, or when the tray icon triggers an external profile switch,
+    /// ensuring the GUI dropdown state remains consistent with the active config.
     pub fn clear_pending(&mut self) {
         self.pending_profile_idx = None;
     }

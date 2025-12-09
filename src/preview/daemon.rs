@@ -39,7 +39,8 @@ struct DaemonResources<'a> {
 }
 
 fn initialize_x11() -> Result<(RustConnection, usize, CachedAtoms, crate::x11::CachedFormats)> {
-    // Connect to X11 first to get screen dimensions for smart config defaults
+    // Establish connection to the X server to query screen dimensions and root window ID
+    // We need the screen dimensions early to set smart defaults for thumbnail sizes
     let (conn, screen_num) = x11rb::connect(None)
         .context("Failed to connect to X11 server. Is DISPLAY set correctly?")?;
     
@@ -122,8 +123,8 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
         })
         .collect();
 
-    // Build hotkey groups: map each unique hotkey binding to ordered list of characters
-    // When multiple characters share a hotkey, pressing it cycles through them based on cycle order
+    // Group characters by hotkey binding to support cycling through multiple characters on the same key
+    // This allows users to bind 'F1' to Cycle [Char1, Char2] effectively
     let mut hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>> = HashMap::new();
 
     for char_name in &daemon_config.profile.hotkey_cycle_group {
@@ -209,7 +210,8 @@ async fn run_event_loop(
         .context("Failed to create AsyncFd for X11 connection")?;
 
     loop {
-        // Ensure ALL pending X11 events are processed before sleeping
+        // Process all pending X11 events without blocking to ensure the queue is drained
+        // This prevents the event channel from filling up during heavy activity
         while let Some(event) = ctx.conn.poll_for_event()
             .context("Failed to poll for X11 event")? {
             // Scope the mutable borrows for event handling

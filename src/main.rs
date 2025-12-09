@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.preview {
-        // Run preview daemon (background process showing thumbnails)
+        // Start the dedicated preview process to isolate X11 rendering and overlay management
         // Initialize Tokio runtime for the daemon
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
             preview::run_preview_daemon().await
         })
     } else {
-        // Run GUI manager (default - manages preview process)
+        // Default mode: launch the configuration GUI which manages the daemon lifecycle
         gui::run_gui()
     }
 }

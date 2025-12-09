@@ -267,8 +267,8 @@ impl<'a> Thumbnail<'a> {
         // Create window and setup properties
         let window = Self::create_window(ctx, &character_name, x, y, dimensions)?;
         
-        // Setup a cleanup guard that destroys the window if we fail during initialization
-        // This prevents leaking the window if later steps fail
+        // RAII guard to automatically destroy the window if initialization fails partially
+        // This ensures we don't leak orphaned windows if we error out before returning the valid Thumbnail struct
         struct WindowGuard<'a> {
             conn: &'a RustConnection,
             window: Window,

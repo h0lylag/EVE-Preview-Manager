@@ -5,7 +5,7 @@
 
 /// X11 protocol and rendering constants
 pub mod x11 {
-    /// ARGB color depth (32-bit: 8 bits each for Alpha, Red, Green, Blue)
+    /// Standard 32-bit color depth required for X11 composition
     pub const ARGB_DEPTH: u8 = 32;
     
     /// Size of PID property value in bytes
@@ -109,7 +109,7 @@ pub mod fixed_point {
 
 /// System paths
 pub mod paths {
-    /// Linux proc filesystem path format for process executables
+    /// Path format to resolve process executables via /proc/PID/exe
     pub const PROC_EXE_FORMAT: &str = "/proc/{}/exe";
     
     /// Input device directory

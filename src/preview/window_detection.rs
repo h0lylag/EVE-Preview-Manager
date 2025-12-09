@@ -159,8 +159,8 @@ pub fn check_and_create_window<'a>(
     Ok(Some(thumbnail))
 }
 
-/// Check if a process is running under Wine/Proton
-/// Checks /proc/{pid}/exe, /proc/{pid}/cmdline, and /proc/{pid}/environ
+/// Identifies if a process is running under Wine/Proton by inspecting its environment and executable path.
+/// EVE Online on Linux always runs under Wine, so this distinguishes EVE clients from native Linux processes.
 fn is_wine_process(pid: u32) -> bool {
     let pid_str = pid.to_string();
     

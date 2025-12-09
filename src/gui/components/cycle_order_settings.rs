@@ -44,7 +44,7 @@ impl CycleOrderSettingsState {
     }
 
     /// Parse text buffer back into profile's cycle group and character hotkeys
-    /// Format: "CharacterName [HOTKEY]" or just "CharacterName"
+    /// Format: "CharacterName \[HOTKEY\]" or just "CharacterName"
     fn save_to_profile(&self, profile: &mut Profile) {
         profile.hotkey_cycle_group = self.cycle_group_text
             .lines()
@@ -107,8 +107,8 @@ fn render_unified_cycle_group_tab(
 
             egui::ComboBox::from_id_salt("cycle_editor_mode")
                 .selected_text(match state.editor_mode {
-                    EditorMode::TextEdit => "Text Editor",
-                    EditorMode::DragDrop => "Drag and Drop",
+                    EditorMode::TextEdit => "Text Editor",  // Simple multi-line text area for bulk editing
+                    EditorMode::DragDrop => "Drag and Drop", // Interactive list for visual reordering
                 })
                 .show_ui(ui, |ui| {
                     if ui.selectable_value(&mut state.editor_mode, EditorMode::TextEdit, "Text Editor").clicked() {

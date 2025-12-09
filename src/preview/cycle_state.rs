@@ -35,8 +35,8 @@ impl CycleState {
         self.active_windows
             .insert(character_name.clone(), window);
 
-        // Only characters in cycle_group can be cycled via hotkeys.
-        // Characters not in the explicit configuration are ignored for cycling.
+        // Note: Only characters listed in the profile's `cycle_group` will be included in the cycle order.
+        // We track all windows here, but `cycle_forward/backward` logic filters internally based on the config.
     }
 
     /// Remove window (called from DestroyNotify)
@@ -237,9 +237,9 @@ impl CycleState {
         &self.config_order
     }
 
-    /// Activate the next available character from a specific group (subset of characters)
-    /// Used for shared hotkeys where multiple characters map to the same key.
-    /// Cycles through the group based on the global config order.
+    /// Cycles to the next available character within a specific subgroup of characters.
+    /// Used for shared hotkeys (e.g. F1 bound to both CharA and CharB) to toggle between them.
+    /// The cycle order respects the global configuration order to ensure consistent behavior.
     pub fn activate_next_in_group(&mut self, group: &[String], logged_out_map: Option<&HashMap<Window, String>>) -> Option<(Window, String)> {
         // 1. Filter group to include only characters present in config_order
         //    and map them to their global indices

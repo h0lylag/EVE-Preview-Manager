@@ -53,7 +53,8 @@ impl HotkeySettingsState {
         }
     }
 
-    /// Start capturing a key for the specified target
+    /// Start capturing a key for the specified target.
+    /// Spawns a background thread via `key_capture` to listen for raw input events.
     fn start_key_capture(&mut self, target: CaptureTarget) {
         match key_capture::start_capture() {
             Ok((state_rx, result_rx)) => {
@@ -107,7 +108,8 @@ impl Default for HotkeySettingsState {
 pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsState) -> bool {
     let mut changed = false;
 
-    // Poll capture state updates if capture is active
+    // Poll capture state updates if capture is active.
+    // We use channels to receive async updates from the capture thread without blocking the GUI.
     if state.show_key_capture_dialog {
         // Check for final result first
         let mut got_result = false;

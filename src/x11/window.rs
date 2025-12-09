@@ -12,7 +12,7 @@ use crate::types::EveWindowType;
 
 use super::CachedAtoms;
 
-/// Check if a window is an EVE Online client
+/// Identifies if a window belongs to EVE Online by inspecting its properties and title
 pub fn is_window_eve(conn: &RustConnection, window: Window, atoms: &CachedAtoms) -> Result<Option<EveWindowType>> {
     let cookie = conn
         .get_property(false, window, atoms.wm_name, AtomEnum::STRING, 0, 1024)
@@ -165,7 +165,7 @@ pub fn is_eve_window_focused(conn: &RustConnection, screen: &Screen, atoms: &Cac
     }
 }
 
-/// Activate (focus) an X11 window using _NET_ACTIVE_WINDOW
+/// Requests the window manager to grant focus to the specified window using standard EWMH protocols
 pub fn activate_window(
     conn: &RustConnection,
     screen: &Screen,
@@ -206,7 +206,7 @@ pub fn activate_window(
     Ok(())
 }
 
-/// Minimize (hide) an X11 window using _NET_WM_STATE
+/// Requests the window manager to hide/minimize the window using EWMH status flags
 pub fn minimize_window(
     conn: &RustConnection,
     screen: &Screen,

@@ -10,8 +10,7 @@ use tracing::info;
 
 use crate::constants::{input, paths, permissions};
 
-/// Find all input devices with their device paths
-/// Returns devices along with their /dev/input paths (needed for hotkey listener)
+/// Scans the system for compatible input devices, returning them with their paths for direct access
 pub fn find_all_input_devices_with_paths() -> Result<Vec<(Device, PathBuf)>> {
     info!(path = %paths::DEV_INPUT, "Scanning for input devices...");
 
@@ -71,7 +70,7 @@ fn classify_input_device(device: &Device) -> Option<&'static str> {
     }
 }
 
-/// Extract device ID from a /dev/input/eventX path by resolving through /dev/input/by-id
+/// Resolves a stable device identifier from an event path by checking symlinks in /dev/input/by-id
 /// Returns a human-readable device ID (e.g., "usb-Logitech_G502-event-kbd")
 pub fn extract_device_id(event_path: &Path) -> String {
     let by_id_path = "/dev/input/by-id";

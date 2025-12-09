@@ -19,11 +19,11 @@ use crate::input::device_detection;
 pub enum CycleCommand {
     Forward,
     Backward,
-    /// Per-character hotkey pressed - includes the binding for cycle group lookup
+    /// Triggered when a character-specific hotkey is pressed, carrying its binding configuration for context
     CharacterHotkey(HotkeyBinding),
 }
 
-/// Spawn background threads to listen for configured hotkeys on input devices (keyboards and mice)
+/// Initializes and manages background threads for low-latency input event monitoring across multiple devices
 pub fn spawn_listener(
     sender: tokio::sync::mpsc::Sender<CycleCommand>,
     forward_key: Option<HotkeyBinding>,
@@ -51,7 +51,7 @@ pub fn spawn_listener(
             info!("Listening on all input devices");
         }
         Some("auto") => {
-            // Auto-detect mode: use devices from the hotkey bindings
+            // Use devices associated with the configured hotkey bindings
             info!("Auto-detect mode: using devices from hotkey bindings");
 
             // Collect all unique device IDs from all bindings (cycle + per-character)
@@ -84,7 +84,7 @@ pub fn spawn_listener(
             }
         }
         Some(device_id) => {
-            // Legacy: specific device ID (from old configs)
+            // Legacy: specific device ID (compatibility for old configs)
             info!(device_id = %device_id, "Filtering to specific input device (legacy)");
 
             let by_id_path = format!("/dev/input/by-id/{}", device_id);
@@ -160,7 +160,7 @@ pub fn spawn_listener(
     Ok(handles)
 }
 
-/// Listen for configured hotkey events on a single device
+/// Event loop processing raw input events from a single device, handling key presses and state tracking
 fn listen_for_hotkeys(
     mut device: Device,
     sender: Sender<CycleCommand>,

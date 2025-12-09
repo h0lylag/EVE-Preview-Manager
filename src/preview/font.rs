@@ -161,7 +161,8 @@ pub fn find_font_path(font_name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Select the best available default TrueType font
+/// Scans for a suitable default TrueType font from a hardcoded list of preferred fonts.
+/// Returns the first match found on the system.
 pub fn select_best_default_font() -> Result<(String, PathBuf)> {
     let candidates = crate::constants::defaults::text::FONT_CANDIDATES;
 

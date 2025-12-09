@@ -205,6 +205,8 @@ impl ManagerApp {
                 .build()
                 .expect("Failed to build Tokio runtime for tray");
             
+            // Run a dedicated single-threaded Tokio runtime for the tray icon
+            // This is required because `ksni` (StatusNotifierItem) relies on async D-Bus communication
             runtime.block_on(async move {
                 let tray = AppTray {
                     tx: tx_to_app,
@@ -345,6 +347,9 @@ impl ManagerApp {
         let disk_config = Config::load().unwrap_or_else(|_| self.config.clone());
 
         // Merge strategy: Start with GUI's profile list (handles deletions), merge character positions from disk
+        // This ensures that:
+        // 1. Deletions in GUI are respected (since we start with GUI state)
+        // 2. Window positions updated by the daemon (which writes to disk) are preserved
         let mut merged_profiles = Vec::new();
 
         for gui_profile in &self.config.profiles {
@@ -712,7 +717,8 @@ impl eframe::App for ManagerApp {
         }
 
         // Request repaint after short delay to poll for tray events even when unfocused
-        // This ensures tray menu actions are processed promptly
+        // Request repaint after short delay to poll for tray events even when unfocused
+        // This ensures tray menu actions are processed promptly without burning CPU in a tight loop
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
         // Handle quit request from tray menu

@@ -276,7 +276,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
                 // Get specific character's dimensions
                 profile.character_thumbnails.get(&selected_target)
                     .map(|s| (s.dimensions.width, s.dimensions.height))
-                    .unwrap_or((250, 141))
+                    .unwrap_or((250, 141)) // Default fallback if character not found (safeguard)
             };
 
             state.current_width = width;

@@ -169,7 +169,8 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut VisualSettingsSt
     changed
 }
 
-/// Parse hex color string - supports both #RRGGBB and #AARRGGBB formats
+/// Parse hex color string - supports both #RRGGBB and #AARRGGBB formats.
+/// Returns a Color32 if parsing succeeds, treating 6-digit hex as full-opacity RGB.
 fn parse_hex_color(hex: &str) -> Result<egui::Color32, ()> {
     let hex = hex.trim_start_matches('#');
     

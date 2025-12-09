@@ -127,7 +127,7 @@ impl CachedFormats {
     }
 }
 
-/// Convert floating point to X11 fixed-point format
+/// Converts standard float values to the 16.16 fixed-point format required by the X11 Render extension
 pub fn to_fixed(v: f32) -> Fixed {
     (v * fixed_point::MULTIPLIER).round() as Fixed
 }
