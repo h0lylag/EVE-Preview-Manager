@@ -60,7 +60,7 @@ fn handle_create_notify(
     ctx: &mut EventContext,
     event: CreateNotifyEvent,
 ) -> Result<()> {
-    use super::window_detection::{check_eve_window, check_and_create_window};
+    use crate::preview::window_detection::{check_eve_window, check_and_create_window};
     
     debug!(window = event.window, "CreateNotify received");
     
@@ -471,7 +471,7 @@ pub fn handle_event(
                 
             } else if event.atom == ctx.app_ctx.atoms.wm_name {
                 // Check if this is a new EVE window being detected (title change from generic to character name)
-                use super::window_detection::{check_eve_window, check_and_create_window};
+                use crate::preview::window_detection::{check_eve_window, check_and_create_window};
                 
                 if let Some(character_name) = check_eve_window(ctx.app_ctx, event.window, ctx.session_state)
                     .context(format!("Failed to check if window {} became EVE client", event.window))? {

@@ -12,7 +12,7 @@ use x11rb::protocol::xproto::*;
 
 use crate::config::DaemonConfig;
 use crate::constants::eve;
-use super::hotkeys::{self, spawn_listener, CycleCommand};
+use crate::input::listener::{self, spawn_listener, CycleCommand};
 use crate::x11::{activate_window, minimize_window, AppContext, CachedAtoms};
 
 use super::cycle_state::CycleState;
@@ -20,9 +20,23 @@ use super::event_handler::{handle_event, EventContext};
 use super::font;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
-use super::window_detection::check_and_create_window;
+// use super::window_detection::check_and_create_window; // Moved to window_detection
 use x11rb::rust_connection::RustConnection;
 use std::thread::JoinHandle;
+
+struct HotkeyResources {
+    #[allow(dead_code)]
+    handle: Option<Vec<JoinHandle<()>>>,
+    rx: mpsc::Receiver<CycleCommand>,
+    groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
+}
+
+struct DaemonResources<'a> {
+    config: DaemonConfig,
+    session: SessionState,
+    cycle: CycleState,
+    eve_clients: HashMap<Window, Thumbnail<'a>>,
+}
 
 fn initialize_x11() -> Result<(RustConnection, usize, CachedAtoms, crate::x11::CachedFormats)> {
     // Connect to X11 first to get screen dimensions for smart config defaults
@@ -87,7 +101,7 @@ fn load_configuration(screen: &Screen) -> Result<(DaemonConfig, crate::config::D
     Ok((daemon_config, config, session_state, cycle_state))
 }
 
-fn setup_hotkeys(daemon_config: &DaemonConfig) -> (Option<Vec<JoinHandle<()>>>, mpsc::Receiver<CycleCommand>, HashMap<crate::config::HotkeyBinding, Vec<String>>) {
+fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
     // Create channel for hotkey thread → main loop
     let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
 
@@ -141,7 +155,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> (Option<Vec<JoinHandle<()>>>, 
     let has_character_hotkeys = !character_hotkeys.is_empty();
 
     let hotkey_handle = if has_cycle_keys || has_character_hotkeys {
-        if hotkeys::check_permissions() {
+        if listener::check_permissions() {
             match spawn_listener(
                 hotkey_tx,
                 daemon_config.profile.hotkey_cycle_forward.clone(),
@@ -160,12 +174,12 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> (Option<Vec<JoinHandle<()>>>, 
                 }
                 Err(e) => {
                     error!(error = %e, "Failed to start hotkey listener");
-                    hotkeys::print_permission_error();
+                    listener::print_permission_error();
                     None
                 }
             }
         } else {
-            hotkeys::print_permission_error();
+            listener::print_permission_error();
             None
         }
     } else {
@@ -173,15 +187,16 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> (Option<Vec<JoinHandle<()>>>, 
         None
     };
 
-    (hotkey_handle, hotkey_rx, hotkey_groups)
+    HotkeyResources {
+        handle: hotkey_handle,
+        rx: hotkey_rx,
+        groups: hotkey_groups,
+    }
 }
 
 async fn run_event_loop(
     ctx: AppContext<'_>,
-    mut daemon_config: DaemonConfig,
-    mut session_state: SessionState,
-    mut cycle_state: CycleState,
-    mut eve_clients: HashMap<Window, Thumbnail<'_>>,
+    mut resources: DaemonResources<'_>,
     mut hotkey_rx: mpsc::Receiver<CycleCommand>,
     hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
     mut sigusr1: tokio::signal::unix::Signal,
@@ -201,10 +216,10 @@ async fn run_event_loop(
             {
                 let mut context = EventContext {
                     app_ctx: &ctx,
-                    daemon_config: &mut daemon_config,
-                    eve_clients: &mut eve_clients,
-                    session_state: &mut session_state,
-                    cycle_state: &mut cycle_state,
+                    daemon_config: &mut resources.config,
+                    eve_clients: &mut resources.eve_clients,
+                    session_state: &mut resources.session,
+                    cycle_state: &mut resources.cycle,
                 };
 
                 let _ = handle_event(
@@ -221,7 +236,7 @@ async fn run_event_loop(
              // 1. Handle SIGUSR1 (Manual Save)
             _ = sigusr1.recv() => {
                 info!("Manual save requested via SIGUSR1");
-                if let Err(e) = daemon_config.save() {
+                if let Err(e) = resources.config.save() {
                     error!(error = ?e, "Failed to save positions after SIGUSR1");
                 } else {
                     info!("Positions saved successfully");
@@ -231,7 +246,7 @@ async fn run_event_loop(
             // 2. Handle Hotkey Commands
             Some(command) = hotkey_rx.recv() => {
                  // Check if we should only allow hotkeys when EVE window is focused
-                let should_process = if daemon_config.profile.hotkey_require_eve_focus {
+                let should_process = if resources.config.profile.hotkey_require_eve_focus {
                     crate::x11::is_eve_window_focused(ctx.conn, ctx.screen, ctx.atoms)
                         .inspect_err(|e| error!(error = %e, "Failed to check focused window"))
                         .unwrap_or(false)
@@ -256,15 +271,15 @@ async fn run_event_loop(
                     }
 
                     // Build logged-out map if feature is enabled in profile
-                    let logged_out_map = if daemon_config.profile.hotkey_logged_out_cycle {
-                        Some(&session_state.window_last_character)
+                    let logged_out_map = if resources.config.profile.hotkey_logged_out_cycle {
+                        Some(&resources.session.window_last_character)
                     } else {
                         None
                     };
 
                     let result = match command {
-                        CycleCommand::Forward => cycle_state.cycle_forward(logged_out_map),
-                        CycleCommand::Backward => cycle_state.cycle_backward(logged_out_map),
+                        CycleCommand::Forward => resources.cycle.cycle_forward(logged_out_map),
+                        CycleCommand::Backward => resources.cycle.cycle_backward(logged_out_map),
                         CycleCommand::CharacterHotkey(ref binding) => {
                             debug!(
                                 binding = %binding.display_name(),
@@ -284,11 +299,11 @@ async fn run_event_loop(
                                 } else if char_group.len() == 1 {
                                     // Single character - direct activation
                                     let char_name = &char_group[0];
-                                    cycle_state.activate_character(char_name, logged_out_map)
+                                    resources.cycle.activate_character(char_name, logged_out_map)
                                 } else {
                                     // Multiple characters share this hotkey - find next one in cycle order
                                     // Start from the character AFTER the current cycle position
-                                    let current_cycle_pos = cycle_state.current_position();
+                                    let current_cycle_pos = resources.cycle.current_position();
                                     
                                     debug!(
                                         binding = %binding.display_name(),
@@ -300,7 +315,7 @@ async fn run_event_loop(
                                     let mut group_with_positions: Vec<(usize, &String)> = char_group
                                         .iter()
                                         .filter_map(|char_name| {
-                                            daemon_config.profile.hotkey_cycle_group
+                                            resources.config.profile.hotkey_cycle_group
                                                 .iter()
                                                 .position(|c| c == char_name)
                                                 .map(|pos| (pos, char_name))
@@ -311,14 +326,14 @@ async fn run_event_loop(
                                     group_with_positions.sort_by_key(|(pos, _)| *pos);
                                     
                                     // Find the first character after current position (wrapping around)
-                                    let start_search_pos = (current_cycle_pos + 1) % daemon_config.profile.hotkey_cycle_group.len();
+                                    let start_search_pos = (current_cycle_pos + 1) % resources.config.profile.hotkey_cycle_group.len();
                                     
                                     let mut result = None;
                                     
                                     // Try characters starting from after current position
                                     for (pos, char_name) in &group_with_positions {
                                         if *pos >= start_search_pos
-                                            && let Some(activation_result) = cycle_state.activate_character(char_name, logged_out_map) {
+                                            && let Some(activation_result) = resources.cycle.activate_character(char_name, logged_out_map) {
                                                 info!(
                                                     binding = %binding.display_name(),
                                                     character = %char_name,
@@ -334,7 +349,7 @@ async fn run_event_loop(
                                     if result.is_none() {
                                         for (pos, char_name) in &group_with_positions {
                                             if *pos < start_search_pos
-                                                && let Some(activation_result) = cycle_state.activate_character(char_name, logged_out_map) {
+                                                && let Some(activation_result) = resources.cycle.activate_character(char_name, logged_out_map) {
                                                     info!(
                                                         binding = %binding.display_name(),
                                                         character = %char_name,
@@ -385,9 +400,9 @@ async fn run_event_loop(
                         } else {
                             debug!(window = window, "activate_window completed successfully");
                             
-                            if daemon_config.profile.client_minimize_on_switch {
+                            if resources.config.profile.client_minimize_on_switch {
                                 // Minimize all other EVE clients after successful activation
-                                let other_windows: Vec<Window> = eve_clients
+                                let other_windows: Vec<Window> = resources.eve_clients
                                     .keys()
                                     .copied()
                                     .filter(|w| *w != window)
@@ -400,10 +415,10 @@ async fn run_event_loop(
                             }
                         }
                     } else {
-                        warn!(active_windows = cycle_state.config_order().len(), "No window to activate, cycle state is empty");
+                        warn!(active_windows = resources.cycle.config_order().len(), "No window to activate, cycle state is empty");
                     }
                 } else {
-                    info!(hotkey_require_eve_focus = daemon_config.profile.hotkey_require_eve_focus, "Hotkey ignored, EVE window not focused (hotkey_require_eve_focus enabled)");
+                    info!(hotkey_require_eve_focus = resources.config.profile.hotkey_require_eve_focus, "Hotkey ignored, EVE window not focused (hotkey_require_eve_focus enabled)");
                 }
             }
 
@@ -419,95 +434,9 @@ async fn run_event_loop(
     }
 }
 
-fn initialize_font(conn: &RustConnection, config: &DaemonConfig) -> Result<font::FontRenderer> {
-    if !config.profile.thumbnail_text_font.is_empty() {
-        info!(
-            configured_font = %config.profile.thumbnail_text_font,
-            size = config.profile.thumbnail_text_size,
-            "Attempting to load user-configured font"
-        );
-        font::FontRenderer::from_font_name(
-            &config.profile.thumbnail_text_font,
-            config.profile.thumbnail_text_size as f32
-        )
-        .or_else(|e| {
-            warn!(
-                font = %config.profile.thumbnail_text_font,
-                error = ?e,
-                "Failed to load configured font, falling back to system default"
-            );
-            font::FontRenderer::from_system_font(conn, config.profile.thumbnail_text_size as f32)
-        })
-    } else {
-        info!(
-            size = config.profile.thumbnail_text_size,
-            "No font configured, using system default"
-        );
-        font::FontRenderer::from_system_font(conn, config.profile.thumbnail_text_size as f32)
-    }
-    .context(format!("Failed to initialize font renderer with size {}", config.profile.thumbnail_text_size))
-}
 
-fn scan_eve_windows<'a>(
-    ctx: &AppContext<'a>,
-    daemon_config: &mut DaemonConfig,
-    state: &mut SessionState,
-) -> Result<HashMap<Window, Thumbnail<'a>>> {
-    let net_client_list = ctx.atoms.net_client_list;
-    let prop = ctx.conn
-        .get_property(
-            false,
-            ctx.screen.root,
-            net_client_list,
-            AtomEnum::WINDOW,
-            0,
-            u32::MAX,
-        )
-        .context("Failed to query _NET_CLIENT_LIST property")?
-        .reply()
-        .context("Failed to get window list from X11 server")?;
-    let windows: Vec<u32> = prop
-        .value32()
-        .ok_or_else(|| anyhow::anyhow!("Invalid return from _NET_CLIENT_LIST"))?
-        .collect();
 
-    let mut eves = HashMap::new();
-    for w in windows {
-        if let Some(eve) = check_and_create_window(ctx, daemon_config, w, state)
-            .context(format!("Failed to process window {} during initial scan", w))? {
 
-            // Save initial position and dimensions (important for first-time characters)
-            // Query geometry to get actual position from X11
-            let geom = ctx.conn.get_geometry(eve.window)
-                .context("Failed to query geometry during initial scan")?
-                .reply()
-                .context("Failed to get geometry reply during initial scan")?;
-
-            // Update character_thumbnails in memory (skip logged-out clients with empty name)
-            if !eve.character_name.is_empty() {
-                let settings = crate::types::CharacterSettings::new(
-                    geom.x,
-                    geom.y,
-                    eve.dimensions.width,
-                    eve.dimensions.height,
-                );
-                daemon_config.character_thumbnails.insert(eve.character_name.clone(), settings);
-            }
-
-            eves.insert(w, eve);
-        }
-    }
-
-    // Save once after processing all windows (avoids repeated disk writes)
-    if daemon_config.profile.thumbnail_auto_save_position && !eves.is_empty() {
-        daemon_config.save()
-            .context("Failed to save initial positions after startup scan")?;
-    }
-
-    ctx.conn.flush()
-        .context("Failed to flush X11 connection after creating thumbnails")?;
-    Ok(eves)
-}
 
 pub async fn run_preview_daemon() -> Result<()> {
     // 1. Initialize X11 connection and resources
@@ -528,12 +457,15 @@ pub async fn run_preview_daemon() -> Result<()> {
     info!("Registered SIGUSR1 handler for manual position save");
 
     // 4. Setup Hotkeys
-    let (_hotkey_handle, hotkey_rx, hotkey_groups) = setup_hotkeys(&daemon_config);
+    let hotkeys = setup_hotkeys(&daemon_config);
     
     // 5. Initialize Font Renderer
     // This depends on config so it runs after config load
-    let font_renderer = initialize_font(&conn, &daemon_config)
-        .context("Failed to initialize font renderer")?;
+    let font_renderer = font::FontRenderer::resolve_from_config(
+        &conn,
+        &daemon_config.profile.thumbnail_text_font,
+        daemon_config.profile.thumbnail_text_size as f32
+    ).context("Failed to initialize font renderer")?;
     
     info!(
         size = daemon_config.profile.thumbnail_text_size,
@@ -552,7 +484,7 @@ pub async fn run_preview_daemon() -> Result<()> {
     };
 
     // 7. Initial Window Scan
-    let eve_clients = scan_eve_windows(&ctx, &mut daemon_config, &mut session_state)
+    let eve_clients = super::window_detection::scan_eve_windows(&ctx, &mut daemon_config, &mut session_state)
         .context("Failed to get initial list of EVE windows")?;
     
     // Register initial windows with cycle state
@@ -567,14 +499,18 @@ pub async fn run_preview_daemon() -> Result<()> {
     }
     
     // 8. Run Main Event Loop
+    let resources = DaemonResources {
+        config: daemon_config,
+        session: session_state,
+        cycle: cycle_state,
+        eve_clients,
+    };
+
     run_event_loop(
         ctx,
-        daemon_config,
-        session_state,
-        cycle_state,
-        eve_clients,
-        hotkey_rx,
-        hotkey_groups,
+        resources,
+        hotkeys.rx,
+        hotkeys.groups,
         sigusr1
     ).await
 }

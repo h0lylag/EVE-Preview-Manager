@@ -297,6 +297,37 @@ impl FontRenderer {
         }
     }
 
+    /// Resolve font from configuration or fallback to system default
+    pub fn resolve_from_config<C: Connection>(
+        conn: &C,
+        font_name: &str,
+        font_size: f32,
+    ) -> Result<Self> {
+        if !font_name.is_empty() {
+            info!(
+                configured_font = %font_name,
+                size = font_size,
+                "Attempting to load user-configured font"
+            );
+            Self::from_font_name(font_name, font_size)
+                .or_else(|e| {
+                    warn!(
+                        font = %font_name,
+                        error = ?e,
+                        "Failed to load configured font, falling back to system default"
+                    );
+                    Self::from_system_font(conn, font_size)
+                })
+        } else {
+            info!(
+                size = font_size,
+                "No font configured, using system default"
+            );
+            Self::from_system_font(conn, font_size)
+        }
+        .context(format!("Failed to initialize font renderer with size {}", font_size))
+    }
+
     pub fn requires_direct_rendering(&self) -> bool {
         matches!(self, Self::X11Fallback { .. })
     }

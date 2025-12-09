@@ -2,8 +2,10 @@
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
+use std::collections::HashMap;
 use crate::config::DaemonConfig;
 use crate::constants::{self, paths, wine};
 use crate::types::Dimensions;
@@ -184,11 +186,10 @@ fn is_wine_process(pid: u32) -> bool {
     if let Ok(mut cmdline_file) = std::fs::File::open(format!("/proc/{}/cmdline", pid)) {
         let mut cmdline = String::new();
         // Ignoring errors reading cmdline
-        if std::io::Read::read_to_string(&mut cmdline_file, &mut cmdline).is_ok() {
-             if cmdline.contains(wine::EVE_EXE_NAME) {
+        if std::io::Read::read_to_string(&mut cmdline_file, &mut cmdline).is_ok()
+             && cmdline.contains(wine::EVE_EXE_NAME) {
                  return true;
              }
-        }
     }
 
     // 3. Check environment variables for Wine/Proton markers
@@ -212,4 +213,66 @@ fn is_wine_process(pid: u32) -> bool {
     }
 
     false
+}
+
+/// Initial scan for existing EVE windows to populate thumbnails
+pub fn scan_eve_windows<'a>(
+    ctx: &AppContext<'a>,
+    daemon_config: &mut DaemonConfig,
+    state: &mut SessionState,
+) -> Result<HashMap<Window, Thumbnail<'a>>> {
+    let net_client_list = ctx.atoms.net_client_list;
+    let prop = ctx.conn
+        .get_property(
+            false,
+            ctx.screen.root,
+            net_client_list,
+            AtomEnum::WINDOW,
+            0,
+            u32::MAX,
+        )
+        .context("Failed to query _NET_CLIENT_LIST property")?
+        .reply()
+        .context("Failed to get window list from X11 server")?;
+    let windows: Vec<u32> = prop
+        .value32()
+        .ok_or_else(|| anyhow::anyhow!("Invalid return from _NET_CLIENT_LIST"))?
+        .collect();
+
+    let mut eve_clients = HashMap::new();
+    for w in windows {
+        if let Some(eve) = check_and_create_window(ctx, daemon_config, w, state)
+            .context(format!("Failed to process window {} during initial scan", w))? {
+
+            // Save initial position and dimensions (important for first-time characters)
+            // Query geometry to get actual position from X11
+            let geom = ctx.conn.get_geometry(eve.window)
+                .context("Failed to query geometry during initial scan")?
+                .reply()
+                .context("Failed to get geometry reply during initial scan")?;
+
+            // Update character_thumbnails in memory (skip logged-out clients with empty name)
+            if !eve.character_name.is_empty() {
+                let settings = crate::types::CharacterSettings::new(
+                    geom.x,
+                    geom.y,
+                    eve.dimensions.width,
+                    eve.dimensions.height,
+                );
+                daemon_config.character_thumbnails.insert(eve.character_name.clone(), settings);
+            }
+
+            eve_clients.insert(w, eve);
+        }
+    }
+
+    // Save once after processing all windows (avoids repeated disk writes)
+    if daemon_config.profile.thumbnail_auto_save_position && !eve_clients.is_empty() {
+        daemon_config.save()
+            .context("Failed to save initial positions after startup scan")?;
+    }
+
+    ctx.conn.flush()
+        .context("Failed to flush X11 connection after creating thumbnails")?;
+    Ok(eve_clients)
 }
