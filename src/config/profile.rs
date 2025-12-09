@@ -234,7 +234,11 @@ impl Profile {
 
 impl Config {
     pub fn path() -> PathBuf {
+        #[cfg(not(test))]
         let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        #[cfg(test)]
+        let mut path = std::env::temp_dir().join("eve-preview-manager-test");
+        
         path.push(crate::constants::config::APP_DIR);
         path.push(crate::constants::config::FILENAME);
         path
