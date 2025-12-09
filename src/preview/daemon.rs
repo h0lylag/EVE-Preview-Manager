@@ -16,7 +16,7 @@ use super::hotkeys::{self, spawn_listener, CycleCommand};
 use crate::x11::{activate_window, minimize_window, AppContext, CachedAtoms};
 
 use super::cycle_state::CycleState;
-use super::event_handler::handle_event;
+use super::event_handler::{handle_event, EventContext};
 use super::font;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
@@ -298,14 +298,21 @@ pub async fn run_preview_daemon() -> Result<()> {
         // Ensure ALL pending X11 events are processed before sleeping
         while let Some(event) = conn.poll_for_event()
             .context("Failed to poll for X11 event")? {
-            let _ = handle_event(
-                &ctx,
-                &mut daemon_config,
-                &mut eves,
-                event,
-                &mut session_state,
-                &mut cycle_state,
-            ).inspect_err(|err| error!(error = ?err, "Event handling error"));
+            // Scope the mutable borrows for event handling
+            {
+                let mut context = EventContext {
+                    app_ctx: &ctx,
+                    daemon_config: &mut daemon_config,
+                    eves: &mut eves,
+                    session_state: &mut session_state,
+                    cycle_state: &mut cycle_state,
+                };
+
+                let _ = handle_event(
+                    &mut context,
+                    event,
+                ).inspect_err(|err| error!(error = ?err, "Event handling error"));
+            }
         }
 
         // Flush any pending requests to X server

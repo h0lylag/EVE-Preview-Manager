@@ -21,38 +21,44 @@ use super::session_state::SessionState;
 use super::snapping::{self, Rect};
 use super::thumbnail::Thumbnail;
 
+/// Context bundle for event handlers to reduce argument count
+pub struct EventContext<'a, 'b> {
+    pub app_ctx: &'a AppContext<'a>,
+    pub daemon_config: &'b mut DaemonConfig,
+    pub eves: &'b mut HashMap<Window, Thumbnail<'a>>,
+    pub session_state: &'b mut SessionState,
+    pub cycle_state: &'b mut CycleState,
+}
+
 /// Handle DamageNotify events - update damaged thumbnail
-#[tracing::instrument(skip(ctx, eves))]
-fn handle_damage_notify(ctx: &AppContext, eves: &HashMap<Window, Thumbnail>, event: x11rb::protocol::damage::NotifyEvent) -> Result<()> {
+#[tracing::instrument(skip(ctx, event), fields(window = event.drawable))]
+fn handle_damage_notify(ctx: &mut EventContext, event: x11rb::protocol::damage::NotifyEvent) -> Result<()> {
     // Skip rendering updates if thumbnails are disabled (daemon still runs for hotkeys)
-    if !ctx.config.enabled {
+    if !ctx.app_ctx.config.enabled {
         return Ok(());
     }
 
     // No logging - this fires every frame and would flood logs
-    if let Some(thumbnail) = eves
+    if let Some(thumbnail) = ctx.eves
         .values()
         .find(|thumbnail| thumbnail.damage == event.damage)
     {
         thumbnail.update()
             .context(format!("Failed to update thumbnail for damage event (damage={})", event.damage))?;
-        ctx.conn.damage_subtract(event.damage, 0u32, 0u32)
+        ctx.app_ctx.conn.damage_subtract(event.damage, 0u32, 0u32)
             .context(format!("Failed to subtract damage region (damage={})", event.damage))?;
-        ctx.conn.flush()
+        ctx.app_ctx.conn.flush()
             .context("Failed to flush X11 connection after damage update")?;
     }
     Ok(())
 }
 
 /// Handle CreateNotify events - create thumbnail for new EVE window
-#[tracing::instrument(skip(ctx, daemon_config, eves, session_state, cycle_state))]
-fn handle_create_notify<'a>(
-    ctx: &AppContext<'a>,
-    daemon_config: &mut DaemonConfig,
-    eves: &mut HashMap<Window, Thumbnail<'a>>,
+/// Handle CreateNotify events - create thumbnail for new EVE window
+#[tracing::instrument(skip(ctx, event))]
+fn handle_create_notify(
+    ctx: &mut EventContext,
     event: CreateNotifyEvent,
-    session_state: &mut SessionState,
-    cycle_state: &mut CycleState,
 ) -> Result<()> {
     use super::window_detection::{check_eve_window, check_and_create_window};
     
@@ -60,20 +66,20 @@ fn handle_create_notify<'a>(
     
     // First, check if this is an EVE window and register it with cycle state
     // This happens regardless of whether thumbnails are enabled
-    if let Some(character_name) = check_eve_window(ctx, event.window, session_state)
+    if let Some(character_name) = check_eve_window(ctx.app_ctx, event.window, ctx.session_state)
         .context(format!("Failed to check if window {} is EVE client", event.window))? {
         info!(window = event.window, character = %character_name, "Detected new EVE window");
         
         // Always register with cycle state for hotkey support
-        cycle_state.add_window(character_name.clone(), event.window);
+        ctx.cycle_state.add_window(character_name.clone(), event.window);
         
         // Only create thumbnail if thumbnails are enabled
-        if ctx.config.enabled
-            && let Some(thumbnail) = check_and_create_window(ctx, daemon_config, event.window, session_state)
+        if ctx.app_ctx.config.enabled
+            && let Some(thumbnail) = check_and_create_window(ctx.app_ctx, ctx.daemon_config, event.window, ctx.session_state)
                 .context(format!("Failed to create thumbnail for window {}", event.window))? {
                 
                 // Save initial position and dimensions for new character
-                let geom = ctx.conn.get_geometry(thumbnail.window)
+                let geom = ctx.app_ctx.conn.get_geometry(thumbnail.window)
                     .context("Failed to query geometry for new thumbnail")?
                     .reply()
                     .context("Failed to get geometry reply for new thumbnail")?;
@@ -87,64 +93,60 @@ fn handle_create_notify<'a>(
                         thumbnail.dimensions.width,
                         thumbnail.dimensions.height,
                     );
-                    daemon_config.character_thumbnails.insert(thumbnail.character_name.clone(), settings);
+                    ctx.daemon_config.character_thumbnails.insert(thumbnail.character_name.clone(), settings);
                 }
                 
                 // Conditionally persist to disk based on auto-save setting
-                if daemon_config.profile.thumbnail_auto_save_position {
-                    daemon_config.save()
+                if ctx.daemon_config.profile.thumbnail_auto_save_position {
+                    ctx.daemon_config.save()
                         .context(format!("Failed to save initial position for new character '{}'", thumbnail.character_name))?;
                 }
                 
-                eves.insert(event.window, thumbnail);
+                ctx.eves.insert(event.window, thumbnail);
             }
     }
     Ok(())
 }
 
 /// Handle DestroyNotify events - remove destroyed window
-#[tracing::instrument(skip(eves, session_state, cycle_state))]
+#[tracing::instrument(skip(ctx), fields(window = event.window))]
 fn handle_destroy_notify(
-    eves: &mut HashMap<Window, Thumbnail>,
+    ctx: &mut EventContext,
     event: DestroyNotifyEvent,
-    session_state: &mut SessionState,
-    cycle_state: &mut CycleState,
 ) -> Result<()> {
     info!(window = event.window, "DestroyNotify received");
-    cycle_state.remove_window(event.window);
-    session_state.remove_window(event.window);
-    eves.remove(&event.window);
+    ctx.cycle_state.remove_window(event.window);
+    ctx.session_state.remove_window(event.window);
+    ctx.eves.remove(&event.window);
     Ok(())
 }
 
 /// Handle FocusIn events - update focused state and visibility
-#[tracing::instrument(skip(ctx, eves, cycle_state))]
+#[tracing::instrument(skip(ctx), fields(window = event.event))]
 fn handle_focus_in(
-    ctx: &AppContext,
-    eves: &mut HashMap<Window, Thumbnail>,
+    ctx: &mut EventContext,
     event: FocusInEvent,
-    cycle_state: &mut CycleState,
 ) -> Result<()> {
     debug!(window = event.event, "FocusIn received");
 
     // Sync cycle state with the focused window
-    if cycle_state.set_current_by_window(event.event) {
+    if ctx.cycle_state.set_current_by_window(event.event) {
         debug!(window = event.event, "Synced cycle state to focused window");
     }
-    if let Some(thumbnail) = eves.get_mut(&event.event) {
+    if let Some(thumbnail) = ctx.eves.get_mut(&event.event) {
         // Transition to focused normal state (from minimized or unfocused)
         thumbnail.state = ThumbnailState::Normal { focused: true };
         thumbnail.border(true)
             .context(format!("Failed to update border on focus for '{}'", thumbnail.character_name))?;
-        if ctx.config.hide_when_no_focus && eves.values().any(|x| !x.state.is_visible()) {
+        if ctx.app_ctx.config.hide_when_no_focus && ctx.eves.values().any(|x| !x.state.is_visible()) {
             // Reveal all hidden thumbnails (visibility sets focused=false, so we fix the focused one after)
-            for thumbnail in eves.values_mut() {
+            for thumbnail in ctx.eves.values_mut() {
                 debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
                 thumbnail.visibility(true)
                     .context(format!("Failed to show thumbnail '{}' on focus", thumbnail.character_name))?;
             }
             // Restore focused state for the window that just received focus (visibility() reset it to unfocused)
-            if let Some(focused_thumbnail) = eves.get_mut(&event.event) {
+            if let Some(focused_thumbnail) = ctx.eves.get_mut(&event.event) {
                 focused_thumbnail.state = ThumbnailState::Normal { focused: true };
             }
         }
@@ -153,20 +155,19 @@ fn handle_focus_in(
 }
 
 /// Handle FocusOut events - update focused state and visibility  
-#[tracing::instrument(skip(ctx, eves))]
+#[tracing::instrument(skip(ctx), fields(window = event.event))]
 fn handle_focus_out(
-    ctx: &AppContext,
-    eves: &mut HashMap<Window, Thumbnail>,
+    ctx: &mut EventContext,
     event: FocusOutEvent,
 ) -> Result<()> {
     debug!(window = event.event, "FocusOut received");
-    if let Some(thumbnail) = eves.get_mut(&event.event) {
+    if let Some(thumbnail) = ctx.eves.get_mut(&event.event) {
         // Transition to unfocused normal state
         thumbnail.state = ThumbnailState::Normal { focused: false };
         thumbnail.border(false)
             .context(format!("Failed to clear border on focus loss for '{}'", thumbnail.character_name))?;
-        if ctx.config.hide_when_no_focus && eves.values().all(|x| !x.state.is_focused() && !x.state.is_minimized()) {
-            for thumbnail in eves.values_mut() {
+        if ctx.app_ctx.config.hide_when_no_focus && ctx.eves.values().all(|x| !x.state.is_focused() && !x.state.is_minimized()) {
+            for thumbnail in ctx.eves.values_mut() {
                 debug!(character = %thumbnail.character_name, "Hiding thumbnail due to focus loss");
                 thumbnail.visibility(false)
                     .context(format!("Failed to hide thumbnail '{}' on focus loss", thumbnail.character_name))?;
@@ -177,17 +178,15 @@ fn handle_focus_out(
 }
 
 /// Handle ButtonPress events - start dragging or set current character
-#[tracing::instrument(skip(ctx, eves, cycle_state))]
+#[tracing::instrument(skip(ctx), fields(window = event.event))]
 fn handle_button_press(
-    ctx: &AppContext,
-    eves: &mut HashMap<Window, Thumbnail>,
+    ctx: &mut EventContext,
     event: ButtonPressEvent,
-    cycle_state: &mut CycleState,
 ) -> Result<()> {
     debug!(x = event.root_x, y = event.root_y, detail = event.detail, "ButtonPress received");
     
     // First, find which window was clicked (if any)
-    let clicked_window = eves
+    let clicked_window = ctx.eves
         .iter()
         .find(|(_, thumb)| thumb.is_hovered(event.root_x, event.root_y) && thumb.state.is_visible())
         .map(|(win, _)| *win);
@@ -198,11 +197,11 @@ fn handle_button_press(
     
     // For right-click drags, collect snap targets BEFORE getting mutable reference
     let snap_targets = if event.detail == mouse::BUTTON_RIGHT {
-        eves
+        ctx.eves
             .iter()
             .filter(|(win, t)| **win != clicked_window && t.state.is_visible())
             .filter_map(|(_, t)| {
-                ctx.conn.get_geometry(t.window).ok()
+                ctx.app_ctx.conn.get_geometry(t.window).ok()
                     .and_then(|req| req.reply().ok())
                     .map(|geom| Rect {
                         x: geom.x,
@@ -217,10 +216,10 @@ fn handle_button_press(
     };
     
     // Now get mutable reference to the clicked thumbnail
-    if let Some(thumbnail) = eves.get_mut(&clicked_window)
+    if let Some(thumbnail) = ctx.eves.get_mut(&clicked_window)
     {
         debug!(window = thumbnail.window, character = %thumbnail.character_name, "ButtonPress on thumbnail");
-        let geom = ctx.conn.get_geometry(thumbnail.window)
+        let geom = ctx.app_ctx.conn.get_geometry(thumbnail.window)
             .context("Failed to send geometry query on button press")?
             .reply()
             .context(format!("Failed to get geometry on button press for '{}'", thumbnail.character_name))?;
@@ -236,7 +235,7 @@ fn handle_button_press(
         }
         // Left-click sets current character for cycling
         if event.detail == mouse::BUTTON_LEFT {
-            cycle_state.set_current(&thumbnail.character_name);
+            ctx.cycle_state.set_current(&thumbnail.character_name);
             debug!(character = %thumbnail.character_name, "Set current character via click");
         }
     }
@@ -244,18 +243,15 @@ fn handle_button_press(
 }
 
 /// Handle ButtonRelease events - focus window and save position after drag
-#[tracing::instrument(skip(ctx, daemon_config, eves, session_state))]
+#[tracing::instrument(skip(ctx), fields(window = event.event))]
 fn handle_button_release(
-    ctx: &AppContext,
-    daemon_config: &mut DaemonConfig,
-    eves: &mut HashMap<Window, Thumbnail>,
+    ctx: &mut EventContext,
     event: ButtonReleaseEvent,
-    session_state: &mut SessionState,
 ) -> Result<()> {
     debug!(x = event.root_x, y = event.root_y, detail = event.detail, "ButtonRelease received");
     
     // First pass: identify the hovered thumbnail by the EVE window key
-    let clicked_key = eves
+    let clicked_key = ctx.eves
         .iter()
         .find(|(_, thumb)| {
             let hovered = thumb.is_hovered(event.root_x, event.root_y);
@@ -274,7 +270,7 @@ fn handle_button_release(
     let mut clicked_src: Option<Window> = None;
     let is_left_click = event.detail == mouse::BUTTON_LEFT;
     
-    if let Some(thumbnail) = eves.get_mut(&clicked_key) {
+    if let Some(thumbnail) = ctx.eves.get_mut(&clicked_key) {
         debug!(window = thumbnail.window, character = %thumbnail.character_name, "ButtonRelease on thumbnail");
         clicked_src = Some(thumbnail.src);
         
@@ -288,13 +284,13 @@ fn handle_button_release(
         // This saves to disk ONCE per drag operation, not during motion events
         if thumbnail.input_state.dragging {
             // Query actual position from X11
-            let geom = ctx.conn.get_geometry(thumbnail.window)
+            let geom = ctx.app_ctx.conn.get_geometry(thumbnail.window)
                 .context("Failed to send geometry query after drag")?
                 .reply()
                 .context(format!("Failed to get geometry after drag for '{}'", thumbnail.character_name))?;
             
             // Update session state (in-memory only)
-            session_state.update_window_position(thumbnail.window, geom.x, geom.y);
+            ctx.session_state.update_window_position(thumbnail.window, geom.x, geom.y);
             
             // ALWAYS update character_thumbnails in memory (for manual saves)
             // Skip logged-out clients with empty character name
@@ -305,13 +301,13 @@ fn handle_button_release(
                     thumbnail.dimensions.width,
                     thumbnail.dimensions.height,
                 );
-                daemon_config.character_thumbnails.insert(thumbnail.character_name.clone(), settings);
+                ctx.daemon_config.character_thumbnails.insert(thumbnail.character_name.clone(), settings);
             }
             
             // Conditionally persist to disk based on auto-save setting
-            if daemon_config.profile.thumbnail_auto_save_position {
+            if ctx.daemon_config.profile.thumbnail_auto_save_position {
                 debug!(window = thumbnail.window, x = geom.x, y = geom.y, "Saved position after drag (auto-save enabled)");
-                daemon_config.save()
+                ctx.daemon_config.save()
                     .context(format!("Failed to save position for '{}' after drag", thumbnail.character_name))?;
             } else {
                 debug!(window = thumbnail.window, x = geom.x, y = geom.y, "Updated position in memory (auto-save disabled)");
@@ -325,15 +321,15 @@ fn handle_button_release(
     
     // After releasing mutable borrow, optionally minimize other EVE clients
     if is_left_click
-        && daemon_config.profile.client_minimize_on_switch
+        && ctx.daemon_config.profile.client_minimize_on_switch
         && let Some(clicked_src) = clicked_src
     {
-        for other_window in eves
+        for other_window in ctx.eves
             .values()
             .filter(|t| t.src != clicked_src)
             .map(|t| t.src)
         {
-            if let Err(e) = minimize_window(ctx.conn, ctx.screen, ctx.atoms, other_window) {
+            if let Err(e) = minimize_window(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms, other_window) {
                 debug!(error = ?e, window = other_window, "Failed to minimize window");
             }
         }
@@ -343,16 +339,15 @@ fn handle_button_release(
 }
 
 /// Handle MotionNotify events - process drag motion with snapping
-#[tracing::instrument(skip(daemon_config, eves))]
+#[tracing::instrument(skip(ctx), fields(window = event.event))]
 fn handle_motion_notify(
-    daemon_config: &DaemonConfig,
-    eves: &mut HashMap<Window, Thumbnail>,
+    ctx: &mut EventContext,
     event: MotionNotifyEvent,
 ) -> Result<()> {
     trace!(x = event.root_x, y = event.root_y, "MotionNotify received");
     
     // Find the dragging thumbnail (typically only one at a time)
-    let dragging_window = eves.iter()
+    let dragging_window = ctx.eves.iter()
         .find(|(_, t)| t.input_state.dragging)
         .map(|(win, _)| *win);
     
@@ -360,12 +355,12 @@ fn handle_motion_notify(
         return Ok(());  // No thumbnail is being dragged
     };
     
-    let snap_threshold = daemon_config.profile.thumbnail_snap_threshold;
+    let snap_threshold = ctx.daemon_config.profile.thumbnail_snap_threshold;
     
     // Get the dragging thumbnail and clone snap targets to avoid borrow conflict
     // Snap targets were computed once in ButtonPress, avoiding repeated X11 queries
     // Vec<Rect> clone is cheap since Rect is Copy (just copying some i16/u16 values)
-    let thumbnail = eves.get_mut(&dragging_window).unwrap();
+    let thumbnail = ctx.eves.get_mut(&dragging_window).unwrap();
     let snap_targets = thumbnail.input_state.snap_targets.clone();
     
     handle_drag_motion(
@@ -420,27 +415,23 @@ fn handle_drag_motion(
     Ok(())
 }
 
-pub fn handle_event<'a>(
-    ctx: &AppContext<'a>,
-    daemon_config: &mut DaemonConfig,
-    eves: &mut HashMap<Window, Thumbnail<'a>>,
+pub fn handle_event(
+    ctx: &mut EventContext,
     event: Event,
-    session_state: &mut SessionState,
-    cycle_state: &mut CycleState,
 ) -> Result<()> {
     match event {
-        DamageNotify(event) => handle_damage_notify(ctx, eves, event),
-        CreateNotify(event) => handle_create_notify(ctx, daemon_config, eves, event, session_state, cycle_state),
-        DestroyNotify(event) => handle_destroy_notify(eves, event, session_state, cycle_state),
-        Event::FocusIn(event) => handle_focus_in(ctx, eves, event, cycle_state),
-        Event::FocusOut(event) => handle_focus_out(ctx, eves, event),
-        Event::ButtonPress(event) => handle_button_press(ctx, eves, event, cycle_state),
-        Event::ButtonRelease(event) => handle_button_release(ctx, daemon_config, eves, event, session_state),
-        Event::MotionNotify(event) => handle_motion_notify(daemon_config, eves, event),
+        DamageNotify(event) => handle_damage_notify(ctx, event),
+        CreateNotify(event) => handle_create_notify(ctx, event),
+        DestroyNotify(event) => handle_destroy_notify(ctx, event),
+        Event::FocusIn(event) => handle_focus_in(ctx, event),
+        Event::FocusOut(event) => handle_focus_out(ctx, event),
+        Event::ButtonPress(event) => handle_button_press(ctx, event),
+        Event::ButtonRelease(event) => handle_button_release(ctx, event),
+        Event::MotionNotify(event) => handle_motion_notify(ctx, event),
         PropertyNotify(event) => {
-            if event.atom == ctx.atoms.wm_name
-                && let Some(thumbnail) = eves.get_mut(&event.window)
-                && let Some(eve_window) = is_window_eve(ctx.conn, event.window, ctx.atoms)
+            if event.atom == ctx.app_ctx.atoms.wm_name
+                && let Some(thumbnail) = ctx.eves.get_mut(&event.window)
+                && let Some(eve_window) = is_window_eve(ctx.app_ctx.conn, event.window, ctx.app_ctx.atoms)
                     .context(format!("Failed to check if window {} is EVE client during property change", event.window))?
             {
                 // Character name changed (login/logout/character switch)
@@ -448,21 +439,21 @@ pub fn handle_event<'a>(
                 let new_character_name = eve_window.character_name();
 
                 // Track last known character for this window (for logged-out cycling feature)
-                session_state.update_last_character(event.window, new_character_name);
+                ctx.session_state.update_last_character(event.window, new_character_name);
 
                 // Query actual position from X11
-                let geom = ctx.conn.get_geometry(thumbnail.window)
+                let geom = ctx.app_ctx.conn.get_geometry(thumbnail.window)
                     .context("Failed to send geometry query during character change")?
                     .reply()
                     .context(format!("Failed to get geometry during character change for window {}", thumbnail.window))?;
                 let current_pos = Position::new(geom.x, geom.y);
 
                 // Update cycle state with new character name
-                cycle_state.update_character(event.window, new_character_name.to_string());
+                ctx.cycle_state.update_character(event.window, new_character_name.to_string());
 
                 // Handle character swap: updates position mapping in config and saves to disk
                 // Returns either preserved position (if configured) or current position
-                let new_position = daemon_config.handle_character_change(
+                let new_position = ctx.daemon_config.handle_character_change(
                     &old_name,
                     new_character_name,
                     current_pos,
@@ -472,29 +463,29 @@ pub fn handle_event<'a>(
                 .context(format!("Failed to handle character change from '{}' to '{}'", old_name, new_character_name))?;
                 
                 // Update session state
-                session_state.update_window_position(event.window, current_pos.x, current_pos.y);
+                ctx.session_state.update_window_position(event.window, current_pos.x, current_pos.y);
                 
                 // Update thumbnail (may move to new position)
                 thumbnail.set_character_name(new_character_name.to_string(), new_position)
                     .context(format!("Failed to update thumbnail after character change from '{}'", old_name))?;
                 
-            } else if event.atom == ctx.atoms.wm_name {
+            } else if event.atom == ctx.app_ctx.atoms.wm_name {
                 // Check if this is a new EVE window being detected (title change from generic to character name)
                 use super::window_detection::{check_eve_window, check_and_create_window};
                 
-                if let Some(character_name) = check_eve_window(ctx, event.window, session_state)
+                if let Some(character_name) = check_eve_window(ctx.app_ctx, event.window, ctx.session_state)
                     .context(format!("Failed to check if window {} became EVE client", event.window))? {
                     
                     // Register with cycle state (always, regardless of thumbnail setting)
-                    cycle_state.add_window(character_name.clone(), event.window);
+                    ctx.cycle_state.add_window(character_name.clone(), event.window);
                     
                     // Only create thumbnail if thumbnails are enabled
-                    if ctx.config.enabled
-                        && let Some(thumbnail) = check_and_create_window(ctx, daemon_config, event.window, session_state)
+                    if ctx.app_ctx.config.enabled
+                        && let Some(thumbnail) = check_and_create_window(ctx.app_ctx, ctx.daemon_config, event.window, ctx.session_state)
                             .context(format!("Failed to create thumbnail for newly detected EVE window {}", event.window))? {
                             
                             // Save initial position and dimensions for newly detected character
-                            let geom = ctx.conn.get_geometry(thumbnail.window)
+                            let geom = ctx.app_ctx.conn.get_geometry(thumbnail.window)
                                 .context("Failed to query geometry for newly detected thumbnail")?
                                 .reply()
                                 .context("Failed to get geometry reply for newly detected thumbnail")?;
@@ -508,27 +499,27 @@ pub fn handle_event<'a>(
                                     thumbnail.dimensions.width,
                                     thumbnail.dimensions.height,
                                 );
-                                daemon_config.character_thumbnails.insert(thumbnail.character_name.clone(), settings);
+                                ctx.daemon_config.character_thumbnails.insert(thumbnail.character_name.clone(), settings);
                             }
                             
                             // Conditionally persist to disk based on auto-save setting
-                            if daemon_config.profile.thumbnail_auto_save_position {
-                                daemon_config.save()
+                            if ctx.daemon_config.profile.thumbnail_auto_save_position {
+                                ctx.daemon_config.save()
                                     .context(format!("Failed to save initial position for newly detected character '{}'", thumbnail.character_name))?;
                             }
                             
-                            eves.insert(event.window, thumbnail);
+                            ctx.eves.insert(event.window, thumbnail);
                         }
                 }
-            } else if event.atom == ctx.atoms.net_wm_state
-                && let Some(thumbnail) = eves.get_mut(&event.window)
-                && let Some(mut state) = ctx.conn
+            } else if event.atom == ctx.app_ctx.atoms.net_wm_state
+                && let Some(thumbnail) = ctx.eves.get_mut(&event.window)
+                && let Some(mut state) = ctx.app_ctx.conn
                     .get_property(false, event.window, event.atom, AtomEnum::ATOM, 0, 1024)
                     .context(format!("Failed to query window state for window {}", event.window))?
                     .reply()
                     .context(format!("Failed to get window state reply for window {}", event.window))?
                     .value32()
-                && state.any(|s| s == ctx.atoms.net_wm_state_hidden)
+                && state.any(|s| s == ctx.app_ctx.atoms.net_wm_state_hidden)
             {
                 thumbnail.minimized()
                     .context(format!("Failed to set minimized state for '{}'", thumbnail.character_name))?;
@@ -537,7 +528,7 @@ pub fn handle_event<'a>(
         }
         Event::ConfigureNotify(event) => {
             // Update cached position if window manager moves the thumbnail
-            if let Some(_thumbnail) = eves.get_mut(&event.window) {
+            if let Some(_thumbnail) = ctx.eves.get_mut(&event.window) {
                 // WARNING: Do NOT update current_position from ConfigureNotify events.
                 // Depending on the WM and window type (override-redirect), coordinates might be
                 // relative to a parent frame (e.g. 0,0) instead of absolute root coordinates.
