@@ -21,72 +21,14 @@ use super::font;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
 use super::window_detection::check_and_create_window;
+use x11rb::rust_connection::RustConnection;
+use std::thread::JoinHandle;
 
-fn get_eves<'a>(
-    ctx: &AppContext<'a>,
-    daemon_config: &mut DaemonConfig,
-    state: &mut SessionState,
-) -> Result<HashMap<Window, Thumbnail<'a>>> {
-    let net_client_list = ctx.atoms.net_client_list;
-    let prop = ctx.conn
-        .get_property(
-            false,
-            ctx.screen.root,
-            net_client_list,
-            AtomEnum::WINDOW,
-            0,
-            u32::MAX,
-        )
-        .context("Failed to query _NET_CLIENT_LIST property")?
-        .reply()
-        .context("Failed to get window list from X11 server")?;
-    let windows: Vec<u32> = prop
-        .value32()
-        .ok_or_else(|| anyhow::anyhow!("Invalid return from _NET_CLIENT_LIST"))?
-        .collect();
-
-    let mut eves = HashMap::new();
-    for w in windows {
-        if let Some(eve) = check_and_create_window(ctx, daemon_config, w, state)
-            .context(format!("Failed to process window {} during initial scan", w))? {
-
-            // Save initial position and dimensions (important for first-time characters)
-            // Query geometry to get actual position from X11
-            let geom = ctx.conn.get_geometry(eve.window)
-                .context("Failed to query geometry during initial scan")?
-                .reply()
-                .context("Failed to get geometry reply during initial scan")?;
-
-            // Update character_thumbnails in memory (skip logged-out clients with empty name)
-            if !eve.character_name.is_empty() {
-                let settings = crate::types::CharacterSettings::new(
-                    geom.x,
-                    geom.y,
-                    eve.dimensions.width,
-                    eve.dimensions.height,
-                );
-                daemon_config.character_thumbnails.insert(eve.character_name.clone(), settings);
-            }
-
-            eves.insert(w, eve);
-        }
-    }
-
-    // Save once after processing all windows (avoids repeated disk writes)
-    if daemon_config.profile.thumbnail_auto_save_position && !eves.is_empty() {
-        daemon_config.save()
-            .context("Failed to save initial positions after startup scan")?;
-    }
-
-    ctx.conn.flush()
-        .context("Failed to flush X11 connection after creating thumbnails")?;
-    Ok(eves)
-}
-
-pub async fn run_preview_daemon() -> Result<()> {
+fn initialize_x11() -> Result<(RustConnection, usize, CachedAtoms, crate::x11::CachedFormats)> {
     // Connect to X11 first to get screen dimensions for smart config defaults
     let (conn, screen_num) = x11rb::connect(None)
         .context("Failed to connect to X11 server. Is DISPLAY set correctly?")?;
+    
     let screen = &conn.setup().roots[screen_num];
     info!(
         screen = screen_num,
@@ -95,31 +37,59 @@ pub async fn run_preview_daemon() -> Result<()> {
         "Connected to X11 server"
     );
 
-    // Set up signal handler for manual save trigger (SIGUSR1)
-    // We use tokio::signal::unix for async signal handling on Linux
-    let mut sigusr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
-        .context("Failed to register SIGUSR1 handler")?;
-    info!("Registered SIGUSR1 handler for manual position save");
+    // Pre-cache atoms once at startup
+    let atoms = CachedAtoms::new(&conn)
+        .context("Failed to cache X11 atoms at startup")?;
+    
+    conn.damage_query_version(1, 1)
+        .context("Failed to query DAMAGE extension version. Is DAMAGE extension available?")?;
+    
+    conn.change_window_attributes(
+        screen.root,
+        &ChangeWindowAttributesAux::new().event_mask(
+            EventMask::SUBSTRUCTURE_NOTIFY
+                | EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE
+                | EventMask::POINTER_MOTION,
+        ),
+    )
+    .context("Failed to set event mask on root window")?;
 
+    // Pre-cache picture formats
+    let formats = crate::x11::CachedFormats::new(&conn, screen)
+        .context("Failed to cache picture formats at startup")?;
+    info!("Picture formats cached");
+
+    // Note: Font renderer initialization is deferred until after config load
+    // as it depends on user-configured font settings.
+    
+    Ok((conn, screen_num, atoms, formats))
+}
+
+fn load_configuration(screen: &Screen) -> Result<(DaemonConfig, crate::config::DisplayConfig, SessionState, CycleState)> {
     // Load config with screen-aware defaults
-    let mut daemon_config = DaemonConfig::load_with_screen(
+    let daemon_config = DaemonConfig::load_with_screen(
         screen.width_in_pixels,
         screen.height_in_pixels,
     );
     let config = daemon_config.build_display_config();
     info!(config = ?config, "Loaded display configuration");
     
-    let mut session_state = SessionState::new();
+    let session_state = SessionState::new();
     info!(
         count = daemon_config.character_thumbnails.len(),
         "Loaded character positions from config"
     );
     
     // Initialize cycle state from config
-    let mut cycle_state = CycleState::new(daemon_config.profile.hotkey_cycle_group.clone());
-    
+    let cycle_state = CycleState::new(daemon_config.profile.hotkey_cycle_group.clone());
+
+    Ok((daemon_config, config, session_state, cycle_state))
+}
+
+fn setup_hotkeys(daemon_config: &DaemonConfig) -> (Option<Vec<JoinHandle<()>>>, mpsc::Receiver<CycleCommand>, HashMap<crate::config::HotkeyBinding, Vec<String>>) {
     // Create channel for hotkey thread → main loop
-    let (hotkey_tx, mut hotkey_rx) = mpsc::channel(32);
+    let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
 
     // Build character hotkey list from character_hotkeys HashMap, using cycle group order
     let character_hotkeys: Vec<_> = daemon_config.profile.hotkey_cycle_group
@@ -170,7 +140,7 @@ pub async fn run_preview_daemon() -> Result<()> {
         && daemon_config.profile.hotkey_cycle_backward.is_some();
     let has_character_hotkeys = !character_hotkeys.is_empty();
 
-    let _hotkey_handle = if has_cycle_keys || has_character_hotkeys {
+    let hotkey_handle = if has_cycle_keys || has_character_hotkeys {
         if hotkeys::check_permissions() {
             match spawn_listener(
                 hotkey_tx,
@@ -202,101 +172,30 @@ pub async fn run_preview_daemon() -> Result<()> {
         info!("No hotkeys configured - hotkey support disabled");
         None
     };
-    
-    // Pre-cache atoms once at startup (eliminates roundtrip overhead)
-    let atoms = CachedAtoms::new(&conn)
-        .context("Failed to cache X11 atoms at startup")?;
-    
-    // Initialize font renderer with configured font (or fallback to system default)
-    let font_renderer = if !daemon_config.profile.thumbnail_text_font.is_empty() {
-        info!(
-            configured_font = %daemon_config.profile.thumbnail_text_font,
-            size = daemon_config.profile.thumbnail_text_size,
-            "Attempting to load user-configured font"
-        );
-        // Try user-selected font first
-        font::FontRenderer::from_font_name(
-            &daemon_config.profile.thumbnail_text_font,
-            daemon_config.profile.thumbnail_text_size as f32
-        )
-        .or_else(|e| {
-            warn!(
-                font = %daemon_config.profile.thumbnail_text_font,
-                error = ?e,
-                "Failed to load configured font, falling back to system default"
-            );
-            font::FontRenderer::from_system_font(&conn, daemon_config.profile.thumbnail_text_size as f32)
-        })
-    } else {
-        info!(
-            size = daemon_config.profile.thumbnail_text_size,
-            "No font configured, using system default"
-        );
-        font::FontRenderer::from_system_font(&conn, daemon_config.profile.thumbnail_text_size as f32)
-    }
-    .context(format!("Failed to initialize font renderer with size {}", daemon_config.profile.thumbnail_text_size))?;
-    
-    info!(
-        size = daemon_config.profile.thumbnail_text_size,
-        font = %daemon_config.profile.thumbnail_text_font,
-        "Font renderer initialized"
-    );
-    
-    conn.damage_query_version(1, 1)
-        .context("Failed to query DAMAGE extension version. Is DAMAGE extension available?")?;
-    conn.change_window_attributes(
-        screen.root,
-        &ChangeWindowAttributesAux::new().event_mask(
-            EventMask::SUBSTRUCTURE_NOTIFY
-                | EventMask::BUTTON_PRESS
-                | EventMask::BUTTON_RELEASE
-                | EventMask::POINTER_MOTION,
-        ),
-    )
-    .context("Failed to set event mask on root window")?;
 
-    // Pre-cache picture formats (avoids expensive queries on every thumbnail)
-    let formats = crate::x11::CachedFormats::new(&conn, screen)
-        .context("Failed to cache picture formats at startup")?;
-    info!("Picture formats cached");
+    (hotkey_handle, hotkey_rx, hotkey_groups)
+}
 
-    let ctx = AppContext {
-        conn: &conn,
-        screen,
-        config: &config,
-        atoms: &atoms,
-        formats: &formats,
-        font_renderer: &font_renderer,
-    };
-
-    let mut eves = get_eves(&ctx, &mut daemon_config, &mut session_state)
-        .context("Failed to get initial list of EVE windows")?;
-    
-    // Register initial windows with cycle state
-    // When thumbnails are enabled, use the eves HashMap
-    // When thumbnails are disabled, use session_state.window_last_character which was
-    // populated by check_eve_window() during get_eves() scan
-    if config.enabled {
-        for (window, thumbnail) in eves.iter() {
-            cycle_state.add_window(thumbnail.character_name.clone(), *window);
-        }
-    } else {
-        // Thumbnails disabled - register windows from session_state tracking
-        for (window, character_name) in session_state.window_last_character.iter() {
-            cycle_state.add_window(character_name.clone(), *window);
-        }
-    }
-    
+async fn run_event_loop(
+    ctx: AppContext<'_>,
+    mut daemon_config: DaemonConfig,
+    mut session_state: SessionState,
+    mut cycle_state: CycleState,
+    mut eves: HashMap<Window, Thumbnail<'_>>,
+    mut hotkey_rx: mpsc::Receiver<CycleCommand>,
+    hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
+    mut sigusr1: tokio::signal::unix::Signal,
+) -> Result<()> {
     info!("Preview daemon running (async)");
 
     // Wrap X11 connection in AsyncFd for async polling
     // This allows us to wake up exactly when X11 has data, without busy polling
-    let x11_fd = AsyncFd::new(conn.stream().as_raw_fd())
+    let x11_fd = AsyncFd::new(ctx.conn.stream().as_raw_fd())
         .context("Failed to create AsyncFd for X11 connection")?;
 
     loop {
         // Ensure ALL pending X11 events are processed before sleeping
-        while let Some(event) = conn.poll_for_event()
+        while let Some(event) = ctx.conn.poll_for_event()
             .context("Failed to poll for X11 event")? {
             // Scope the mutable borrows for event handling
             {
@@ -316,7 +215,7 @@ pub async fn run_preview_daemon() -> Result<()> {
         }
 
         // Flush any pending requests to X server
-        let _ = conn.flush();
+        let _ = ctx.conn.flush();
 
         tokio::select! {
              // 1. Handle SIGUSR1 (Manual Save)
@@ -333,7 +232,7 @@ pub async fn run_preview_daemon() -> Result<()> {
             Some(command) = hotkey_rx.recv() => {
                  // Check if we should only allow hotkeys when EVE window is focused
                 let should_process = if daemon_config.profile.hotkey_require_eve_focus {
-                    crate::x11::is_eve_window_focused(&conn, screen, &atoms)
+                    crate::x11::is_eve_window_focused(ctx.conn, ctx.screen, ctx.atoms)
                         .inspect_err(|e| error!(error = %e, "Failed to check focused window"))
                         .unwrap_or(false)
                 } else {
@@ -481,7 +380,7 @@ pub async fn run_preview_daemon() -> Result<()> {
                             "Activating window via hotkey"
                         );
                         
-                        if let Err(e) = activate_window(&conn, screen, &atoms, window) {
+                        if let Err(e) = activate_window(ctx.conn, ctx.screen, ctx.atoms, window) {
                             error!(window = window, error = %e, "Failed to activate window");
                         } else {
                             debug!(window = window, "activate_window completed successfully");
@@ -494,7 +393,7 @@ pub async fn run_preview_daemon() -> Result<()> {
                                     .filter(|w| *w != window)
                                     .collect();
                                 for other_window in other_windows {
-                                    if let Err(e) = minimize_window(&conn, screen, &atoms, other_window) {
+                                    if let Err(e) = minimize_window(ctx.conn, ctx.screen, ctx.atoms, other_window) {
                                         debug!(window = other_window, error = %e, "Failed to minimize window via hotkey");
                                     }
                                 }
@@ -518,4 +417,164 @@ pub async fn run_preview_daemon() -> Result<()> {
             }
         }
     }
+}
+
+fn initialize_font(conn: &RustConnection, config: &DaemonConfig) -> Result<font::FontRenderer> {
+    if !config.profile.thumbnail_text_font.is_empty() {
+        info!(
+            configured_font = %config.profile.thumbnail_text_font,
+            size = config.profile.thumbnail_text_size,
+            "Attempting to load user-configured font"
+        );
+        font::FontRenderer::from_font_name(
+            &config.profile.thumbnail_text_font,
+            config.profile.thumbnail_text_size as f32
+        )
+        .or_else(|e| {
+            warn!(
+                font = %config.profile.thumbnail_text_font,
+                error = ?e,
+                "Failed to load configured font, falling back to system default"
+            );
+            font::FontRenderer::from_system_font(conn, config.profile.thumbnail_text_size as f32)
+        })
+    } else {
+        info!(
+            size = config.profile.thumbnail_text_size,
+            "No font configured, using system default"
+        );
+        font::FontRenderer::from_system_font(conn, config.profile.thumbnail_text_size as f32)
+    }
+    .context(format!("Failed to initialize font renderer with size {}", config.profile.thumbnail_text_size))
+}
+
+fn get_eves<'a>(
+    ctx: &AppContext<'a>,
+    daemon_config: &mut DaemonConfig,
+    state: &mut SessionState,
+) -> Result<HashMap<Window, Thumbnail<'a>>> {
+    let net_client_list = ctx.atoms.net_client_list;
+    let prop = ctx.conn
+        .get_property(
+            false,
+            ctx.screen.root,
+            net_client_list,
+            AtomEnum::WINDOW,
+            0,
+            u32::MAX,
+        )
+        .context("Failed to query _NET_CLIENT_LIST property")?
+        .reply()
+        .context("Failed to get window list from X11 server")?;
+    let windows: Vec<u32> = prop
+        .value32()
+        .ok_or_else(|| anyhow::anyhow!("Invalid return from _NET_CLIENT_LIST"))?
+        .collect();
+
+    let mut eves = HashMap::new();
+    for w in windows {
+        if let Some(eve) = check_and_create_window(ctx, daemon_config, w, state)
+            .context(format!("Failed to process window {} during initial scan", w))? {
+
+            // Save initial position and dimensions (important for first-time characters)
+            // Query geometry to get actual position from X11
+            let geom = ctx.conn.get_geometry(eve.window)
+                .context("Failed to query geometry during initial scan")?
+                .reply()
+                .context("Failed to get geometry reply during initial scan")?;
+
+            // Update character_thumbnails in memory (skip logged-out clients with empty name)
+            if !eve.character_name.is_empty() {
+                let settings = crate::types::CharacterSettings::new(
+                    geom.x,
+                    geom.y,
+                    eve.dimensions.width,
+                    eve.dimensions.height,
+                );
+                daemon_config.character_thumbnails.insert(eve.character_name.clone(), settings);
+            }
+
+            eves.insert(w, eve);
+        }
+    }
+
+    // Save once after processing all windows (avoids repeated disk writes)
+    if daemon_config.profile.thumbnail_auto_save_position && !eves.is_empty() {
+        daemon_config.save()
+            .context("Failed to save initial positions after startup scan")?;
+    }
+
+    ctx.conn.flush()
+        .context("Failed to flush X11 connection after creating thumbnails")?;
+    Ok(eves)
+}
+
+pub async fn run_preview_daemon() -> Result<()> {
+    // 1. Initialize X11 connection and resources
+    let (conn, _screen_num, atoms, formats) = initialize_x11()
+        .context("Failed to initialize X11")?;
+
+    // Re-acquire screen reference from connection (x11rb::connect returns screen index)
+    let screen = &conn.setup().roots[_screen_num];
+
+    // 2. Load Configuration and State
+    let (mut daemon_config, config, mut session_state, mut cycle_state) = load_configuration(screen)
+        .context("Failed to load configuration")?;
+
+    // 3. Setup Signal Handler
+    // We do this here as it requires async runtime context
+    let sigusr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+        .context("Failed to register SIGUSR1 handler")?;
+    info!("Registered SIGUSR1 handler for manual position save");
+
+    // 4. Setup Hotkeys
+    let (_hotkey_handle, hotkey_rx, hotkey_groups) = setup_hotkeys(&daemon_config);
+    
+    // 5. Initialize Font Renderer
+    // This depends on config so it runs after config load
+    let font_renderer = initialize_font(&conn, &daemon_config)
+        .context("Failed to initialize font renderer")?;
+    
+    info!(
+        size = daemon_config.profile.thumbnail_text_size,
+        font = %daemon_config.profile.thumbnail_text_font,
+        "Font renderer initialized"
+    );
+
+    // 6. Build AppContext
+    let ctx = AppContext {
+        conn: &conn,
+        screen,
+        config: &config,
+        atoms: &atoms,
+        formats: &formats,
+        font_renderer: &font_renderer,
+    };
+
+    // 7. Initial Window Scan
+    let eves = get_eves(&ctx, &mut daemon_config, &mut session_state)
+        .context("Failed to get initial list of EVE windows")?;
+    
+    // Register initial windows with cycle state
+    if config.enabled {
+        for (window, thumbnail) in eves.iter() {
+            cycle_state.add_window(thumbnail.character_name.clone(), *window);
+        }
+    } else {
+        for (window, character_name) in session_state.window_last_character.iter() {
+            cycle_state.add_window(character_name.clone(), *window);
+        }
+    }
+    
+    // 8. Run Main Event Loop
+    run_event_loop(
+        ctx,
+        daemon_config,
+        session_state,
+        cycle_state,
+        eves,
+        hotkey_rx,
+        hotkey_groups,
+        sigusr1
+    ).await
 }
