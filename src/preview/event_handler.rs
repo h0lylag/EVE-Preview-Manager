@@ -25,7 +25,7 @@ use super::thumbnail::Thumbnail;
 pub struct EventContext<'a, 'b> {
     pub app_ctx: &'a AppContext<'a>,
     pub daemon_config: &'b mut DaemonConfig,
-    pub eves: &'b mut HashMap<Window, Thumbnail<'a>>,
+    pub eve_clients: &'b mut HashMap<Window, Thumbnail<'a>>,
     pub session_state: &'b mut SessionState,
     pub cycle_state: &'b mut CycleState,
 }
@@ -39,7 +39,7 @@ fn handle_damage_notify(ctx: &mut EventContext, event: x11rb::protocol::damage::
     }
 
     // No logging - this fires every frame and would flood logs
-    if let Some(thumbnail) = ctx.eves
+    if let Some(thumbnail) = ctx.eve_clients
         .values()
         .find(|thumbnail| thumbnail.damage == event.damage)
     {
@@ -102,7 +102,7 @@ fn handle_create_notify(
                         .context(format!("Failed to save initial position for new character '{}'", thumbnail.character_name))?;
                 }
                 
-                ctx.eves.insert(event.window, thumbnail);
+                ctx.eve_clients.insert(event.window, thumbnail);
             }
     }
     Ok(())
@@ -117,7 +117,7 @@ fn handle_destroy_notify(
     info!(window = event.window, "DestroyNotify received");
     ctx.cycle_state.remove_window(event.window);
     ctx.session_state.remove_window(event.window);
-    ctx.eves.remove(&event.window);
+    ctx.eve_clients.remove(&event.window);
     Ok(())
 }
 
@@ -133,20 +133,20 @@ fn handle_focus_in(
     if ctx.cycle_state.set_current_by_window(event.event) {
         debug!(window = event.event, "Synced cycle state to focused window");
     }
-    if let Some(thumbnail) = ctx.eves.get_mut(&event.event) {
+    if let Some(thumbnail) = ctx.eve_clients.get_mut(&event.event) {
         // Transition to focused normal state (from minimized or unfocused)
         thumbnail.state = ThumbnailState::Normal { focused: true };
         thumbnail.border(true)
             .context(format!("Failed to update border on focus for '{}'", thumbnail.character_name))?;
-        if ctx.app_ctx.config.hide_when_no_focus && ctx.eves.values().any(|x| !x.state.is_visible()) {
+        if ctx.app_ctx.config.hide_when_no_focus && ctx.eve_clients.values().any(|x| !x.state.is_visible()) {
             // Reveal all hidden thumbnails (visibility sets focused=false, so we fix the focused one after)
-            for thumbnail in ctx.eves.values_mut() {
+            for thumbnail in ctx.eve_clients.values_mut() {
                 debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
                 thumbnail.visibility(true)
                     .context(format!("Failed to show thumbnail '{}' on focus", thumbnail.character_name))?;
             }
             // Restore focused state for the window that just received focus (visibility() reset it to unfocused)
-            if let Some(focused_thumbnail) = ctx.eves.get_mut(&event.event) {
+            if let Some(focused_thumbnail) = ctx.eve_clients.get_mut(&event.event) {
                 focused_thumbnail.state = ThumbnailState::Normal { focused: true };
             }
         }
@@ -161,13 +161,13 @@ fn handle_focus_out(
     event: FocusOutEvent,
 ) -> Result<()> {
     debug!(window = event.event, "FocusOut received");
-    if let Some(thumbnail) = ctx.eves.get_mut(&event.event) {
+    if let Some(thumbnail) = ctx.eve_clients.get_mut(&event.event) {
         // Transition to unfocused normal state
         thumbnail.state = ThumbnailState::Normal { focused: false };
         thumbnail.border(false)
             .context(format!("Failed to clear border on focus loss for '{}'", thumbnail.character_name))?;
-        if ctx.app_ctx.config.hide_when_no_focus && ctx.eves.values().all(|x| !x.state.is_focused() && !x.state.is_minimized()) {
-            for thumbnail in ctx.eves.values_mut() {
+        if ctx.app_ctx.config.hide_when_no_focus && ctx.eve_clients.values().all(|x| !x.state.is_focused() && !x.state.is_minimized()) {
+            for thumbnail in ctx.eve_clients.values_mut() {
                 debug!(character = %thumbnail.character_name, "Hiding thumbnail due to focus loss");
                 thumbnail.visibility(false)
                     .context(format!("Failed to hide thumbnail '{}' on focus loss", thumbnail.character_name))?;
@@ -186,7 +186,7 @@ fn handle_button_press(
     debug!(x = event.root_x, y = event.root_y, detail = event.detail, "ButtonPress received");
     
     // First, find which window was clicked (if any)
-    let clicked_window = ctx.eves
+    let clicked_window = ctx.eve_clients
         .iter()
         .find(|(_, thumb)| thumb.is_hovered(event.root_x, event.root_y) && thumb.state.is_visible())
         .map(|(win, _)| *win);
@@ -197,7 +197,7 @@ fn handle_button_press(
     
     // For right-click drags, collect snap targets BEFORE getting mutable reference
     let snap_targets = if event.detail == mouse::BUTTON_RIGHT {
-        ctx.eves
+        ctx.eve_clients
             .iter()
             .filter(|(win, t)| **win != clicked_window && t.state.is_visible())
             .filter_map(|(_, t)| {
@@ -216,7 +216,7 @@ fn handle_button_press(
     };
     
     // Now get mutable reference to the clicked thumbnail
-    if let Some(thumbnail) = ctx.eves.get_mut(&clicked_window)
+    if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_window)
     {
         debug!(window = thumbnail.window, character = %thumbnail.character_name, "ButtonPress on thumbnail");
         let geom = ctx.app_ctx.conn.get_geometry(thumbnail.window)
@@ -251,7 +251,7 @@ fn handle_button_release(
     debug!(x = event.root_x, y = event.root_y, detail = event.detail, "ButtonRelease received");
     
     // First pass: identify the hovered thumbnail by the EVE window key
-    let clicked_key = ctx.eves
+    let clicked_key = ctx.eve_clients
         .iter()
         .find(|(_, thumb)| {
             let hovered = thumb.is_hovered(event.root_x, event.root_y);
@@ -270,7 +270,7 @@ fn handle_button_release(
     let mut clicked_src: Option<Window> = None;
     let is_left_click = event.detail == mouse::BUTTON_LEFT;
     
-    if let Some(thumbnail) = ctx.eves.get_mut(&clicked_key) {
+    if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_key) {
         debug!(window = thumbnail.window, character = %thumbnail.character_name, "ButtonRelease on thumbnail");
         clicked_src = Some(thumbnail.src);
         
@@ -324,7 +324,7 @@ fn handle_button_release(
         && ctx.daemon_config.profile.client_minimize_on_switch
         && let Some(clicked_src) = clicked_src
     {
-        for other_window in ctx.eves
+        for other_window in ctx.eve_clients
             .values()
             .filter(|t| t.src != clicked_src)
             .map(|t| t.src)
@@ -347,7 +347,7 @@ fn handle_motion_notify(
     trace!(x = event.root_x, y = event.root_y, "MotionNotify received");
     
     // Find the dragging thumbnail (typically only one at a time)
-    let dragging_window = ctx.eves.iter()
+    let dragging_window = ctx.eve_clients.iter()
         .find(|(_, t)| t.input_state.dragging)
         .map(|(win, _)| *win);
     
@@ -360,7 +360,7 @@ fn handle_motion_notify(
     // Get the dragging thumbnail and clone snap targets to avoid borrow conflict
     // Snap targets were computed once in ButtonPress, avoiding repeated X11 queries
     // Vec<Rect> clone is cheap since Rect is Copy (just copying some i16/u16 values)
-    let thumbnail = ctx.eves.get_mut(&dragging_window).unwrap();
+    let thumbnail = ctx.eve_clients.get_mut(&dragging_window).unwrap();
     let snap_targets = thumbnail.input_state.snap_targets.clone();
     
     handle_drag_motion(
@@ -430,7 +430,7 @@ pub fn handle_event(
         Event::MotionNotify(event) => handle_motion_notify(ctx, event),
         PropertyNotify(event) => {
             if event.atom == ctx.app_ctx.atoms.wm_name
-                && let Some(thumbnail) = ctx.eves.get_mut(&event.window)
+                && let Some(thumbnail) = ctx.eve_clients.get_mut(&event.window)
                 && let Some(eve_window) = is_window_eve(ctx.app_ctx.conn, event.window, ctx.app_ctx.atoms)
                     .context(format!("Failed to check if window {} is EVE client during property change", event.window))?
             {
@@ -508,11 +508,11 @@ pub fn handle_event(
                                     .context(format!("Failed to save initial position for newly detected character '{}'", thumbnail.character_name))?;
                             }
                             
-                            ctx.eves.insert(event.window, thumbnail);
+                            ctx.eve_clients.insert(event.window, thumbnail);
                         }
                 }
             } else if event.atom == ctx.app_ctx.atoms.net_wm_state
-                && let Some(thumbnail) = ctx.eves.get_mut(&event.window)
+                && let Some(thumbnail) = ctx.eve_clients.get_mut(&event.window)
                 && let Some(mut state) = ctx.app_ctx.conn
                     .get_property(false, event.window, event.atom, AtomEnum::ATOM, 0, 1024)
                     .context(format!("Failed to query window state for window {}", event.window))?
@@ -528,7 +528,7 @@ pub fn handle_event(
         }
         Event::ConfigureNotify(event) => {
             // Update cached position if window manager moves the thumbnail
-            if let Some(_thumbnail) = ctx.eves.get_mut(&event.window) {
+            if let Some(_thumbnail) = ctx.eve_clients.get_mut(&event.window) {
                 // WARNING: Do NOT update current_position from ConfigureNotify events.
                 // Depending on the WM and window type (override-redirect), coordinates might be
                 // relative to a parent frame (e.g. 0,0) instead of absolute root coordinates.

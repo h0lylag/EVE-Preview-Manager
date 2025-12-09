@@ -181,7 +181,7 @@ async fn run_event_loop(
     mut daemon_config: DaemonConfig,
     mut session_state: SessionState,
     mut cycle_state: CycleState,
-    mut eves: HashMap<Window, Thumbnail<'_>>,
+    mut eve_clients: HashMap<Window, Thumbnail<'_>>,
     mut hotkey_rx: mpsc::Receiver<CycleCommand>,
     hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
     mut sigusr1: tokio::signal::unix::Signal,
@@ -202,7 +202,7 @@ async fn run_event_loop(
                 let mut context = EventContext {
                     app_ctx: &ctx,
                     daemon_config: &mut daemon_config,
-                    eves: &mut eves,
+                    eve_clients: &mut eve_clients,
                     session_state: &mut session_state,
                     cycle_state: &mut cycle_state,
                 };
@@ -387,7 +387,7 @@ async fn run_event_loop(
                             
                             if daemon_config.profile.client_minimize_on_switch {
                                 // Minimize all other EVE clients after successful activation
-                                let other_windows: Vec<Window> = eves
+                                let other_windows: Vec<Window> = eve_clients
                                     .keys()
                                     .copied()
                                     .filter(|w| *w != window)
@@ -448,7 +448,7 @@ fn initialize_font(conn: &RustConnection, config: &DaemonConfig) -> Result<font:
     .context(format!("Failed to initialize font renderer with size {}", config.profile.thumbnail_text_size))
 }
 
-fn get_eves<'a>(
+fn scan_eve_windows<'a>(
     ctx: &AppContext<'a>,
     daemon_config: &mut DaemonConfig,
     state: &mut SessionState,
@@ -552,12 +552,12 @@ pub async fn run_preview_daemon() -> Result<()> {
     };
 
     // 7. Initial Window Scan
-    let eves = get_eves(&ctx, &mut daemon_config, &mut session_state)
+    let eve_clients = scan_eve_windows(&ctx, &mut daemon_config, &mut session_state)
         .context("Failed to get initial list of EVE windows")?;
     
     // Register initial windows with cycle state
     if config.enabled {
-        for (window, thumbnail) in eves.iter() {
+        for (window, thumbnail) in eve_clients.iter() {
             cycle_state.add_window(thumbnail.character_name.clone(), *window);
         }
     } else {
@@ -572,7 +572,7 @@ pub async fn run_preview_daemon() -> Result<()> {
         daemon_config,
         session_state,
         cycle_state,
-        eves,
+        eve_clients,
         hotkey_rx,
         hotkey_groups,
         sigusr1
