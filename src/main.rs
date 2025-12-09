@@ -16,6 +16,7 @@ use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
 #[command(name = "eve-preview-manager")]
+#[command(version)]
 #[command(about = "EVE Online window preview manager", long_about = None)]
 struct Cli {
     /// Run in preview daemon mode (background process showing thumbnails)
