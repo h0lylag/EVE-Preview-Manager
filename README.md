@@ -9,30 +9,54 @@ This project is under active development and should be working. Keep in mind it'
 ## Features
 
 - Real-time thumbnail previews of all EVE client windows
-- Click thumbnails to activate windows or drag to reposition
-- Hotkey-based character cycling with configurable key bindings
+- Per-character and cycle group hotkeys with configurable key bindings
 - Customizable thumbnail appearance including size, opacity, fonts, colors, and borders
 - Profile-based configuration system for managing multiple setups
 - One-click character import for cycle groups
-- Optional features: cycle through logged-off clients, auto-minimize inactive windows, position inheritance for new characters
+- Optional features: cycle through logged-off clients, auto-minimize inactive windows, position inheritance for new characters, disable thumbnails altogether
 
 ## Screenshots
 <p align="center">
-  <a href="https://i.imgur.com/rSvkvbG.png">
-    <img src="https://i.imgur.com/rSvkvbG.png" alt="EVE Preview Manager in action" width="400">
+  <a href="https://i.imgur.com/ztw7B1Q.png">
+    <img src="https://i.imgur.com/ztw7B1Q.png" alt="EVE Preview Manager in action" width="400">
   </a>
   <a href="https://i.imgur.com/tfztoAt.png">
     <img src="https://i.imgur.com/tfztoAt.png" alt="EVE Preview Manager Settings" width="400">
   </a>
 </p>
 
+## Usage
+
+1. **Launch the Application**: Run `eve-preview-manager`. It starts in GUI mode and creates a system tray icon.
+2. **Manage Profiles**: Use the GUI to create specific profiles for different activities (e.g., PvP, Mining). You can add, remove, or duplicate profiles to quickly switch between setups.
+3. **Configure Display Settings**: Customize the look and feel of your thumbnails, including size, opacity, fonts, borders, and colors to match your preferences.
+4. **Set Up Hotkeys**:
+   - **Input Device**: Select your input device (auto-detect is recommended).
+   - **Cycle Hotkeys**: Configure hotkeys to cycle between clients in your active group.
+5. **Manage Characters**:
+   - **Add Characters**: Click the "Add" button to include EVE characters in your cycle group. Active and previously detected clients will appear in the popup.
+   - **Manual Entry**: Alternatively, switch to "Text Editor" mode to manually paste a list of character names (one per line).
+   - **Individual Hotkeys**: Once added to the cycle group, you can bind specific hotkeys to individual characters for direct access.
+
+**Note**: Configuration is stored in `~/.config/eve-preview-manager/config.json`.
+
 ## Requirements
 
 - Linux x86_64 with X11 (Wayland users: works via XWayland)
-- User must be in `input` group for hotkey detection (`sudo usermod -aG input $USER`) - Requires re-logging to take effect
+- User must be in `input` group for hotkey detection: `sudo usermod -aG input $USER` (requires re-logging to take effect)
 - Runtime dependencies: OpenGL, fontconfig, dbus, libxkbcommon (should already be installed on most modern Linux distributions)
 
 ## Installation
+
+### Pre-built Binaries (Ubuntu, Arch, Fedora, etc.)
+
+Download the latest release from the [Releases](https://github.com/h0lylag/EVE-Preview-Manager/releases) page:
+
+```bash
+unzip eve-preview-manager-v*.zip
+chmod +x ./eve-preview-manager
+./eve-preview-manager
+```
 
 ### NixOS
 
@@ -50,16 +74,6 @@ environment.systemPackages = [
 ];
 ```
 
-### Other Distros (Ubuntu, Arch, Fedora, etc.)
-
-Download the latest release from the [Releases](https://github.com/h0lylag/EVE-Preview-Manager/releases) page:
-
-```bash
-unzip eve-preview-manager-v*.zip
-chmod +x ./eve-preview-manager
-./eve-preview-manager
-```
-
 ### Build from Source
 
 **Build dependencies:** Rust/Cargo, pkg-config, fontconfig, dbus, X11, libxkbcommon
@@ -69,14 +83,3 @@ git clone https://github.com/h0lylag/EVE-Preview-Manager.git
 cd EVE-Preview-Manager
 cargo build --release
 ```
-
-## Usage
-
-1. Launch EVE Preview Manager — it starts in GUI mode with a system tray icon
-2. Open your EVE Online clients
-3. Thumbnail previews will appear for each EVE window
-4. Click a thumbnail to switch to that window
-5. Drag thumbnails to reposition them
-6. Use the system tray menu or GUI to configure settings
-7. Configure hotkeys and select your preferred input device in the GUI
-8. Config file is stored at `~/.config/eve-preview-manager/config.json`
