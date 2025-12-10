@@ -157,6 +157,27 @@ fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()> {
     if ctx.cycle_state.set_current_by_window(event.event) {
         debug!(window = event.event, "Synced cycle state to focused window");
     }
+
+    // Handle "Hide when no focus" logic - Reveal and refresh if needed
+    // We check this BEFORE updating the specific focused window to ensure clean state transitions
+    if ctx.app_ctx.config.hide_when_no_focus
+        && ctx.eve_clients.values().any(|x| !x.state.is_visible())
+    {
+        for thumbnail in ctx.eve_clients.values_mut() {
+            debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
+            thumbnail.visibility(true).context(format!(
+                "Failed to show thumbnail '{}' on focus",
+                thumbnail.character_name
+            ))?;
+            // Force immediate repaint to ensure content is visible (MapWindow doesn't guarantee content)
+            thumbnail.update().context(format!(
+                "Failed to update thumbnail '{}' on focus reveal",
+                thumbnail.character_name
+            ))?;
+        }
+    }
+
+    // Now update the specific window that received focus
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&event.event) {
         // Transition to focused normal state (from minimized or unfocused)
         thumbnail.state = ThumbnailState::Normal { focused: true };
@@ -164,22 +185,6 @@ fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()> {
             "Failed to update border on focus for '{}'",
             thumbnail.character_name
         ))?;
-        if ctx.app_ctx.config.hide_when_no_focus
-            && ctx.eve_clients.values().any(|x| !x.state.is_visible())
-        {
-            // Reveal all hidden thumbnails (visibility sets focused=false, so we fix the focused one after)
-            for thumbnail in ctx.eve_clients.values_mut() {
-                debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
-                thumbnail.visibility(true).context(format!(
-                    "Failed to show thumbnail '{}' on focus",
-                    thumbnail.character_name
-                ))?;
-            }
-            // Restore focused state for the window that just received focus (visibility() reset it to unfocused)
-            if let Some(focused_thumbnail) = ctx.eve_clients.get_mut(&event.event) {
-                focused_thumbnail.state = ThumbnailState::Normal { focused: true };
-            }
-        }
     }
     Ok(())
 }
