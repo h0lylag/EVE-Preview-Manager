@@ -89,7 +89,116 @@ pub fn ui(
         render_unified_cycle_group_tab(ui, profile, state, hotkey_state, &mut changed);
     });
 
+    if state.show_add_characters_popup {
+        render_add_characters_modal(ui.ctx(), profile, state, &mut changed);
+    }
+
     changed
+}
+
+fn render_add_characters_modal(
+    ctx: &egui::Context,
+    profile: &mut Profile,
+    state: &mut CycleOrderSettingsState,
+    changed: &mut bool,
+) {
+    let mut open = true;
+    egui::Window::new("Add Characters to Cycle Group")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(300.0);
+            ui.label("Select characters to add to cycle order:");
+            ui.add_space(ITEM_SPACING / 2.0);
+
+            // Select All / Deselect All toggle
+            ui.horizontal(|ui| {
+                let all_selected = state.character_selections.values().all(|&v| v);
+                let any_selected = state.character_selections.values().any(|&v| v);
+
+                if ui
+                    .button(if all_selected {
+                        "Deselect All"
+                    } else {
+                        "Select All"
+                    })
+                    .clicked()
+                {
+                    let new_state = !all_selected;
+                    for selected in state.character_selections.values_mut() {
+                        *selected = new_state;
+                    }
+                }
+
+                if any_selected {
+                    ui.label(format!(
+                        "({} selected)",
+                        state.character_selections.values().filter(|&&v| v).count()
+                    ));
+                }
+            });
+
+            ui.add_space(ITEM_SPACING / 2.0);
+            ui.separator();
+            ui.add_space(ITEM_SPACING / 2.0);
+
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    // Collect and sort names for stable display
+                    let mut char_names: Vec<String> =
+                        state.character_selections.keys().cloned().collect();
+                    char_names.sort();
+
+                    for name in char_names {
+                        if let Some(selected) = state.character_selections.get_mut(&name) {
+                            // Show if already in cycle group
+                            let already_in_cycle = profile.hotkey_cycle_group.contains(&name);
+                            let label = if already_in_cycle {
+                                format!("{} (already in cycle)", name)
+                            } else {
+                                name.clone()
+                            };
+
+                            ui.checkbox(selected, label);
+                        }
+                    }
+                });
+
+            ui.add_space(ITEM_SPACING);
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                if ui.button("Add Selected").clicked() {
+                    let mut added_any = false;
+                    for (name, selected) in &state.character_selections {
+                        if *selected && !profile.hotkey_cycle_group.contains(name) {
+                            profile.hotkey_cycle_group.push(name.clone());
+                            added_any = true;
+                        }
+                    }
+
+                    if added_any {
+                        *changed = true;
+                        // If we are in text mode, sync the text buffer
+                        if state.editor_mode == EditorMode::TextEdit {
+                            state.load_from_profile(profile);
+                        }
+                    }
+                    state.show_add_characters_popup = false;
+                }
+
+                if ui.button("Cancel").clicked() {
+                    state.show_add_characters_popup = false;
+                }
+            });
+        });
+
+    if !open {
+        state.show_add_characters_popup = false;
+    }
 }
 
 /// Renders the cycle group editor with integrated per-character hotkey bindings
