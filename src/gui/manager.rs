@@ -27,6 +27,12 @@ enum TrayMessage {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TrayCommand {
+    Update,
+}
+
+#[cfg(target_os = "linux")]
 struct AppTray {
     tx: std::sync::mpsc::Sender<TrayMessage>,
 }
@@ -174,6 +180,8 @@ struct ManagerApp {
     #[cfg(target_os = "linux")]
     tray_rx: Receiver<TrayMessage>,
     #[cfg(target_os = "linux")]
+    tray_cmd_tx: tokio::sync::mpsc::Sender<TrayCommand>,
+    #[cfg(target_os = "linux")]
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
     should_quit: bool,
 
@@ -196,6 +204,8 @@ impl ManagerApp {
         // Create channel for tray icon commands
         #[cfg(target_os = "linux")]
         let (tx_to_app, tray_rx) = mpsc::channel();
+        #[cfg(target_os = "linux")]
+        let (tray_cmd_tx, mut tray_cmd_rx) = tokio::sync::mpsc::channel(16);
 
         // Spawn Tokio thread for ksni tray
         #[cfg(target_os = "linux")]
@@ -219,8 +229,20 @@ impl ManagerApp {
                     Ok(handle) => {
                         info!("Tray icon created via ksni/D-Bus");
 
-                        // Wait for shutdown signal
-                        shutdown_clone.notified().await;
+                        // Handle both shutdown signal and update commands
+                        loop {
+                            tokio::select! {
+                                _ = shutdown_clone.notified() => break,
+                                Some(cmd) = tray_cmd_rx.recv() => {
+                                    match cmd {
+                                        TrayCommand::Update => {
+                                            info!("Received forcing tray update command");
+                                            handle.update(|_| {}).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // Gracefully shutdown tray
                         handle.shutdown().await;
@@ -254,6 +276,7 @@ impl ManagerApp {
             last_health_check: Instant::now(),
             status_message: None,
             tray_rx,
+            tray_cmd_tx,
             shutdown_signal,
             should_quit: false,
             config,
@@ -542,6 +565,11 @@ impl ManagerApp {
                         } else {
                             // Reload daemon with new profile
                             self.reload_daemon_config();
+
+                            // Force tray menu update to reflect new selection
+                            if let Err(e) = self.tray_cmd_tx.try_send(TrayCommand::Update) {
+                                warn!("Failed to send tray update command: {}", e);
+                            }
                         }
                     }
                 }
