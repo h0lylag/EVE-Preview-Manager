@@ -1,8 +1,8 @@
 //! Hotkey binding configuration and key code mapping
 
 use evdev::KeyCode;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 
 /// A keyboard hotkey binding with modifiers
@@ -84,7 +84,14 @@ impl HotkeyBinding {
     }
 
     /// Check if this binding matches a key press with current modifier state
-    pub fn matches(&self, key_code: u16, ctrl: bool, shift: bool, alt: bool, super_key: bool) -> bool {
+    pub fn matches(
+        &self,
+        key_code: u16,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        super_key: bool,
+    ) -> bool {
         self.key_code == key_code
             && self.ctrl == ctrl
             && self.shift == shift
@@ -155,7 +162,10 @@ impl HotkeyBinding {
                         }
                     } else {
                         // Non-modifier, non-last key is invalid
-                        return Err(format!("Non-modifier key '{}' must be last in array", key_name));
+                        return Err(format!(
+                            "Non-modifier key '{}' must be last in array",
+                            key_name
+                        ));
                     }
                 }
             }
@@ -207,16 +217,18 @@ impl<'de> Deserialize<'de> for HotkeyBinding {
         }
 
         match HotkeyFormat::deserialize(deserializer)? {
-            HotkeyFormat::Object { keys, source_devices } => {
-                let mut binding = HotkeyBinding::from_key_array(&keys)
-                    .map_err(de::Error::custom)?;
+            HotkeyFormat::Object {
+                keys,
+                source_devices,
+            } => {
+                let mut binding =
+                    HotkeyBinding::from_key_array(&keys).map_err(de::Error::custom)?;
                 binding.source_devices = source_devices;
                 Ok(binding)
             }
             HotkeyFormat::Array(keys) => {
                 // Legacy format - no source devices
-                HotkeyBinding::from_key_array(&keys)
-                    .map_err(de::Error::custom)
+                HotkeyBinding::from_key_array(&keys).map_err(de::Error::custom)
             }
         }
     }
@@ -294,21 +306,21 @@ pub fn key_code_to_name(code: u16) -> String {
         s if s.starts_with('F') && s.len() <= 3 => s.to_string(),
 
         // Everything else - convert underscores to spaces and title case
-        s => {
-            s.replace('_', " ")
-                .split_whitespace()
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        None => String::new(),
-                        Some(first) => {
-                            first.to_uppercase().chain(chars.as_str().to_lowercase().chars()).collect()
-                        }
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
+        s => s
+            .replace('_', " ")
+            .split_whitespace()
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first
+                        .to_uppercase()
+                        .chain(chars.as_str().to_lowercase().chars())
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -369,7 +381,10 @@ mod tests {
         assert_eq!(binding.to_key_array(), vec!["KEY_LEFTSHIFT", "KEY_TAB"]);
 
         let binding = HotkeyBinding::new(59, true, true, false, false);
-        assert_eq!(binding.to_key_array(), vec!["KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_F1"]);
+        assert_eq!(
+            binding.to_key_array(),
+            vec!["KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_F1"]
+        );
     }
 
     #[test]
@@ -390,7 +405,10 @@ mod tests {
         let binding = HotkeyBinding::new(15, false, true, false, false);
         let json = serde_json::to_string(&binding).unwrap();
         // New object format includes keys and source_devices
-        assert_eq!(json, r#"{"keys":["KEY_LEFTSHIFT","KEY_TAB"],"source_devices":[]}"#);
+        assert_eq!(
+            json,
+            r#"{"keys":["KEY_LEFTSHIFT","KEY_TAB"],"source_devices":[]}"#
+        );
 
         let deserialized: HotkeyBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, binding);
@@ -457,17 +475,17 @@ mod tests {
         assert_eq!(key_code_to_name(125), "Left Super");
 
         // Numpad (using evdev's KP_ prefix)
-        assert_eq!(key_code_to_name(79), "Numpad 1");  // KEY_KP1
-        assert_eq!(key_code_to_name(96), "Numpad Enter");  // KEY_KPENTER
+        assert_eq!(key_code_to_name(79), "Numpad 1"); // KEY_KP1
+        assert_eq!(key_code_to_name(96), "Numpad Enter"); // KEY_KPENTER
 
         // Navigation
-        assert_eq!(key_code_to_name(104), "Page Up");  // KEY_PAGEUP
+        assert_eq!(key_code_to_name(104), "Page Up"); // KEY_PAGEUP
         assert_eq!(key_code_to_name(102), "Home");
 
         // Less common keys that weren't in our original mapping
         // These would have been "Unknown" before, now they work automatically
-        assert_eq!(key_code_to_name(113), "Mute");  // KEY_MUTE
-        assert_eq!(key_code_to_name(114), "Volume Down");  // KEY_VOLUMEDOWN
-        assert_eq!(key_code_to_name(115), "Volume Up");  // KEY_VOLUMEUP
+        assert_eq!(key_code_to_name(113), "Mute"); // KEY_MUTE
+        assert_eq!(key_code_to_name(114), "Volume Down"); // KEY_VOLUMEDOWN
+        assert_eq!(key_code_to_name(115), "Volume Up"); // KEY_VOLUMEUP
     }
 }

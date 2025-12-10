@@ -12,17 +12,17 @@ use x11rb::protocol::xproto::*;
 
 use crate::config::DaemonConfig;
 use crate::constants::eve;
-use crate::input::listener::{self, spawn_listener, CycleCommand};
-use crate::x11::{activate_window, minimize_window, AppContext, CachedAtoms};
+use crate::input::listener::{self, CycleCommand, spawn_listener};
+use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window};
 
 use super::cycle_state::CycleState;
-use super::event_handler::{handle_event, EventContext};
+use super::event_handler::{EventContext, handle_event};
 use super::font;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
 // use super::window_detection::check_and_create_window; // Moved to window_detection
-use x11rb::rust_connection::RustConnection;
 use std::thread::JoinHandle;
+use x11rb::rust_connection::RustConnection;
 
 struct HotkeyResources {
     #[allow(dead_code)]
@@ -38,12 +38,17 @@ struct DaemonResources<'a> {
     eve_clients: HashMap<Window, Thumbnail<'a>>,
 }
 
-fn initialize_x11() -> Result<(RustConnection, usize, CachedAtoms, crate::x11::CachedFormats)> {
+fn initialize_x11() -> Result<(
+    RustConnection,
+    usize,
+    CachedAtoms,
+    crate::x11::CachedFormats,
+)> {
     // Establish connection to the X server to query screen dimensions and root window ID
     // We need the screen dimensions early to set smart defaults for thumbnail sizes
     let (conn, screen_num) = x11rb::connect(None)
         .context("Failed to connect to X11 server. Is DISPLAY set correctly?")?;
-    
+
     let screen = &conn.setup().roots[screen_num];
     info!(
         screen = screen_num,
@@ -53,12 +58,11 @@ fn initialize_x11() -> Result<(RustConnection, usize, CachedAtoms, crate::x11::C
     );
 
     // Pre-cache atoms once at startup
-    let atoms = CachedAtoms::new(&conn)
-        .context("Failed to cache X11 atoms at startup")?;
-    
+    let atoms = CachedAtoms::new(&conn).context("Failed to cache X11 atoms at startup")?;
+
     conn.damage_query_version(1, 1)
         .context("Failed to query DAMAGE extension version. Is DAMAGE extension available?")?;
-    
+
     conn.change_window_attributes(
         screen.root,
         &ChangeWindowAttributesAux::new().event_mask(
@@ -77,25 +81,30 @@ fn initialize_x11() -> Result<(RustConnection, usize, CachedAtoms, crate::x11::C
 
     // Note: Font renderer initialization is deferred until after config load
     // as it depends on user-configured font settings.
-    
+
     Ok((conn, screen_num, atoms, formats))
 }
 
-fn load_configuration(screen: &Screen) -> Result<(DaemonConfig, crate::config::DisplayConfig, SessionState, CycleState)> {
+fn load_configuration(
+    screen: &Screen,
+) -> Result<(
+    DaemonConfig,
+    crate::config::DisplayConfig,
+    SessionState,
+    CycleState,
+)> {
     // Load config with screen-aware defaults
-    let daemon_config = DaemonConfig::load_with_screen(
-        screen.width_in_pixels,
-        screen.height_in_pixels,
-    );
+    let daemon_config =
+        DaemonConfig::load_with_screen(screen.width_in_pixels, screen.height_in_pixels);
     let config = daemon_config.build_display_config();
     info!(config = ?config, "Loaded display configuration");
-    
+
     let session_state = SessionState::new();
     info!(
         count = daemon_config.character_thumbnails.len(),
         "Loaded character positions from config"
     );
-    
+
     // Initialize cycle state from config
     let cycle_state = CycleState::new(daemon_config.profile.hotkey_cycle_group.clone());
 
@@ -107,7 +116,9 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
     let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
 
     // Build character hotkey list from character_hotkeys HashMap, using cycle group order
-    let character_hotkeys: Vec<_> = daemon_config.profile.hotkey_cycle_group
+    let character_hotkeys: Vec<_> = daemon_config
+        .profile
+        .hotkey_cycle_group
         .iter()
         .filter_map(|char_name| {
             if let Some(binding) = daemon_config.profile.character_hotkeys.get(char_name) {
@@ -129,7 +140,8 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
 
     for char_name in &daemon_config.profile.hotkey_cycle_group {
         if let Some(binding) = daemon_config.profile.character_hotkeys.get(char_name) {
-            hotkey_groups.entry(binding.clone())
+            hotkey_groups
+                .entry(binding.clone())
                 .or_default()
                 .push(char_name.clone());
         }
@@ -212,8 +224,11 @@ async fn run_event_loop(
     loop {
         // Process all pending X11 events without blocking to ensure the queue is drained
         // This prevents the event channel from filling up during heavy activity
-        while let Some(event) = ctx.conn.poll_for_event()
-            .context("Failed to poll for X11 event")? {
+        while let Some(event) = ctx
+            .conn
+            .poll_for_event()
+            .context("Failed to poll for X11 event")?
+        {
             // Scope the mutable borrows for event handling
             {
                 let mut context = EventContext {
@@ -224,10 +239,8 @@ async fn run_event_loop(
                     cycle_state: &mut resources.cycle,
                 };
 
-                let _ = handle_event(
-                    &mut context,
-                    event,
-                ).inspect_err(|err| error!(error = ?err, "Event handling error"));
+                let _ = handle_event(&mut context, event)
+                    .inspect_err(|err| error!(error = ?err, "Event handling error"));
             }
         }
 
@@ -255,10 +268,10 @@ async fn run_event_loop(
                 } else {
                     true
                 };
-                
+
                 if should_process {
                     info!(command = ?command, "Received hotkey command");
-                    
+
                     // Debug: log the actual binding details for per-character hotkeys
                     if let CycleCommand::CharacterHotkey(ref binding) = command {
                         debug!(
@@ -297,7 +310,7 @@ async fn run_event_loop(
                                     group = ?char_group,
                                     "Found hotkey group"
                                 );
-                                
+
                                 // Delegate logic to CycleState
                                 resources.cycle.activate_next_in_group(char_group, logged_out_map)
                             } else {
@@ -322,12 +335,12 @@ async fn run_event_loop(
                             character = %display_name,
                             "Activating window via hotkey"
                         );
-                        
+
                         if let Err(e) = activate_window(ctx.conn, ctx.screen, ctx.atoms, window) {
                             error!(window = window, error = %e, "Failed to activate window");
                         } else {
                             debug!(window = window, "activate_window completed successfully");
-                            
+
                             if resources.config.profile.client_minimize_on_switch {
                                 // Minimize all other EVE clients after successful activation
                                 let other_windows: Vec<Window> = resources.eve_clients
@@ -362,21 +375,17 @@ async fn run_event_loop(
     }
 }
 
-
-
-
-
 pub async fn run_preview_daemon() -> Result<()> {
     // 1. Initialize X11 connection and resources
-    let (conn, _screen_num, atoms, formats) = initialize_x11()
-        .context("Failed to initialize X11")?;
+    let (conn, _screen_num, atoms, formats) =
+        initialize_x11().context("Failed to initialize X11")?;
 
     // Re-acquire screen reference from connection (x11rb::connect returns screen index)
     let screen = &conn.setup().roots[_screen_num];
 
     // 2. Load Configuration and State
-    let (mut daemon_config, config, mut session_state, mut cycle_state) = load_configuration(screen)
-        .context("Failed to load configuration")?;
+    let (mut daemon_config, config, mut session_state, mut cycle_state) =
+        load_configuration(screen).context("Failed to load configuration")?;
 
     // 3. Setup Signal Handler
     // We do this here as it requires async runtime context
@@ -386,15 +395,16 @@ pub async fn run_preview_daemon() -> Result<()> {
 
     // 4. Setup Hotkeys
     let hotkeys = setup_hotkeys(&daemon_config);
-    
+
     // 5. Initialize Font Renderer
     // This depends on config so it runs after config load
     let font_renderer = font::FontRenderer::resolve_from_config(
         &conn,
         &daemon_config.profile.thumbnail_text_font,
-        daemon_config.profile.thumbnail_text_size as f32
-    ).context("Failed to initialize font renderer")?;
-    
+        daemon_config.profile.thumbnail_text_size as f32,
+    )
+    .context("Failed to initialize font renderer")?;
+
     info!(
         size = daemon_config.profile.thumbnail_text_size,
         font = %daemon_config.profile.thumbnail_text_font,
@@ -412,9 +422,10 @@ pub async fn run_preview_daemon() -> Result<()> {
     };
 
     // 7. Initial Window Scan
-    let eve_clients = super::window_detection::scan_eve_windows(&ctx, &mut daemon_config, &mut session_state)
-        .context("Failed to get initial list of EVE windows")?;
-    
+    let eve_clients =
+        super::window_detection::scan_eve_windows(&ctx, &mut daemon_config, &mut session_state)
+            .context("Failed to get initial list of EVE windows")?;
+
     // Register initial windows with cycle state
     if config.enabled {
         for (window, thumbnail) in eve_clients.iter() {
@@ -425,7 +436,7 @@ pub async fn run_preview_daemon() -> Result<()> {
             cycle_state.add_window(character_name.clone(), *window);
         }
     }
-    
+
     // 8. Run Main Event Loop
     let resources = DaemonResources {
         config: daemon_config,
@@ -434,11 +445,5 @@ pub async fn run_preview_daemon() -> Result<()> {
         eve_clients,
     };
 
-    run_event_loop(
-        ctx,
-        resources,
-        hotkeys.rx,
-        hotkeys.groups,
-        sigusr1
-    ).await
+    run_event_loop(ctx, resources, hotkeys.rx, hotkeys.groups, sigusr1).await
 }

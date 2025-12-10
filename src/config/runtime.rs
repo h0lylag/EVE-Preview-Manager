@@ -14,7 +14,6 @@ use crate::color::{HexColor, Opacity};
 use crate::config::profile::SaveStrategy;
 use crate::types::{CharacterSettings, Position, TextOffset};
 
-
 /// Shared display configuration for all thumbnails
 /// Immutable after creation - can be borrowed without RefCell
 #[derive(Debug, Clone)]
@@ -50,7 +49,10 @@ impl DaemonConfig {
 
     /// Get default thumbnail dimensions from profile settings
     pub fn default_thumbnail_size(&self, _screen_width: u16, _screen_height: u16) -> (u16, u16) {
-        (self.profile.thumbnail_default_width, self.profile.thumbnail_default_height)
+        (
+            self.profile.thumbnail_default_width,
+            self.profile.thumbnail_default_height,
+        )
     }
 
     /// Build DisplayConfig from current settings
@@ -76,7 +78,10 @@ impl DaemonConfig {
             opacity,
             border_size: self.profile.thumbnail_border_size,
             border_color,
-            text_offset: TextOffset::from_border_edge(self.profile.thumbnail_text_x, self.profile.thumbnail_text_y),
+            text_offset: TextOffset::from_border_edge(
+                self.profile.thumbnail_text_x,
+                self.profile.thumbnail_text_y,
+            ),
             text_color,
             hide_when_no_focus: self.profile.thumbnail_hide_not_focused,
         }
@@ -104,7 +109,8 @@ impl DaemonConfig {
     }
 
     fn from_profile_config(config: crate::config::profile::Config) -> Self {
-        let profile = config.profiles
+        let profile = config
+            .profiles
             .iter()
             .find(|p| p.profile_name == config.global.selected_profile)
             .or_else(|| config.profiles.first())
@@ -135,7 +141,8 @@ impl DaemonConfig {
         };
 
         let selected_name = profile_config.global.selected_profile.clone();
-        let profile_idx = profile_config.profiles
+        let profile_idx = profile_config
+            .profiles
             .iter()
             .position(|p| p.profile_name == selected_name)
             .unwrap_or(0);
@@ -165,27 +172,32 @@ impl DaemonConfig {
                 current_position.x,
                 current_position.y,
                 current_width,
-                current_height
+                current_height,
             );
-            self.character_thumbnails.insert(old_name.to_string(), settings);
+            self.character_thumbnails
+                .insert(old_name.to_string(), settings);
 
-            self.save()
-                .context(format!("Failed to save config after character change from '{}' to '{}'", old_name, new_name))?;
+            self.save().context(format!(
+                "Failed to save config after character change from '{}' to '{}'",
+                old_name, new_name
+            ))?;
         } else if !old_name.is_empty() {
             let settings = CharacterSettings::new(
                 current_position.x,
                 current_position.y,
                 current_width,
-                current_height
+                current_height,
             );
-            self.character_thumbnails.insert(old_name.to_string(), settings);
+            self.character_thumbnails
+                .insert(old_name.to_string(), settings);
         }
 
         if !new_name.is_empty()
-            && let Some(settings) = self.character_thumbnails.get(new_name) {
-                info!(character = %new_name, x = settings.x, y = settings.y, "Moving to saved position for character");
-                return Ok(Some(settings.position()));
-            }
+            && let Some(settings) = self.character_thumbnails.get(new_name)
+        {
+            info!(character = %new_name, x = settings.x, y = settings.y, "Moving to saved position for character");
+            return Ok(Some(settings.position()));
+        }
 
         Ok(None)
     }
@@ -244,9 +256,7 @@ mod tests {
 
     #[test]
     fn test_build_display_config_valid_colors() {
-        let state = test_config(
-            75, 3, "#FF00FF00", 15, 25, "#FFFFFFFF", true, 20,
-        );
+        let state = test_config(75, 3, "#FF00FF00", 15, 25, "#FFFFFFFF", true, 20);
 
         let config = state.build_display_config();
         assert_eq!(config.border_size, 3);
@@ -262,9 +272,7 @@ mod tests {
 
     #[test]
     fn test_build_display_config_invalid_colors_fallback() {
-        let state = test_config(
-            100, 5, "invalid", 10, 20, "also_invalid", false, 15,
-        );
+        let state = test_config(100, 5, "invalid", 10, 20, "also_invalid", false, 15);
 
         let config = state.build_display_config();
         assert_eq!(config.opacity, 0xFF000000);
@@ -275,11 +283,12 @@ mod tests {
 
     #[test]
     fn test_handle_character_change_both_names() {
-        let mut state = test_config(
-            75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15,
-        );
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
 
-        state.character_thumbnails.insert("NewChar".to_string(), CharacterSettings::new(500, 600, 240, 135));
+        state.character_thumbnails.insert(
+            "NewChar".to_string(),
+            CharacterSettings::new(500, 600, 240, 135),
+        );
 
         let current_pos = Position::new(100, 200);
         let result = state.handle_character_change("OldChar", "NewChar", current_pos, 480, 270);
@@ -302,9 +311,7 @@ mod tests {
 
     #[test]
     fn test_handle_character_change_logout() {
-        let mut state = test_config(
-            75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15,
-        );
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
 
         let current_pos = Position::new(300, 400);
         let result = state.handle_character_change("LoggingOut", "", current_pos, 480, 270);
@@ -322,9 +329,7 @@ mod tests {
 
     #[test]
     fn test_handle_character_change_new_character_no_saved_position() {
-        let mut state = test_config(
-            75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15,
-        );
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
 
         let current_pos = Position::new(700, 800);
         let result = state.handle_character_change("", "BrandNewChar", current_pos, 480, 270);

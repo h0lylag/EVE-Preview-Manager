@@ -47,7 +47,7 @@ pub struct Profile {
     pub profile_name: String,
     #[serde(default)]
     pub profile_description: String,
-    
+
     // Thumbnail default dimensions
     /// Default thumbnail width for new characters
     #[serde(default = "default_thumbnail_width")]
@@ -71,7 +71,7 @@ pub struct Profile {
     #[serde(default = "default_text_font_family")]
     pub thumbnail_text_font: String,
     pub thumbnail_text_color: String,
-    
+
     // Thumbnail behavior settings
     /// Automatically save thumbnail positions when dragged
     /// If disabled, positions can be manually saved via system tray menu
@@ -85,11 +85,11 @@ pub struct Profile {
     /// This keeps thumbnails in place when swapping characters on the same EVE client
     #[serde(default = "default_preserve_thumbnail_position_on_swap")]
     pub thumbnail_preserve_position_on_swap: bool,
-    
+
     // Client behavior settings
     #[serde(default)]
     pub client_minimize_on_switch: bool,
-    
+
     // Hotkey settings (per-profile)
     /// Selected input device for hotkey monitoring (by-id name, None = all devices)
     #[serde(default)]
@@ -238,71 +238,78 @@ impl Config {
         let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
         #[cfg(test)]
         let mut path = std::env::temp_dir().join("eve-preview-manager-test");
-        
+
         path.push(crate::constants::config::APP_DIR);
         path.push(crate::constants::config::FILENAME);
         path
     }
-    
+
     /// Load configuration from JSON file or create default
     pub fn load() -> Result<Self> {
         let config_path = Self::path();
-        
+
         if !config_path.exists() {
-            info!("Config file not found, creating default config at {:?}", config_path);
+            info!(
+                "Config file not found, creating default config at {:?}",
+                config_path
+            );
             let config = Config::default();
             config.save()?;
             return Ok(config);
         }
-        
+
         let contents = fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
-        
+
         let config: Config = serde_json::from_str(&contents)
             .with_context(|| format!("Failed to parse JSON from {:?}", config_path))?;
-        
+
         info!("Loaded config with {} profile(s)", config.profiles.len());
         Ok(config)
     }
-    
+
     /// Save configuration to JSON file using chosen strategy
     pub fn save_with_strategy(&self, strategy: SaveStrategy) -> Result<()> {
         let config_path = Self::path();
-        
+
         // Ensure config directory exists
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create config directory {:?}", parent))?;
         }
-        
+
         let config_to_save = match strategy {
             SaveStrategy::PreserveCharacterPositions => {
                 let mut clone = self.clone();
                 if config_path.exists()
                     && let Ok(contents) = fs::read_to_string(&config_path)
-                        && let Ok(existing_config) = serde_json::from_str::<Config>(&contents) {
-                            for profile_to_save in clone.profiles.iter_mut() {
-                                if let Some(existing_profile) = existing_config.profiles.iter()
-                                    .find(|p| p.profile_name == profile_to_save.profile_name)
-                                {
-                                    // Profile exists on disk - preserve its character positions
-                                    profile_to_save.character_thumbnails = existing_profile.character_thumbnails.clone();
-                                }
-                                // If profile doesn't exist on disk (new/duplicated profile),
-                                // keep the character_thumbnails from the in-memory profile (from clone/duplication)
-                            }
+                    && let Ok(existing_config) = serde_json::from_str::<Config>(&contents)
+                {
+                    for profile_to_save in clone.profiles.iter_mut() {
+                        if let Some(existing_profile) = existing_config
+                            .profiles
+                            .iter()
+                            .find(|p| p.profile_name == profile_to_save.profile_name)
+                        {
+                            // Profile exists on disk - preserve its character positions
+                            profile_to_save.character_thumbnails =
+                                existing_profile.character_thumbnails.clone();
                         }
+                        // If profile doesn't exist on disk (new/duplicated profile),
+                        // keep the character_thumbnails from the in-memory profile (from clone/duplication)
+                    }
+                }
                 clone
             }
             SaveStrategy::OverwriteCharacterPositions => self.clone(),
         };
-        
+
         let json_string = serde_json::to_string_pretty(&config_to_save)
             .context("Failed to serialize config to JSON")?;
-        
+
         fs::write(&config_path, json_string)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
-        
+
         info!("Saved config to {:?}", config_path);
         Ok(())
     }
@@ -328,26 +335,39 @@ mod tests {
 
     #[test]
     fn test_profile_default_with_name() {
-        let profile = Profile::default_with_name(
-            "Test Profile".to_string(),
-            "A test profile".to_string(),
-        );
-        
+        let profile =
+            Profile::default_with_name("Test Profile".to_string(), "A test profile".to_string());
+
         assert_eq!(profile.profile_name, "Test Profile");
         assert_eq!(profile.profile_description, "A test profile");
-        assert_eq!(profile.thumbnail_opacity, crate::constants::defaults::thumbnail::OPACITY_PERCENT);
-        assert_eq!(profile.thumbnail_border_size, crate::constants::defaults::border::SIZE);
+        assert_eq!(
+            profile.thumbnail_opacity,
+            crate::constants::defaults::thumbnail::OPACITY_PERCENT
+        );
+        assert_eq!(
+            profile.thumbnail_border_size,
+            crate::constants::defaults::border::SIZE
+        );
         assert!(profile.character_thumbnails.is_empty());
     }
 
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        
+
         assert_eq!(config.profiles.len(), 1);
-        assert_eq!(config.global.selected_profile, crate::constants::defaults::behavior::PROFILE_NAME);
-        assert_eq!(config.global.window_width, crate::constants::defaults::manager::WINDOW_WIDTH);
-        assert_eq!(config.global.window_height, crate::constants::defaults::manager::WINDOW_HEIGHT);
+        assert_eq!(
+            config.global.selected_profile,
+            crate::constants::defaults::behavior::PROFILE_NAME
+        );
+        assert_eq!(
+            config.global.window_width,
+            crate::constants::defaults::manager::WINDOW_WIDTH
+        );
+        assert_eq!(
+            config.global.window_height,
+            crate::constants::defaults::manager::WINDOW_HEIGHT
+        );
     }
 
     #[test]
@@ -357,10 +377,10 @@ mod tests {
             "TestChar".to_string(),
             CharacterSettings::new(100, 200, 480, 270),
         );
-        
+
         let json = serde_json::to_string(&profile).unwrap();
         let deserialized: Profile = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.profile_name, "Test");
         assert_eq!(deserialized.character_thumbnails.len(), 1);
         assert!(deserialized.character_thumbnails.contains_key("TestChar"));
@@ -373,10 +393,10 @@ mod tests {
             "Character1".to_string(),
             CharacterSettings::new(50, 100, 640, 360),
         );
-        
+
         let json = serde_json::to_string_pretty(&config).unwrap();
         let deserialized: Config = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.profiles.len(), config.profiles.len());
         assert_eq!(
             deserialized.profiles[0].character_thumbnails.len(),
@@ -387,26 +407,47 @@ mod tests {
     #[test]
     fn test_global_settings_defaults() {
         let settings = GlobalSettings::default();
-        
+
         assert_eq!(settings.selected_profile, "default");
-        assert_eq!(settings.window_width, crate::constants::defaults::manager::WINDOW_WIDTH);
-        assert_eq!(settings.window_height, crate::constants::defaults::manager::WINDOW_HEIGHT);
+        assert_eq!(
+            settings.window_width,
+            crate::constants::defaults::manager::WINDOW_WIDTH
+        );
+        assert_eq!(
+            settings.window_height,
+            crate::constants::defaults::manager::WINDOW_HEIGHT
+        );
     }
 
     #[test]
     fn test_profile_behavior_defaults() {
         let profile = Profile::default_with_name("Test".to_string(), String::new());
-        
+
         // Test migrated behavior settings are properly defaulted
-        assert_eq!(profile.thumbnail_snap_threshold, crate::constants::defaults::behavior::SNAP_THRESHOLD);
+        assert_eq!(
+            profile.thumbnail_snap_threshold,
+            crate::constants::defaults::behavior::SNAP_THRESHOLD
+        );
         assert_eq!(
             profile.thumbnail_preserve_position_on_swap,
             crate::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
         );
-        assert_eq!(profile.thumbnail_default_width, crate::constants::defaults::thumbnail::WIDTH);
-        assert_eq!(profile.thumbnail_default_height, crate::constants::defaults::thumbnail::HEIGHT);
-        assert_eq!(profile.client_minimize_on_switch, crate::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH);
-        assert_eq!(profile.thumbnail_hide_not_focused, crate::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS);
+        assert_eq!(
+            profile.thumbnail_default_width,
+            crate::constants::defaults::thumbnail::WIDTH
+        );
+        assert_eq!(
+            profile.thumbnail_default_height,
+            crate::constants::defaults::thumbnail::HEIGHT
+        );
+        assert_eq!(
+            profile.client_minimize_on_switch,
+            crate::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH
+        );
+        assert_eq!(
+            profile.thumbnail_hide_not_focused,
+            crate::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS
+        );
     }
 
     #[test]
@@ -420,17 +461,27 @@ mod tests {
     #[test]
     fn test_profile_with_hotkeys() {
         let mut profile = Profile::default_with_name("Hotkey Test".to_string(), String::new());
-        profile.hotkey_cycle_forward = Some(crate::config::HotkeyBinding::new(15, false, false, false, false));
-        profile.hotkey_cycle_backward = Some(crate::config::HotkeyBinding::new(15, false, true, false, false));
-        
+        profile.hotkey_cycle_forward = Some(crate::config::HotkeyBinding::new(
+            15, false, false, false, false,
+        ));
+        profile.hotkey_cycle_backward = Some(crate::config::HotkeyBinding::new(
+            15, false, true, false, false,
+        ));
+
         assert!(profile.hotkey_cycle_forward.is_some());
         assert!(profile.hotkey_cycle_backward.is_some());
-        
+
         let json = serde_json::to_string(&profile).unwrap();
         let deserialized: Profile = serde_json::from_str(&json).unwrap();
-        
-        assert_eq!(deserialized.hotkey_cycle_forward, profile.hotkey_cycle_forward);
-        assert_eq!(deserialized.hotkey_cycle_backward, profile.hotkey_cycle_backward);
+
+        assert_eq!(
+            deserialized.hotkey_cycle_forward,
+            profile.hotkey_cycle_forward
+        );
+        assert_eq!(
+            deserialized.hotkey_cycle_backward,
+            profile.hotkey_cycle_backward
+        );
     }
 
     #[test]
@@ -441,7 +492,7 @@ mod tests {
             "Character2".to_string(),
             "Character3".to_string(),
         ];
-        
+
         assert_eq!(profile.hotkey_cycle_group.len(), 3);
         assert_eq!(profile.hotkey_cycle_group[0], "Character1");
     }

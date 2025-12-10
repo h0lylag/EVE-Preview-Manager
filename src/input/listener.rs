@@ -6,9 +6,9 @@
 
 use anyhow::{Context, Result};
 use evdev::{Device, EventType, KeyCode};
-use tokio::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
+use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
 
 use crate::config::HotkeyBinding;
@@ -36,7 +36,7 @@ pub fn spawn_listener(
         .into_iter()
         .map(|(_dev, path)| path)
         .collect();
-    
+
     let mut devices = device_detection::find_all_input_devices_with_paths()?;
 
     // Handle device selection
@@ -67,11 +67,13 @@ pub fn spawn_listener(
             }
 
             if required_devices.is_empty() {
-                warn!("Auto-detect mode but no source devices found in bindings, listening on all devices");
+                warn!(
+                    "Auto-detect mode but no source devices found in bindings, listening on all devices"
+                );
             } else {
                 // Filter to only the required devices
                 info!(devices = ?required_devices, "Filtering to auto-detected devices");
-                
+
                 devices.retain(|(_, device_path)| {
                     let device_id = device_detection::extract_device_id(device_path);
                     required_devices.contains(&device_id)
@@ -94,7 +96,9 @@ pub fn spawn_listener(
             let absolute_target = if target_path.is_absolute() {
                 target_path
             } else {
-                std::path::Path::new("/dev/input/by-id").join(&target_path).canonicalize()
+                std::path::Path::new("/dev/input/by-id")
+                    .join(&target_path)
+                    .canonicalize()
                     .with_context(|| format!("Failed to canonicalize {}", target_path.display()))?
             };
 
@@ -150,7 +154,14 @@ pub fn spawn_listener(
 
         let handle = thread::spawn(move || {
             info!(device = ?device.name(), path = %device_path.display(), "Hotkey listener started");
-            if let Err(e) = listen_for_hotkeys(device, sender, forward_key, backward_key, character_hotkeys, all_device_paths) {
+            if let Err(e) = listen_for_hotkeys(
+                device,
+                sender,
+                forward_key,
+                backward_key,
+                character_hotkeys,
+                all_device_paths,
+            ) {
                 error!(error = %e, "Hotkey listener error");
             }
         });
@@ -170,8 +181,7 @@ fn listen_for_hotkeys(
     all_device_paths: Arc<Vec<std::path::PathBuf>>,
 ) -> Result<()> {
     loop {
-        let events = device.fetch_events()
-            .context("Failed to fetch events")?;
+        let events = device.fetch_events().context("Failed to fetch events")?;
 
         let mut potential_hotkey_presses = Vec::new();
 
@@ -188,8 +198,12 @@ fn listen_for_hotkeys(
 
             // Collect non-modifier key presses that might be hotkeys
             if pressed {
-                let is_cycle_key = forward_key.as_ref().is_some_and(|fwd| fwd.key_code == key_code)
-                    || backward_key.as_ref().is_some_and(|bwd| bwd.key_code == key_code);
+                let is_cycle_key = forward_key
+                    .as_ref()
+                    .is_some_and(|fwd| fwd.key_code == key_code)
+                    || backward_key
+                        .as_ref()
+                        .is_some_and(|bwd| bwd.key_code == key_code);
                 let is_character_key = character_hotkeys.iter().any(|hk| hk.key_code == key_code);
 
                 if is_cycle_key || is_character_key {
@@ -209,12 +223,16 @@ fn listen_for_hotkeys(
 
             for device_path in all_device_paths.iter() {
                 if let Ok(dev) = Device::open(device_path)
-                    && let Ok(key_state) = dev.get_key_state() {
-                    ctrl_pressed |= key_state.contains(KeyCode(29)) || key_state.contains(KeyCode(97));
+                    && let Ok(key_state) = dev.get_key_state()
+                {
+                    ctrl_pressed |=
+                        key_state.contains(KeyCode(29)) || key_state.contains(KeyCode(97));
                     shift_pressed |= key_state.contains(KeyCode(input::KEY_LEFTSHIFT))
                         || key_state.contains(KeyCode(input::KEY_RIGHTSHIFT));
-                    alt_pressed |= key_state.contains(KeyCode(56)) || key_state.contains(KeyCode(100));
-                    super_pressed |= key_state.contains(KeyCode(125)) || key_state.contains(KeyCode(126));
+                    alt_pressed |=
+                        key_state.contains(KeyCode(56)) || key_state.contains(KeyCode(100));
+                    super_pressed |=
+                        key_state.contains(KeyCode(125)) || key_state.contains(KeyCode(126));
                 }
             }
 
@@ -222,24 +240,40 @@ fn listen_for_hotkeys(
             let mut handled = false;
 
             if let Some(ref fwd) = forward_key
-                && fwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                && fwd.matches(
+                    key_code,
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    super_pressed,
+                )
+            {
                 info!(
                     binding = %fwd.display_name(),
                     "Forward hotkey pressed, sending command"
                 );
-                sender.blocking_send(CycleCommand::Forward)
+                sender
+                    .blocking_send(CycleCommand::Forward)
                     .context("Failed to send cycle command")?;
                 handled = true;
             }
 
             if !handled
                 && let Some(ref bwd) = backward_key
-                && bwd.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                && bwd.matches(
+                    key_code,
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    super_pressed,
+                )
+            {
                 info!(
                     binding = %bwd.display_name(),
                     "Backward hotkey pressed, sending command"
                 );
-                sender.blocking_send(CycleCommand::Backward)
+                sender
+                    .blocking_send(CycleCommand::Backward)
                     .context("Failed to send cycle command")?;
                 handled = true;
             }
@@ -247,12 +281,19 @@ fn listen_for_hotkeys(
             if !handled {
                 // Check per-character hotkeys
                 for char_hotkey in &character_hotkeys {
-                    if char_hotkey.matches(key_code, ctrl_pressed, shift_pressed, alt_pressed, super_pressed) {
+                    if char_hotkey.matches(
+                        key_code,
+                        ctrl_pressed,
+                        shift_pressed,
+                        alt_pressed,
+                        super_pressed,
+                    ) {
                         info!(
                             binding = %char_hotkey.display_name(),
                             "Per-character hotkey pressed, sending command"
                         );
-                        sender.blocking_send(CycleCommand::CharacterHotkey(char_hotkey.clone()))
+                        sender
+                            .blocking_send(CycleCommand::CharacterHotkey(char_hotkey.clone()))
                             .context("Failed to send character hotkey command")?;
                         break; // Only send one command per keypress
                     }
@@ -285,38 +326,42 @@ pub fn list_input_devices() -> Result<Vec<(String, String)>> {
         return Ok(devices);
     }
 
-    for entry in std::fs::read_dir(by_id_path)
-        .context(format!("Failed to read {} directory", by_id_path))?
+    for entry in
+        std::fs::read_dir(by_id_path).context(format!("Failed to read {} directory", by_id_path))?
     {
         let entry = entry?;
         let path = entry.path();
 
         if let Some(name) = path.file_name().and_then(|n| n.to_str())
             && name.contains("-event-")
-                && let Ok(target) = std::fs::read_link(&path) {
-                    let absolute_path = if target.is_absolute() {
-                        target
-                    } else {
-                        std::path::Path::new(by_id_path).join(&target).canonicalize()?
-                    };
+            && let Ok(target) = std::fs::read_link(&path)
+        {
+            let absolute_path = if target.is_absolute() {
+                target
+            } else {
+                std::path::Path::new(by_id_path)
+                    .join(&target)
+                    .canonicalize()?
+            };
 
-                    if let Ok(device) = Device::open(&absolute_path)
-                        && let Some(keys) = device.supported_keys() {
-                            // Accept both keyboards (Tab key) and mice (left button)
-                            let is_keyboard = keys.contains(KeyCode(input::KEY_TAB));
-                            let is_mouse = keys.contains(KeyCode(input::BTN_LEFT));
+            if let Ok(device) = Device::open(&absolute_path)
+                && let Some(keys) = device.supported_keys()
+            {
+                // Accept both keyboards (Tab key) and mice (left button)
+                let is_keyboard = keys.contains(KeyCode(input::KEY_TAB));
+                let is_mouse = keys.contains(KeyCode(input::BTN_LEFT));
 
-                            if is_keyboard || is_mouse {
-                                let friendly_name = name
-                                    .replace("-event-kbd", "")
-                                    .replace("-event-mouse", "")
-                                    .replace("_", " ")
-                                    .replace("-", " ");
+                if is_keyboard || is_mouse {
+                    let friendly_name = name
+                        .replace("-event-kbd", "")
+                        .replace("-event-mouse", "")
+                        .replace("_", " ")
+                        .replace("-", " ");
 
-                                devices.push((name.to_string(), friendly_name));
-                            }
-                        }
+                    devices.push((name.to_string(), friendly_name));
                 }
+            }
+        }
     }
 
     devices.sort_by(|a, b| a.1.cmp(&b.1));

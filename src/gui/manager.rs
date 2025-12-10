@@ -5,17 +5,17 @@ use std::process::{Child, Command};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
-use eframe::{egui, NativeOptions};
+use anyhow::{Context, Result, anyhow};
+use eframe::{NativeOptions, egui};
 use tracing::{error, info, warn};
 
 #[cfg(target_os = "linux")]
 use ksni::TrayMethods;
 
 use super::components;
-use crate::constants::gui::*;
 use crate::config::profile::{Config, SaveStrategy};
-use crate::gui::components::profile_selector::{ProfileSelector, ProfileAction};
+use crate::constants::gui::*;
+use crate::gui::components::profile_selector::{ProfileAction, ProfileSelector};
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,10 +38,14 @@ impl AppTray {
     fn load_current_state(&self) -> (usize, Vec<String>) {
         match Config::load() {
             Ok(config) => {
-                let profile_names: Vec<String> = config.profiles.iter()
+                let profile_names: Vec<String> = config
+                    .profiles
+                    .iter()
                     .map(|p| p.profile_name.clone())
                     .collect();
-                let current_idx = config.profiles.iter()
+                let current_idx = config
+                    .profiles
+                    .iter()
                     .position(|p| p.profile_name == config.global.selected_profile)
                     .unwrap_or(0);
                 (current_idx, profile_names)
@@ -69,10 +73,10 @@ impl ksni::Tray for AppTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        
+
         // Reload config to get current profile state
         let (current_profile_idx, profile_names) = self.load_current_state();
-        
+
         vec![
             // Refresh item
             StandardItem {
@@ -81,26 +85,27 @@ impl ksni::Tray for AppTray {
                     let _ = this.tx.send(TrayMessage::Refresh);
                 }),
                 ..Default::default()
-            }.into(),
-            
+            }
+            .into(),
             // Separator
             MenuItem::Separator,
-            
             // Profile selector (radio group)
             RadioGroup {
                 selected: current_profile_idx,
                 select: Box::new(|this: &mut AppTray, idx| {
                     let _ = this.tx.send(TrayMessage::SwitchProfile(idx));
                 }),
-                options: profile_names.iter().map(|name| RadioItem {
-                    label: name.clone(),
-                    ..Default::default()
-                }).collect(),
-            }.into(),
-            
+                options: profile_names
+                    .iter()
+                    .map(|name| RadioItem {
+                        label: name.clone(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into(),
             // Separator
             MenuItem::Separator,
-            
             // Save Thumbnail Positions (always show - harmless when auto-save is on)
             StandardItem {
                 label: "Save Thumbnail Positions".into(),
@@ -108,11 +113,10 @@ impl ksni::Tray for AppTray {
                     let _ = this.tx.send(TrayMessage::SavePositions);
                 }),
                 ..Default::default()
-            }.into(),
-            
+            }
+            .into(),
             // Separator
             MenuItem::Separator,
-            
             // Quit item
             StandardItem {
                 label: "Quit".into(),
@@ -121,7 +125,8 @@ impl ksni::Tray for AppTray {
                     let _ = this.tx.send(TrayMessage::Quit);
                 }),
                 ..Default::default()
-            }.into(),
+            }
+            .into(),
         ]
     }
 }
@@ -204,21 +209,19 @@ impl ManagerApp {
                 .enable_all()
                 .build()
                 .expect("Failed to build Tokio runtime for tray");
-            
+
             // Run a dedicated single-threaded Tokio runtime for the tray icon
             // This is required because `ksni` (StatusNotifierItem) relies on async D-Bus communication
             runtime.block_on(async move {
-                let tray = AppTray {
-                    tx: tx_to_app,
-                };
-                
+                let tray = AppTray { tx: tx_to_app };
+
                 match tray.spawn().await {
                     Ok(handle) => {
                         info!("Tray icon created via ksni/D-Bus");
-                        
+
                         // Wait for shutdown signal
                         shutdown_clone.notified().await;
-                        
+
                         // Gracefully shutdown tray
                         handle.shutdown().await;
                     }
@@ -231,20 +234,23 @@ impl ManagerApp {
 
         // Load configuration
         let config = Config::load().unwrap_or_default();
-        
+
         // Find selected profile index
-        let selected_profile_idx = config.profiles
+        let selected_profile_idx = config
+            .profiles
             .iter()
             .position(|p| p.profile_name == config.global.selected_profile)
             .unwrap_or(0);
 
         // Initialize component states
-        let behavior_settings_state = components::behavior_settings::BehaviorSettingsState::default();
+        let behavior_settings_state =
+            components::behavior_settings::BehaviorSettingsState::default();
         let hotkey_settings_state = components::hotkey_settings::HotkeySettingsState::default();
         let visual_settings_state = components::visual_settings::VisualSettingsState::default();
 
         // Initialize cycle order settings state with current profile
-        let mut cycle_order_settings_state = components::cycle_order_settings::CycleOrderSettingsState::default();
+        let mut cycle_order_settings_state =
+            components::cycle_order_settings::CycleOrderSettingsState::default();
         cycle_order_settings_state.load_from_profile(&config.profiles[selected_profile_idx]);
 
         #[cfg(target_os = "linux")]
@@ -356,18 +362,24 @@ impl ManagerApp {
             let mut merged_profile = gui_profile.clone();
 
             // Find matching profile in disk config to get daemon's character positions
-            if let Some(disk_profile) = disk_config.profiles.iter()
+            if let Some(disk_profile) = disk_config
+                .profiles
+                .iter()
                 .find(|p| p.profile_name == gui_profile.profile_name)
             {
                 // Merge character positions: start with GUI's, add disk characters, preserve disk positions
                 for (char_name, disk_settings) in &disk_profile.character_thumbnails {
-                    if let Some(gui_settings) = merged_profile.character_thumbnails.get_mut(char_name) {
+                    if let Some(gui_settings) =
+                        merged_profile.character_thumbnails.get_mut(char_name)
+                    {
                         // Character exists in both: keep GUI dimensions, use disk position (x, y)
                         gui_settings.x = disk_settings.x;
                         gui_settings.y = disk_settings.y;
                     } else {
                         // Character only in disk (daemon added it): preserve it completely
-                        merged_profile.character_thumbnails.insert(char_name.clone(), *disk_settings);
+                        merged_profile
+                            .character_thumbnails
+                            .insert(char_name.clone(), *disk_settings);
                     }
                 }
             }
@@ -382,7 +394,8 @@ impl ManagerApp {
         };
 
         // Save the merged config
-        final_config.save_with_strategy(SaveStrategy::OverwriteCharacterPositions)
+        final_config
+            .save_with_strategy(SaveStrategy::OverwriteCharacterPositions)
             .context("Failed to save configuration")?;
 
         // Reload config to include daemon's new characters in GUI memory
@@ -401,27 +414,30 @@ impl ManagerApp {
         // If we have a running daemon, send SIGUSR1 signal to trigger save
         if let Some(ref daemon) = self.daemon {
             let pid = daemon.id();
-            info!(daemon_pid = pid, "Sending SIGUSR1 to daemon to save positions");
-            
+            info!(
+                daemon_pid = pid,
+                "Sending SIGUSR1 to daemon to save positions"
+            );
+
             #[cfg(target_os = "linux")]
             {
                 use nix::sys::signal::{self, Signal};
                 use nix::unistd::Pid;
-                
+
                 signal::kill(Pid::from_raw(pid as i32), Signal::SIGUSR1)
                     .context("Failed to send SIGUSR1 to daemon")?;
-                
+
                 info!("SIGUSR1 sent successfully");
             }
-            
+
             #[cfg(not(target_os = "linux"))]
             {
                 anyhow::bail!("Signal-based save only supported on Linux");
             }
-            
+
             return Ok(());
         }
-        
+
         // Fallback: no daemon running (shouldn't happen in normal use)
         // In this case we don't have reliable position data, so just return error
         anyhow::bail!("Cannot save positions: daemon is not running. Start the daemon first.")
@@ -431,7 +447,9 @@ impl ManagerApp {
         self.config = Config::load().unwrap_or_default();
 
         // Re-find selected profile index after reload
-        self.selected_profile_idx = self.config.profiles
+        self.selected_profile_idx = self
+            .config
+            .profiles
             .iter()
             .position(|p| p.profile_name == self.config.global.selected_profile)
             .unwrap_or(0);
@@ -450,15 +468,18 @@ impl ManagerApp {
             // Merge new characters from disk into GUI config without losing GUI changes
             for (profile_idx, gui_profile) in self.config.profiles.iter_mut().enumerate() {
                 if let Some(disk_profile) = disk_config.profiles.get(profile_idx)
-                    && disk_profile.profile_name == gui_profile.profile_name {
-                        // Add any new characters from disk that GUI doesn't know about
-                        for (char_name, char_settings) in &disk_profile.character_thumbnails {
-                            if !gui_profile.character_thumbnails.contains_key(char_name) {
-                                gui_profile.character_thumbnails.insert(char_name.clone(), *char_settings);
-                                info!(character = %char_name, profile = %gui_profile.profile_name, "Detected new character from daemon");
-                            }
+                    && disk_profile.profile_name == gui_profile.profile_name
+                {
+                    // Add any new characters from disk that GUI doesn't know about
+                    for (char_name, char_settings) in &disk_profile.character_thumbnails {
+                        if !gui_profile.character_thumbnails.contains_key(char_name) {
+                            gui_profile
+                                .character_thumbnails
+                                .insert(char_name.clone(), *char_settings);
+                            info!(character = %char_name, profile = %gui_profile.profile_name, "Detected new character from daemon");
                         }
                     }
+                }
             }
         }
     }
@@ -552,57 +573,53 @@ impl ManagerApp {
 
     fn render_unified_settings(&mut self, ui: &mut egui::Ui) {
         // Row 1: Profile dropdown group + Save/Discard buttons
-        let mut action = ui.horizontal(|ui| {
-            // Profile dropdown group
-            let action = self.profile_selector.render_dropdown(
-                ui,
-                &mut self.config,
-                &mut self.selected_profile_idx
-            );
+        let mut action = ui
+            .horizontal(|ui| {
+                // Profile dropdown group
+                let action = self.profile_selector.render_dropdown(
+                    ui,
+                    &mut self.config,
+                    &mut self.selected_profile_idx,
+                );
 
-            // Save/Discard buttons aligned to the right
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Discard button
-                if ui.button("✖ Discard Changes").clicked() {
-                    self.discard_changes();
-                }
-
-                // Save button
-                if ui.button("💾 Save & Apply").clicked() {
-                    if let Err(err) = self.save_config() {
-                        error!(error = ?err, "Failed to save config");
-                        self.status_message = Some(StatusMessage {
-                            text: format!("Save failed: {err}"),
-                            color: COLOR_ERROR,
-                        });
-                    } else {
-                        self.reload_daemon_config();
+                // Save/Discard buttons aligned to the right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Discard button
+                    if ui.button("✖ Discard Changes").clicked() {
+                        self.discard_changes();
                     }
-                }
-            });
 
-            action
-        }).inner;
+                    // Save button
+                    if ui.button("💾 Save & Apply").clicked() {
+                        if let Err(err) = self.save_config() {
+                            error!(error = ?err, "Failed to save config");
+                            self.status_message = Some(StatusMessage {
+                                text: format!("Save failed: {err}"),
+                                color: COLOR_ERROR,
+                            });
+                        } else {
+                            self.reload_daemon_config();
+                        }
+                    }
+                });
+
+                action
+            })
+            .inner;
 
         ui.add_space(ITEM_SPACING);
 
         // Row 2: Profile management buttons on left, status text on right
         ui.horizontal(|ui| {
-            self.profile_selector.render_buttons(
-                ui,
-                &self.config,
-                self.selected_profile_idx
-            );
+            self.profile_selector
+                .render_buttons(ui, &self.config, self.selected_profile_idx);
 
             // Status text aligned to the right
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(message) = &self.config_status_message {
                     ui.colored_label(message.color, &message.text);
                 } else if self.settings_changed {
-                    ui.colored_label(
-                        COLOR_WARNING,
-                        "Unsaved changes"
-                    );
+                    ui.colored_label(COLOR_WARNING, "Unsaved changes");
                 }
             });
         });
@@ -611,7 +628,7 @@ impl ManagerApp {
         let dialog_action = self.profile_selector.render_dialogs(
             ui.ctx(),
             &mut self.config,
-            &mut self.selected_profile_idx
+            &mut self.selected_profile_idx,
         );
 
         // Merge dialog action with dropdown action
@@ -623,7 +640,8 @@ impl ManagerApp {
             ProfileAction::SwitchProfile => {
                 // Load cycle order text when switching profiles
                 let current_profile = &self.config.profiles[self.selected_profile_idx];
-                self.cycle_order_settings_state.load_from_profile(current_profile);
+                self.cycle_order_settings_state
+                    .load_from_profile(current_profile);
 
                 // Save config and reload daemon
                 if let Err(err) = self.save_config() {
@@ -636,7 +654,9 @@ impl ManagerApp {
                     self.reload_daemon_config();
                 }
             }
-            ProfileAction::ProfileCreated | ProfileAction::ProfileDeleted | ProfileAction::ProfileUpdated => {
+            ProfileAction::ProfileCreated
+            | ProfileAction::ProfileDeleted
+            | ProfileAction::ProfileUpdated => {
                 // Save config and reload daemon
                 if let Err(err) = self.save_config() {
                     error!(error = ?err, "Failed to save config after profile action");
@@ -660,18 +680,30 @@ impl ManagerApp {
 
         ui.columns(3, |columns| {
             // Column 1: Behavior Settings
-            if components::behavior_settings::ui(&mut columns[0], current_profile, &mut self.behavior_settings_state) {
+            if components::behavior_settings::ui(
+                &mut columns[0],
+                current_profile,
+                &mut self.behavior_settings_state,
+            ) {
                 self.settings_changed = true;
                 self.config_status_message = None;
             }
 
             // Column 2: Visual Settings + Hotkey Settings
-            if components::visual_settings::ui(&mut columns[1], current_profile, &mut self.visual_settings_state) {
+            if components::visual_settings::ui(
+                &mut columns[1],
+                current_profile,
+                &mut self.visual_settings_state,
+            ) {
                 self.settings_changed = true;
                 self.config_status_message = None;
             }
             columns[1].add_space(SECTION_SPACING);
-            if components::hotkey_settings::ui(&mut columns[1], current_profile, &mut self.hotkey_settings_state) {
+            if components::hotkey_settings::ui(
+                &mut columns[1],
+                current_profile,
+                &mut self.hotkey_settings_state,
+            ) {
                 self.settings_changed = true;
                 self.config_status_message = None;
             }
@@ -681,7 +713,7 @@ impl ManagerApp {
                 &mut columns[2],
                 current_profile,
                 &mut self.cycle_order_settings_state,
-                &mut self.hotkey_settings_state
+                &mut self.hotkey_settings_state,
             ) {
                 self.settings_changed = true;
                 self.config_status_message = None;
@@ -710,8 +742,11 @@ impl eframe::App for ManagerApp {
         };
 
         // Update config if size changed (will be saved on exit)
-        if new_width > 0 && new_height > 0
-            && (new_width != self.config.global.window_width || new_height != self.config.global.window_height) {
+        if new_width > 0
+            && new_height > 0
+            && (new_width != self.config.global.window_width
+                || new_height != self.config.global.window_height)
+        {
             self.config.global.window_width = new_width;
             self.config.global.window_height = new_height;
         }
@@ -759,7 +794,10 @@ impl eframe::App for ManagerApp {
 
         // Save window geometry on exit (avoids flooding disk during resize drag)
         // Use simple config save since daemon is stopped (no merge needed)
-        if let Err(err) = self.config.save_with_strategy(SaveStrategy::PreserveCharacterPositions) {
+        if let Err(err) = self
+            .config
+            .save_with_strategy(SaveStrategy::PreserveCharacterPositions)
+        {
             error!(error = ?err, "Failed to save window geometry on exit");
         } else {
             info!("Window geometry saved on exit");
@@ -789,8 +827,12 @@ fn load_tray_icon_pixmap() -> Result<ksni::Icon> {
     let icon_bytes = include_bytes!("../../assets/icon.png");
     let decoder = png::Decoder::new(Cursor::new(icon_bytes));
     let mut reader = decoder.read_info()?;
-    let mut buf = vec![0; reader.output_buffer_size()
-        .context("PNG has no output buffer size")?];
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .context("PNG has no output buffer size")?
+    ];
     let info = reader.next_frame(&mut buf)?;
     let rgba = &buf[..info.buffer_size()];
 
@@ -810,7 +852,7 @@ fn load_tray_icon_pixmap() -> Result<ksni::Icon> {
             return Err(anyhow!(
                 "Unsupported icon color type {:?} (expected RGB or RGBA)",
                 other
-            ))
+            ));
         }
     };
 
@@ -827,7 +869,12 @@ fn load_window_icon() -> Result<egui::IconData> {
     let icon_bytes = include_bytes!("../../assets/icon.png");
     let decoder = png::Decoder::new(Cursor::new(icon_bytes));
     let mut reader = decoder.read_info()?;
-    let mut buf = vec![0; reader.output_buffer_size().context("PNG has no output buffer size")?];
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .context("PNG has no output buffer size")?
+    ];
     let info = reader.next_frame(&mut buf)?;
     let rgba = &buf[..info.buffer_size()];
 
@@ -863,12 +910,16 @@ pub fn run_gui() -> Result<()> {
     let config = Config::load().unwrap_or_default();
     let window_width = config.global.window_width as f32;
     let window_height = config.global.window_height as f32;
-    
+
     #[cfg(target_os = "linux")]
     let icon = match load_window_icon() {
         Ok(icon_data) => {
-            info!("Loaded window icon ({} bytes, {}x{})", 
-                icon_data.rgba.len(), icon_data.width, icon_data.height);
+            info!(
+                "Loaded window icon ({} bytes, {}x{})",
+                icon_data.rgba.len(),
+                icon_data.width,
+                icon_data.height
+            );
             Some(icon_data)
         }
         Err(e) => {
@@ -876,10 +927,10 @@ pub fn run_gui() -> Result<()> {
             None
         }
     };
-    
+
     #[cfg(not(target_os = "linux"))]
     let icon = None;
-    
+
     let mut viewport_builder = egui::ViewportBuilder::default()
         .with_inner_size([window_width, window_height])
         .with_min_inner_size([WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT])
@@ -888,7 +939,7 @@ pub fn run_gui() -> Result<()> {
     if let Some(icon_data) = icon {
         viewport_builder = viewport_builder.with_icon(icon_data);
     }
-    
+
     let options = NativeOptions {
         viewport: viewport_builder,
         ..Default::default()

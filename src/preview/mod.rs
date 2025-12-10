@@ -10,7 +10,6 @@ mod snapping;
 mod thumbnail;
 pub mod window_detection;
 
-
+pub use crate::input::listener::list_input_devices;
 pub use daemon::run_preview_daemon;
 pub use font::{list_fonts, select_best_default_font};
-pub use crate::input::listener::list_input_devices;

@@ -20,15 +20,15 @@ impl HexColor {
     pub fn parse(hex: &str) -> Option<Self> {
         let hex = hex.strip_prefix('#').unwrap_or(hex);
         let value = u32::from_str_radix(hex, 16).ok()?;
-        
+
         // If 6 digits (RRGGBB), prepend full opacity (FF)
         // Check if value fits in 24 bits (max 0xFFFFFF)
         let argb = if value <= 0xFF_FF_FF {
-            0xFF_00_00_00 | value  // Prepend FF for full opacity
+            0xFF_00_00_00 | value // Prepend FF for full opacity
         } else {
-            value  // Already has alpha channel
+            value // Already has alpha channel
         };
-        
+
         Some(Self(argb))
     }
 
@@ -102,13 +102,13 @@ mod tests {
         assert_eq!(HexColor::parse("#7FFF0000"), Some(HexColor(0x7FFF0000)));
         assert_eq!(HexColor::parse("7FFF0000"), Some(HexColor(0x7FFF0000)));
         assert_eq!(HexColor::parse("FFFFFFFF"), Some(HexColor(0xFFFFFFFF)));
-        
+
         // 6-digit format (RRGGBB) - should prepend FF for full opacity
         assert_eq!(HexColor::parse("#FF0000"), Some(HexColor(0xFFFF0000)));
         assert_eq!(HexColor::parse("FF0000"), Some(HexColor(0xFFFF0000)));
         assert_eq!(HexColor::parse("#5bfc37"), Some(HexColor(0xFF5BFC37)));
         assert_eq!(HexColor::parse("5bfc37"), Some(HexColor(0xFF5BFC37)));
-        
+
         // Invalid
         assert_eq!(HexColor::parse("invalid"), None);
         assert_eq!(HexColor::parse(""), None);
@@ -118,7 +118,7 @@ mod tests {
     fn test_hex_color_to_x11() {
         let color = HexColor(0xFF_80_40_20);
         let x11 = color.to_x11_color();
-        
+
         // 0xFF → 0xFFFF, 0x80 → 0x8080, 0x40 → 0x4040, 0x20 → 0x2020
         assert_eq!(x11.alpha, 0xFFFF);
         assert_eq!(x11.red, 0x8080);
@@ -130,7 +130,7 @@ mod tests {
     fn test_opacity_percent() {
         let opacity = Opacity::from_percent(75);
         assert_eq!(opacity.percent(), 75);
-        
+
         let opacity = Opacity::from_percent(150); // clamped
         assert_eq!(opacity.percent(), 100);
     }
@@ -139,7 +139,7 @@ mod tests {
     fn test_opacity_to_argb32() {
         let opacity = Opacity::from_percent(100);
         assert_eq!(opacity.to_argb32(), 0xFF000000);
-        
+
         let opacity = Opacity::from_percent(50);
         let argb = opacity.to_argb32();
         let alpha = (argb >> 24) & 0xFF;
@@ -151,7 +151,7 @@ mod tests {
         let original = Opacity::from_percent(75);
         let argb = original.to_argb32();
         let recovered = Opacity::from_argb32(argb);
-        
+
         // Allow 1% difference due to rounding
         assert!((original.percent() as i16 - recovered.percent() as i16).abs() <= 1);
     }

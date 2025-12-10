@@ -64,7 +64,8 @@ pub fn list_fonts() -> Result<Vec<String>> {
 
     let mut fonts = BTreeSet::new();
     for font_pattern in font_set.iter() {
-        let family = font_pattern.get_string(fontconfig::FC_FAMILY)
+        let family = font_pattern
+            .get_string(fontconfig::FC_FAMILY)
             .unwrap_or("Unknown");
 
         let font_name = if let Some(style_str) = font_pattern.get_string(fontconfig::FC_STYLE) {
@@ -80,7 +81,10 @@ pub fn list_fonts() -> Result<Vec<String>> {
         fonts.insert(font_name);
     }
 
-    info!(count = fonts.len(), "Discovered individual fonts via fontconfig");
+    info!(
+        count = fonts.len(),
+        "Discovered individual fonts via fontconfig"
+    );
     Ok(fonts.into_iter().collect())
 }
 
@@ -93,15 +97,21 @@ pub fn find_font_path(font_name: &str) -> Result<PathBuf> {
 
     for style in KNOWN_STYLES {
         if let Some(style_pos) = font_name.rfind(style)
-            && style_pos + style.len() == font_name.len() {
-                let prefix = &font_name[..style_pos];
-                if prefix.is_empty() || prefix.ends_with(' ') {
-                    family_name = prefix.trim();
-                    style_name = Some(style);
-                    debug!(font = font_name, family = family_name, style = style, "Parsed font into family and style");
-                    break;
-                }
+            && style_pos + style.len() == font_name.len()
+        {
+            let prefix = &font_name[..style_pos];
+            if prefix.is_empty() || prefix.ends_with(' ') {
+                family_name = prefix.trim();
+                style_name = Some(style);
+                debug!(
+                    font = font_name,
+                    family = family_name,
+                    style = style,
+                    "Parsed font into family and style"
+                );
+                break;
             }
+        }
     }
 
     let mut pattern = Pattern::new(&fc);
@@ -110,27 +120,28 @@ pub fn find_font_path(font_name: &str) -> Result<PathBuf> {
     pattern.add_string(fontconfig::FC_FAMILY, &family_cstr);
 
     if let Some(style) = style_name {
-        let style_cstr = CString::new(style)
-            .with_context(|| format!("Invalid style name: {}", style))?;
+        let style_cstr =
+            CString::new(style).with_context(|| format!("Invalid style name: {}", style))?;
         pattern.add_string(fontconfig::FC_STYLE, &style_cstr);
     }
 
     let matched = pattern.font_match();
 
     if let Some(matched_family) = matched.get_string(fontconfig::FC_FAMILY)
-        && !matched_family.eq_ignore_ascii_case(family_name) {
-            warn!(
-                requested = font_name,
-                requested_family = family_name,
-                matched_family = matched_family,
-                "Fontconfig returned different font family - requested font may not be installed"
-            );
-            return Err(anyhow::anyhow!(
-                "Font '{}' not found - fontconfig returned family '{}' instead",
-                font_name,
-                matched_family
-            ));
-        }
+        && !matched_family.eq_ignore_ascii_case(family_name)
+    {
+        warn!(
+            requested = font_name,
+            requested_family = family_name,
+            matched_family = matched_family,
+            "Fontconfig returned different font family - requested font may not be installed"
+        );
+        return Err(anyhow::anyhow!(
+            "Font '{}' not found - fontconfig returned family '{}' instead",
+            font_name,
+            matched_family
+        ));
+    }
 
     let file_path = matched
         .filename()
@@ -168,10 +179,11 @@ pub fn select_best_default_font() -> Result<(String, PathBuf)> {
 
     for candidate in candidates {
         if let Ok(path) = find_font_path(candidate)
-            && path.exists() {
-                info!(font = candidate, path = %path.display(), "Selected default font via fontconfig");
-                return Ok((candidate.to_string(), path));
-            }
+            && path.exists()
+        {
+            info!(font = candidate, path = %path.display(), "Selected default font via fontconfig");
+            return Ok((candidate.to_string(), path));
+        }
     }
 
     debug!("Specific fonts not found, querying for any monospace font");
@@ -182,13 +194,16 @@ pub fn select_best_default_font() -> Result<(String, PathBuf)> {
     let font_set = fontconfig::list_fonts(&pattern, None);
 
     for font_pattern in font_set.iter() {
-        let family = font_pattern.get_string(fontconfig::FC_FAMILY)
+        let family = font_pattern
+            .get_string(fontconfig::FC_FAMILY)
             .unwrap_or("Unknown");
 
         if let Some(style) = font_pattern.get_string(fontconfig::FC_STYLE) {
             let style_lower = style.to_lowercase();
-            if style_lower.contains("bold") || style_lower.contains("italic")
-                || style_lower.contains("oblique") {
+            if style_lower.contains("bold")
+                || style_lower.contains("italic")
+                || style_lower.contains("oblique")
+            {
                 continue;
             }
         }
@@ -235,11 +250,12 @@ impl FontRenderer {
     pub fn from_path(path: PathBuf, size: f32) -> Result<Self> {
         info!(path = %path.display(), size = size, "Attempting to load font from path");
 
-        let font_data = fs::read(&path)
-            .with_context(|| format!(
+        let font_data = fs::read(&path).with_context(|| {
+            format!(
                 "Failed to read font file: {}. Check that the file exists and is readable.",
                 path.display()
-            ))?;
+            )
+        })?;
 
         let font = Font::from_bytes(font_data, FontSettings::default())
             .map_err(|e| anyhow::anyhow!(
@@ -256,23 +272,24 @@ impl FontRenderer {
     pub fn from_font_name(font_name: &str, size: f32) -> Result<Self> {
         info!(font_name = %font_name, size = size, "Resolving font via fontconfig");
 
-        let font_path = find_font_path(font_name)
-            .with_context(|| format!(
+        let font_path = find_font_path(font_name).with_context(|| {
+            format!(
                 "Failed to resolve font '{}'. Font not found or not installed. \
                  Use 'fc-list' to see available fonts.",
                 font_name
-            ))?;
+            )
+        })?;
 
         info!(font_name = %font_name, resolved_path = %font_path.display(), "Resolved font name to path via fontconfig");
 
         let path_display = font_path.display().to_string();
-        Self::from_path(font_path, size)
-            .with_context(|| format!(
+        Self::from_path(font_path, size).with_context(|| {
+            format!(
                 "Failed to load font '{}' from path '{}'. \
                  Font file may be corrupt or in an unsupported format.",
-                font_name,
-                path_display
-            ))
+                font_name, path_display
+            )
+        })
     }
 
     /// Try to load best available system font with automatic X11 fallback
@@ -287,7 +304,8 @@ impl FontRenderer {
             Err(e) => {
                 warn!(error = %e, "No TrueType fonts available, falling back to X11 core fonts");
 
-                let font_id = conn.generate_id()
+                let font_id = conn
+                    .generate_id()
                     .context("Failed to generate X11 font ID")?;
                 conn.open_font(font_id, b"fixed")
                     .context("Failed to open X11 'fixed' font")?;
@@ -310,23 +328,22 @@ impl FontRenderer {
                 size = font_size,
                 "Attempting to load user-configured font"
             );
-            Self::from_font_name(font_name, font_size)
-                .or_else(|e| {
-                    warn!(
-                        font = %font_name,
-                        error = ?e,
-                        "Failed to load configured font, falling back to system default"
-                    );
-                    Self::from_system_font(conn, font_size)
-                })
+            Self::from_font_name(font_name, font_size).or_else(|e| {
+                warn!(
+                    font = %font_name,
+                    error = ?e,
+                    "Failed to load configured font, falling back to system default"
+                );
+                Self::from_system_font(conn, font_size)
+            })
         } else {
-            info!(
-                size = font_size,
-                "No font configured, using system default"
-            );
+            info!(size = font_size, "No font configured, using system default");
             Self::from_system_font(conn, font_size)
         }
-        .context(format!("Failed to initialize font renderer with size {}", font_size))
+        .context(format!(
+            "Failed to initialize font renderer with size {}",
+            font_size
+        ))
     }
 
     pub fn requires_direct_rendering(&self) -> bool {
@@ -352,7 +369,11 @@ impl FontRenderer {
         match self {
             Self::Fontdue { font, size } => {
                 if text.is_empty() {
-                    return Ok(RenderedText { width: 0, height: 0, data: Vec::new() });
+                    return Ok(RenderedText {
+                        width: 0,
+                        height: 0,
+                        data: Vec::new(),
+                    });
                 }
 
                 let mut glyphs = Vec::new();
@@ -374,7 +395,11 @@ impl FontRenderer {
                 let height = (max_ascent + max_descent) as usize;
 
                 if width == 0 || height == 0 {
-                    return Ok(RenderedText { width: 0, height: 0, data: Vec::new() });
+                    return Ok(RenderedText {
+                        width: 0,
+                        height: 0,
+                        data: Vec::new(),
+                    });
                 }
 
                 let mut data = vec![0x00000000; width * height];
@@ -411,11 +436,17 @@ impl FontRenderer {
                     }
                 }
 
-                Ok(RenderedText { width, height, data })
+                Ok(RenderedText {
+                    width,
+                    height,
+                    data,
+                })
             }
-            Self::X11Fallback { .. } => {
-                Ok(RenderedText { width: 0, height: 0, data: Vec::new() })
-            }
+            Self::X11Fallback { .. } => Ok(RenderedText {
+                width: 0,
+                height: 0,
+                data: Vec::new(),
+            }),
         }
     }
 }
@@ -426,11 +457,7 @@ mod tests {
 
     #[test]
     fn test_find_common_fonts() {
-        let test_families = vec![
-            "DejaVu Sans",
-            "Liberation Sans",
-            "Monospace",
-        ];
+        let test_families = vec!["DejaVu Sans", "Liberation Sans", "Monospace"];
 
         for family in test_families {
             if let Ok(path) = find_font_path(family) {

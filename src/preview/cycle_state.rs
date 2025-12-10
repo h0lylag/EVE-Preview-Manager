@@ -32,8 +32,7 @@ impl CycleState {
     /// Register a new EVE window (called from CreateNotify)
     pub fn add_window(&mut self, character_name: String, window: Window) {
         debug!(character = %character_name, window = window, "Adding window for character");
-        self.active_windows
-            .insert(character_name.clone(), window);
+        self.active_windows.insert(character_name.clone(), window);
 
         // Note: Only characters listed in the profile's `cycle_group` will be included in the cycle order.
         // We track all windows here, but `cycle_forward/backward` logic filters internally based on the config.
@@ -78,14 +77,23 @@ impl CycleState {
     ///
     /// # Parameters
     /// - `logged_out_map`: Optional window→last_character mapping for including logged-out windows
-    pub fn cycle_forward(&mut self, logged_out_map: Option<&HashMap<Window, String>>) -> Option<(Window, &str)> {
+    pub fn cycle_forward(
+        &mut self,
+        logged_out_map: Option<&HashMap<Window, String>>,
+    ) -> Option<(Window, &str)> {
         if self.active_windows.is_empty() && logged_out_map.is_none() {
-            warn!(active_windows = self.active_windows.len(), "No active windows to cycle");
+            warn!(
+                active_windows = self.active_windows.len(),
+                "No active windows to cycle"
+            );
             return None;
         }
 
         if self.config_order.is_empty() {
-            warn!(config_order_len = self.config_order.len(), "Config order is empty - add character names to cycle_group in profile settings");
+            warn!(
+                config_order_len = self.config_order.len(),
+                "Config order is empty - add character names to cycle_group in profile settings"
+            );
             return None;
         }
 
@@ -103,14 +111,21 @@ impl CycleState {
 
             // If enabled, check for logged-out windows with this character's last identity
             if let Some(map) = logged_out_map
-                && let Some((&window, _)) = map.iter().find(|(_, last_char)| *last_char == character_name) {
-                    debug!(character = %character_name, index = self.current_index, window = window, "Cycling forward to logged-out character");
-                    return Some((window, character_name.as_str()));
-                }
+                && let Some((&window, _)) = map
+                    .iter()
+                    .find(|(_, last_char)| *last_char == character_name)
+            {
+                debug!(character = %character_name, index = self.current_index, window = window, "Cycling forward to logged-out character");
+                return Some((window, character_name.as_str()));
+            }
 
             // Wrapped around without finding active or logged-out character
             if self.current_index == start_index {
-                warn!(config_order_len = self.config_order.len(), active_windows = self.active_windows.len(), "No active characters found in config order (configured characters may not be running)");
+                warn!(
+                    config_order_len = self.config_order.len(),
+                    active_windows = self.active_windows.len(),
+                    "No active characters found in config order (configured characters may not be running)"
+                );
                 return None;
             }
         }
@@ -122,14 +137,23 @@ impl CycleState {
     ///
     /// # Parameters
     /// - `logged_out_map`: Optional window→last_character mapping for including logged-out windows
-    pub fn cycle_backward(&mut self, logged_out_map: Option<&HashMap<Window, String>>) -> Option<(Window, &str)> {
+    pub fn cycle_backward(
+        &mut self,
+        logged_out_map: Option<&HashMap<Window, String>>,
+    ) -> Option<(Window, &str)> {
         if self.active_windows.is_empty() && logged_out_map.is_none() {
-            warn!(active_windows = self.active_windows.len(), "No active windows to cycle");
+            warn!(
+                active_windows = self.active_windows.len(),
+                "No active windows to cycle"
+            );
             return None;
         }
 
         if self.config_order.is_empty() {
-            warn!(config_order_len = self.config_order.len(), "Config order is empty - add character names to cycle_group in profile settings");
+            warn!(
+                config_order_len = self.config_order.len(),
+                "Config order is empty - add character names to cycle_group in profile settings"
+            );
             return None;
         }
 
@@ -151,14 +175,21 @@ impl CycleState {
 
             // If enabled, check for logged-out windows with this character's last identity
             if let Some(map) = logged_out_map
-                && let Some((&window, _)) = map.iter().find(|(_, last_char)| *last_char == character_name) {
-                    debug!(character = %character_name, index = self.current_index, window = window, "Cycling backward to logged-out character");
-                    return Some((window, character_name.as_str()));
-                }
+                && let Some((&window, _)) = map
+                    .iter()
+                    .find(|(_, last_char)| *last_char == character_name)
+            {
+                debug!(character = %character_name, index = self.current_index, window = window, "Cycling backward to logged-out character");
+                return Some((window, character_name.as_str()));
+            }
 
             // Wrapped around without finding active or logged-out character
             if self.current_index == start_index {
-                warn!(config_order_len = self.config_order.len(), active_windows = self.active_windows.len(), "No active characters found in config order (configured characters may not be running)");
+                warn!(
+                    config_order_len = self.config_order.len(),
+                    active_windows = self.active_windows.len(),
+                    "No active characters found in config order (configured characters may not be running)"
+                );
                 return None;
             }
         }
@@ -171,7 +202,11 @@ impl CycleState {
     /// # Parameters
     /// - `character_name`: Character to activate
     /// - `logged_out_map`: Optional window→last_character mapping for including logged-out windows
-    pub fn activate_character<'a>(&mut self, character_name: &'a str, logged_out_map: Option<&HashMap<Window, String>>) -> Option<(Window, &'a str)> {
+    pub fn activate_character<'a>(
+        &mut self,
+        character_name: &'a str,
+        logged_out_map: Option<&HashMap<Window, String>>,
+    ) -> Option<(Window, &'a str)> {
         // Check logged-in characters first
         if let Some(&window) = self.active_windows.get(character_name) {
             debug!(character = %character_name, window = window, "Activating logged-in character via per-character hotkey");
@@ -186,16 +221,19 @@ impl CycleState {
 
         // If enabled, check for logged-out windows with this character's last identity
         if let Some(map) = logged_out_map
-            && let Some((&window, _)) = map.iter().find(|(_, last_char)| *last_char == character_name) {
-                debug!(character = %character_name, window = window, "Activating logged-out character via per-character hotkey");
+            && let Some((&window, _)) = map
+                .iter()
+                .find(|(_, last_char)| *last_char == character_name)
+        {
+            debug!(character = %character_name, window = window, "Activating logged-out character via per-character hotkey");
 
-                // Update current_index if this character is in config_order
-                if let Some(index) = self.config_order.iter().position(|c| c == character_name) {
-                    self.current_index = index;
-                }
-
-                return Some((window, character_name));
+            // Update current_index if this character is in config_order
+            if let Some(index) = self.config_order.iter().position(|c| c == character_name) {
+                self.current_index = index;
             }
+
+            return Some((window, character_name));
+        }
 
         // Character not found or not active
         debug!(character = %character_name, "Character not active, cannot activate");
@@ -240,20 +278,26 @@ impl CycleState {
     /// Cycles to the next available character within a specific subgroup of characters.
     /// Used for shared hotkeys (e.g. F1 bound to both CharA and CharB) to toggle between them.
     /// The cycle order respects the global configuration order to ensure consistent behavior.
-    pub fn activate_next_in_group(&mut self, group: &[String], logged_out_map: Option<&HashMap<Window, String>>) -> Option<(Window, String)> {
+    pub fn activate_next_in_group(
+        &mut self,
+        group: &[String],
+        logged_out_map: Option<&HashMap<Window, String>>,
+    ) -> Option<(Window, String)> {
         // 1. Filter group to include only characters present in config_order
         //    and map them to their global indices
-        let mut group_indices: Vec<(usize, &String)> = group.iter()
+        let mut group_indices: Vec<(usize, &String)> = group
+            .iter()
             .filter_map(|name| {
-                self.config_order.iter()
+                self.config_order
+                    .iter()
                     .position(|c| c == name)
                     .map(|idx| (idx, name))
             })
             .collect();
 
         if group_indices.is_empty() {
-             debug!("No characters from hotkey group found in config order");
-             return None;
+            debug!("No characters from hotkey group found in config order");
+            return None;
         }
 
         // 2. Sort by global index to ensure we follow cycle order
@@ -261,21 +305,22 @@ impl CycleState {
 
         // 3. Find search start position
         let current_pos = self.current_index;
-        
+
         // 4. Search forward: find the first available character in the group after the current position
         for (idx, name) in &group_indices {
-            if *idx > current_pos 
-                && let Some((window, _)) = self.activate_character(name, logged_out_map) {
-                    debug!(character = %name, "Activated next in group (forward)");
-                    return Some((window, name.to_string()));
+            if *idx > current_pos
+                && let Some((window, _)) = self.activate_character(name, logged_out_map)
+            {
+                debug!(character = %name, "Activated next in group (forward)");
+                return Some((window, name.to_string()));
             }
         }
 
         // 5. Wrap around: Search from beginning of the list
-        // Since we filtered internally and sorted, the first available character 
+        // Since we filtered internally and sorted, the first available character
         // in the group will be the correct wrap-around target.
         for (_, name) in &group_indices {
-             if let Some((window, _)) = self.activate_character(name, logged_out_map) {
+            if let Some((window, _)) = self.activate_character(name, logged_out_map) {
                 debug!(character = %name, "Activated next in group (wrapped)");
                 return Some((window, name.to_string()));
             }
@@ -361,18 +406,18 @@ mod tests {
             "C".to_string(), // 2
             "D".to_string(), // 3
         ]);
-        
+
         state.add_window("A".to_string(), 100);
         state.add_window("C".to_string(), 300);
-        
+
         let group = vec!["A".to_string(), "C".to_string()];
-        
+
         // Start at 0 (A)
         // Next in group should be C (index 2)
         let res = state.activate_next_in_group(&group, None);
         assert_eq!(res, Some((300, "C".to_string())));
         assert_eq!(state.current_index, 2); // State should update to C
-        
+
         // Next in group should be A (index 0) - wrapping
         let res = state.activate_next_in_group(&group, None);
         assert_eq!(res, Some((100, "A".to_string())));
@@ -411,7 +456,7 @@ mod tests {
         // NewChar should NOT be added to config order
         assert_eq!(state.config_order.len(), 1);
         assert!(!state.config_order.contains(&"NewChar".to_string()));
-        
+
         // Cycling should skip NewChar
         assert_eq!(state.cycle_forward(None), Some((100, "Char1")));
         assert_eq!(state.cycle_forward(None), Some((100, "Char1"))); // Still Char1

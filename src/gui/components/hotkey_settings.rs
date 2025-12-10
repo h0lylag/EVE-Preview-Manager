@@ -1,9 +1,9 @@
 //! Hotkey settings component for profile configuration
 
-use eframe::egui;
 use crate::config::profile::Profile;
 use crate::constants::gui::*;
 use crate::gui::key_capture::{self, CaptureResult, CaptureState};
+use eframe::egui;
 use std::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,16 +114,17 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         // Check for final result first
         let mut got_result = false;
         if let Some(ref result_rx) = state.capture_result_rx
-            && let Ok(result) = result_rx.try_recv() {
-                // Auto-close on Escape (Cancelled)
-                if matches!(result, CaptureResult::Cancelled) {
-                    state.cancel_capture();
-                    got_result = false;
-                } else {
-                    state.capture_result = Some(result);
-                    got_result = true;
-                }
+            && let Ok(result) = result_rx.try_recv()
+        {
+            // Auto-close on Escape (Cancelled)
+            if matches!(result, CaptureResult::Cancelled) {
+                state.cancel_capture();
+                got_result = false;
+            } else {
+                state.capture_result = Some(result);
+                got_result = true;
             }
+        }
 
         // Update state
         if let Some(ref state_rx) = state.capture_state_rx {
@@ -303,7 +304,6 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
             .fixed_size([370.0, 280.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ui.ctx(), |ui| {
-
                 let target_name = match state.capture_target {
                     Some(CaptureTarget::Forward) => "Forward Cycle".to_string(),
                     Some(CaptureTarget::Backward) => "Backward Cycle".to_string(),
@@ -320,9 +320,11 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                         ui.set_min_width(320.0);
                         ui.vertical_centered(|ui| {
                             ui.add_space(ITEM_SPACING);
-                            ui.label(egui::RichText::new(&capture_state.description)
-                                .size(20.0)
-                                .strong());
+                            ui.label(
+                                egui::RichText::new(&capture_state.description)
+                                    .size(20.0)
+                                    .strong(),
+                            );
                             ui.add_space(ITEM_SPACING);
                         });
                     });
@@ -345,7 +347,11 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                                 .replace("-event-mouse", " (Mouse)")
                                 .replace("_", " ")
                                 .replace("-", " ");
-                            ui.label(egui::RichText::new(format!("  • {}", friendly_device)).weak().small());
+                            ui.label(
+                                egui::RichText::new(format!("  • {}", friendly_device))
+                                    .weak()
+                                    .small(),
+                            );
                         }
                         ui.spacing_mut().item_spacing.y = 4.0;
                     } else {
@@ -416,7 +422,9 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                                         changed = true;
                                     }
                                     Some(CaptureTarget::Character(ref char_name)) => {
-                                        profile.character_hotkeys.insert(char_name.clone(), binding_clone);
+                                        profile
+                                            .character_hotkeys
+                                            .insert(char_name.clone(), binding_clone);
                                         changed = true;
                                     }
                                     None => {}
@@ -424,8 +432,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                                 state.cancel_capture();
                             }
 
-                            if should_retry
-                                && let Some(ref t) = target {
+                            if should_retry && let Some(ref t) = target {
                                 state.start_key_capture(t.clone());
                             }
                         }
@@ -433,14 +440,20 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                             // Handled automatically above
                         }
                         CaptureResult::Timeout => {
-                            ui.colored_label(egui::Color32::from_rgb(200, 100, 0), "Capture timed out (no key pressed)");
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 100, 0),
+                                "Capture timed out (no key pressed)",
+                            );
                             ui.add_space(ITEM_SPACING);
                             if ui.button("Close").clicked() {
                                 state.cancel_capture();
                             }
                         }
                         CaptureResult::Error(err) => {
-                            ui.colored_label(egui::Color32::from_rgb(200, 0, 0), format!("Error: {}", err));
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 0, 0),
+                                format!("Error: {}", err),
+                            );
                             ui.add_space(ITEM_SPACING);
                             if ui.button("Close").clicked() {
                                 state.cancel_capture();

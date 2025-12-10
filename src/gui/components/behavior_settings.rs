@@ -1,9 +1,9 @@
 //! Behavior settings component (per-profile settings)
 
-use eframe::egui;
 use crate::config::profile::Profile;
 use crate::constants::gui::*;
 use crate::types::Dimensions;
+use eframe::egui;
 
 /// State for behavior settings UI
 pub struct BehaviorSettingsState {
@@ -127,10 +127,11 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
         ];
 
         // Calculate current aspect ratio and find closest matching preset
-        let current_ratio = profile.thumbnail_default_width as f32 / profile.thumbnail_default_height as f32;
+        let current_ratio =
+            profile.thumbnail_default_width as f32 / profile.thumbnail_default_height as f32;
         let detected_preset = {
             let mut preset = "Custom";
-            for (name, ratio) in &aspect_ratios[..aspect_ratios.len()-1] {
+            for (name, ratio) in &aspect_ratios[..aspect_ratios.len() - 1] {
                 if (current_ratio - ratio).abs() < 0.01 {
                     preset = name;
                     break;
@@ -141,9 +142,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
 
         // Use egui memory to persist the selected mode
         let id = ui.make_persistent_id("default_thumbnail_aspect_mode");
-        let mut selected_mode = ui.data_mut(|d|
-            d.get_temp::<String>(id).unwrap_or_else(|| detected_preset.to_string())
-        );
+        let mut selected_mode = ui.data_mut(|d| {
+            d.get_temp::<String>(id)
+                .unwrap_or_else(|| detected_preset.to_string())
+        });
 
         ui.horizontal(|ui| {
             ui.label("Aspect Ratio:");
@@ -153,7 +155,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
                 .selected_text(&selected_mode)
                 .show_ui(ui, |ui| {
                     for (name, ratio) in &aspect_ratios {
-                        if ui.selectable_value(&mut selected_mode, name.to_string(), *name).changed() {
+                        if ui
+                            .selectable_value(&mut selected_mode, name.to_string(), *name)
+                            .changed()
+                        {
                             mode_changed = true;
                             if *ratio > 0.0 {
                                 // Update height based on width and selected ratio
@@ -176,11 +181,16 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
         // Width slider (primary control)
         ui.horizontal(|ui| {
             ui.label("Width:");
-            if ui.add(egui::Slider::new(&mut profile.thumbnail_default_width, 100..=800)
-                .suffix(" px")).changed() {
+            if ui
+                .add(
+                    egui::Slider::new(&mut profile.thumbnail_default_width, 100..=800)
+                        .suffix(" px"),
+                )
+                .changed()
+            {
                 // If not custom, maintain aspect ratio
                 if selected_mode != "Custom" {
-                    for (name, ratio) in &aspect_ratios[..aspect_ratios.len()-1] {
+                    for (name, ratio) in &aspect_ratios[..aspect_ratios.len() - 1] {
                         if name == &selected_mode.as_str() {
                             profile.thumbnail_default_height =
                                 (profile.thumbnail_default_width as f32 / ratio).round() as u16;
@@ -198,14 +208,21 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
             ui.label("Height:");
 
             if is_custom {
-                if ui.add(egui::Slider::new(&mut profile.thumbnail_default_height, 50..=600)
-                    .suffix(" px")).changed() {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut profile.thumbnail_default_height, 50..=600)
+                            .suffix(" px"),
+                    )
+                    .changed()
+                {
                     changed = true;
                 }
             } else {
-                ui.add_enabled(false,
+                ui.add_enabled(
+                    false,
                     egui::Slider::new(&mut profile.thumbnail_default_height, 50..=600)
-                        .suffix(" px"));
+                        .suffix(" px"),
+                );
             }
         });
 
@@ -221,10 +238,11 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
 
         ui.add_space(ITEM_SPACING / 2.0);
 
-        ui.label(egui::RichText::new(
-            "Default size for newly created character thumbnails")
-            .small()
-            .weak());
+        ui.label(
+            egui::RichText::new("Default size for newly created character thumbnails")
+                .small()
+                .weak(),
+        );
     });
 
     ui.add_space(SECTION_SPACING);
@@ -236,9 +254,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
 
         // Target selector
         let id = ui.make_persistent_id("thumbnail_resize_target");
-        let mut selected_target = ui.data_mut(|d|
-            d.get_temp::<String>(id).unwrap_or_else(|| "---".to_string())
-        );
+        let mut selected_target = ui.data_mut(|d| {
+            d.get_temp::<String>(id)
+                .unwrap_or_else(|| "---".to_string())
+        });
 
         ui.horizontal(|ui| {
             ui.label("Resize:");
@@ -247,11 +266,16 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
                 .selected_text(&selected_target)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut selected_target, "---".to_string(), "---");
-                    ui.selectable_value(&mut selected_target, "All Characters".to_string(), "All Characters");
+                    ui.selectable_value(
+                        &mut selected_target,
+                        "All Characters".to_string(),
+                        "All Characters",
+                    );
                     ui.separator();
 
                     // Add individual characters
-                    let mut char_names: Vec<_> = profile.character_thumbnails.keys().cloned().collect();
+                    let mut char_names: Vec<_> =
+                        profile.character_thumbnails.keys().cloned().collect();
                     char_names.sort();
                     for char_name in char_names {
                         ui.selectable_value(&mut selected_target, char_name.clone(), char_name);
@@ -269,12 +293,17 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
         if is_enabled && selected_target != state.last_target {
             let (width, height) = if selected_target == "All Characters" {
                 // Use first character's dimensions as baseline, or default
-                profile.character_thumbnails.values().next()
+                profile
+                    .character_thumbnails
+                    .values()
+                    .next()
                     .map(|s| (s.dimensions.width, s.dimensions.height))
                     .unwrap_or((250, 141))
             } else {
                 // Get specific character's dimensions
-                profile.character_thumbnails.get(&selected_target)
+                profile
+                    .character_thumbnails
+                    .get(&selected_target)
                     .map(|s| (s.dimensions.width, s.dimensions.height))
                     .unwrap_or((250, 141)) // Default fallback if character not found (safeguard)
             };
@@ -296,7 +325,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
         let current_ratio = state.current_width as f32 / state.current_height as f32;
         let detected_preset = {
             let mut preset = "Custom";
-            for (name, ratio) in &aspect_ratios[..aspect_ratios.len()-1] {
+            for (name, ratio) in &aspect_ratios[..aspect_ratios.len() - 1] {
                 if (current_ratio - ratio).abs() < 0.01 {
                     preset = name;
                     break;
@@ -306,9 +335,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
         };
 
         let mode_id = ui.make_persistent_id(format!("resize_aspect_mode_{}", selected_target));
-        let mut aspect_mode = ui.data_mut(|d|
-            d.get_temp::<String>(mode_id).unwrap_or_else(|| detected_preset.to_string())
-        );
+        let mut aspect_mode = ui.data_mut(|d| {
+            d.get_temp::<String>(mode_id)
+                .unwrap_or_else(|| detected_preset.to_string())
+        });
 
         ui.add_enabled_ui(is_enabled, |ui| {
             ui.horizontal(|ui| {
@@ -319,10 +349,14 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
                     .selected_text(&aspect_mode)
                     .show_ui(ui, |ui| {
                         for (name, ratio) in &aspect_ratios {
-                            if ui.selectable_value(&mut aspect_mode, name.to_string(), *name).changed() {
+                            if ui
+                                .selectable_value(&mut aspect_mode, name.to_string(), *name)
+                                .changed()
+                            {
                                 mode_changed = true;
                                 if *ratio > 0.0 {
-                                    state.current_height = (state.current_width as f32 / ratio).round() as u16;
+                                    state.current_height =
+                                        (state.current_width as f32 / ratio).round() as u16;
                                 }
                             }
                         }
@@ -338,13 +372,16 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
             // Width slider
             ui.horizontal(|ui| {
                 ui.label("Width:");
-                if ui.add(egui::Slider::new(&mut state.current_width, 100..=800)
-                    .suffix(" px")).changed() {
+                if ui
+                    .add(egui::Slider::new(&mut state.current_width, 100..=800).suffix(" px"))
+                    .changed()
+                {
                     // Maintain aspect ratio if not custom
                     if aspect_mode != "Custom" {
-                        for (name, ratio) in &aspect_ratios[..aspect_ratios.len()-1] {
+                        for (name, ratio) in &aspect_ratios[..aspect_ratios.len() - 1] {
                             if name == &aspect_mode.as_str() {
-                                state.current_height = (state.current_width as f32 / ratio).round() as u16;
+                                state.current_height =
+                                    (state.current_width as f32 / ratio).round() as u16;
                                 break;
                             }
                         }
@@ -358,12 +395,12 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
                 ui.label("Height:");
 
                 if is_custom {
-                    ui.add(egui::Slider::new(&mut state.current_height, 50..=600)
-                        .suffix(" px"));
+                    ui.add(egui::Slider::new(&mut state.current_height, 50..=600).suffix(" px"));
                 } else {
-                    ui.add_enabled(false,
-                        egui::Slider::new(&mut state.current_height, 50..=600)
-                            .suffix(" px"));
+                    ui.add_enabled(
+                        false,
+                        egui::Slider::new(&mut state.current_height, 50..=600).suffix(" px"),
+                    );
                 }
             });
 
@@ -389,7 +426,9 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
                         state.show_resize_confirmation = true;
                     } else {
                         // Apply to single character immediately
-                        if let Some(char_settings) = profile.character_thumbnails.get_mut(&selected_target) {
+                        if let Some(char_settings) =
+                            profile.character_thumbnails.get_mut(&selected_target)
+                        {
                             char_settings.dimensions = new_dimensions;
                             changed = true;
                         }
@@ -414,9 +453,11 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
                         profile.character_thumbnails.len()
                     ));
                     ui.add_space(ITEM_SPACING);
-                    ui.label(egui::RichText::new("This will overwrite all individual thumbnail sizes.")
-                        .small()
-                        .weak());
+                    ui.label(
+                        egui::RichText::new("This will overwrite all individual thumbnail sizes.")
+                            .small()
+                            .weak(),
+                    );
                     ui.add_space(ITEM_SPACING);
 
                     ui.horizontal(|ui| {

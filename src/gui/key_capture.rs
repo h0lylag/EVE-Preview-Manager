@@ -110,15 +110,13 @@ pub fn start_capture() -> Result<(Receiver<CaptureState>, Receiver<CaptureResult
     let (state_tx, state_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
 
-    thread::spawn(move || {
-        match capture_key_blocking(state_tx) {
-            Ok(result) => {
-                let _ = result_tx.send(result);
-            }
-            Err(e) => {
-                warn!(error = %e, "Key capture error");
-                let _ = result_tx.send(CaptureResult::Error(e.to_string()));
-            }
+    thread::spawn(move || match capture_key_blocking(state_tx) {
+        Ok(result) => {
+            let _ = result_tx.send(result);
+        }
+        Err(e) => {
+            warn!(error = %e, "Key capture error");
+            let _ = result_tx.send(CaptureResult::Error(e.to_string()));
         }
     });
 
@@ -142,13 +140,17 @@ fn capture_key_blocking(state_tx: Sender<CaptureState>) -> Result<CaptureResult>
         })
         .collect();
 
-    info!(count = devices_and_ids.len(), "Starting key capture on all input devices (non-blocking mode)");
+    info!(
+        count = devices_and_ids.len(),
+        "Starting key capture on all input devices (non-blocking mode)"
+    );
 
     let mut state = CaptureState::new();
     let _ = state_tx.send(state.clone());
 
     // Track which devices have contributed to the current key combo
-    let mut contributing_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut contributing_devices: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     let timeout = Duration::from_secs(30);
     let start = std::time::Instant::now();
@@ -227,7 +229,10 @@ fn capture_key_blocking(state_tx: Sender<CaptureState>) -> Result<CaptureResult>
 
                             // Block left and right mouse buttons (they interfere with UI interaction)
                             if key_code == input::BTN_LEFT || key_code == input::BTN_RIGHT {
-                                debug!("Ignoring mouse button {} (not allowed as hotkey)", key_code);
+                                debug!(
+                                    "Ignoring mouse button {} (not allowed as hotkey)",
+                                    key_code
+                                );
                                 continue;
                             }
 
@@ -240,7 +245,8 @@ fn capture_key_blocking(state_tx: Sender<CaptureState>) -> Result<CaptureResult>
                             let _ = state_tx.send(state.clone());
 
                             // Convert HashSet to sorted Vec for consistent ordering
-                            let mut source_devices: Vec<String> = contributing_devices.iter().cloned().collect();
+                            let mut source_devices: Vec<String> =
+                                contributing_devices.iter().cloned().collect();
                             source_devices.sort();
 
                             let binding = HotkeyBinding::with_devices(

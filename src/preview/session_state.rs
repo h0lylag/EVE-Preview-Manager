@@ -24,7 +24,6 @@ pub struct SessionState {
     pub window_last_character: HashMap<Window, String>,
 }
 
-
 impl SessionState {
     pub fn new() -> Self {
         Self::default()
@@ -46,18 +45,17 @@ impl SessionState {
                 info!(character = %character_name, x = settings.x, y = settings.y, "Using saved position for character");
                 return Some(settings.position());
             }
-            
+
             // New character with no saved position → check if we should inherit window position
-            if preserve_position_on_swap
-                && let Some(&pos) = self.window_positions.get(&window) {
-                    info!(character = %character_name, position = ?pos, "Inheriting window position for new character");
-                    return Some(pos);
-                }
-            
+            if preserve_position_on_swap && let Some(&pos) = self.window_positions.get(&window) {
+                info!(character = %character_name, position = ?pos, "Inheriting window position for new character");
+                return Some(pos);
+            }
+
             // New character with no saved position and no inheritance → return None (use EVE window + offset)
             return None;
         }
-        
+
         // Logged-out window ("EVE" title) → use window position from this session
         if let Some(&pos) = self.window_positions.get(&window) {
             info!(window = window, position = ?pos, "Using session position for logged-out window");
@@ -70,7 +68,12 @@ impl SessionState {
     /// Update session position (window tracking)
     pub fn update_window_position(&mut self, window: Window, x: i16, y: i16) {
         self.window_positions.insert(window, Position::new(x, y));
-        info!(window = window, x = x, y = y, "Saved session position for window");
+        info!(
+            window = window,
+            x = x,
+            y = y,
+            "Saved session position for window"
+        );
     }
 
     /// Remove window from session tracking (called on DestroyNotify)
@@ -83,7 +86,8 @@ impl SessionState {
     /// Only tracks non-empty character names (ignores logged-out state)
     pub fn update_last_character(&mut self, window: Window, character_name: &str) {
         if !character_name.is_empty() {
-            self.window_last_character.insert(window, character_name.to_string());
+            self.window_last_character
+                .insert(window, character_name.to_string());
             info!(window = window, character = %character_name, "Tracked last known character for window");
         }
     }
@@ -97,8 +101,11 @@ mod tests {
     fn test_get_position_character_from_config() {
         let state = SessionState::new();
         let mut char_positions = HashMap::new();
-        char_positions.insert("Alice".to_string(), CharacterSettings::new(100, 200, 240, 135));
-        
+        char_positions.insert(
+            "Alice".to_string(),
+            CharacterSettings::new(100, 200, 240, 135),
+        );
+
         let pos = state.get_position("Alice", 123, &char_positions, true);
         assert_eq!(pos, Some(Position::new(100, 200)));
     }
@@ -110,7 +117,7 @@ mod tests {
             window_last_character: HashMap::new(),
         };
         let char_positions = HashMap::new();
-        
+
         // New character "Bob" with window 456 that has position but preserve disabled → should return None (EVE window + offset)
         let pos = state.get_position("Bob", 456, &char_positions, false);
         assert_eq!(pos, None);
@@ -123,7 +130,7 @@ mod tests {
             window_last_character: HashMap::new(),
         };
         let char_positions = HashMap::new();
-        
+
         // New character "Charlie" with preserve enabled → should use window position
         let pos = state.get_position("Charlie", 789, &char_positions, true);
         assert_eq!(pos, Some(Position::new(500, 600)));
@@ -136,7 +143,7 @@ mod tests {
             window_last_character: HashMap::new(),
         };
         let char_positions = HashMap::new();
-        
+
         // preserve enabled but window 999 has no saved position → None (EVE window + offset)
         let pos = state.get_position("Diana", 999, &char_positions, true);
         assert_eq!(pos, None);
@@ -149,7 +156,7 @@ mod tests {
             window_last_character: HashMap::new(),
         };
         let char_positions = HashMap::new();
-        
+
         // Empty character name (logged-out "EVE" window) → use window position (preserve flag doesn't matter for logged-out)
         let pos = state.get_position("", 111, &char_positions, false);
         assert_eq!(pos, Some(Position::new(700, 800)));
@@ -159,7 +166,7 @@ mod tests {
     fn test_get_position_logged_out_window_no_saved_position() {
         let state = SessionState::new();
         let char_positions = HashMap::new();
-        
+
         // Logged-out window with no saved position → None (EVE window + offset)
         let pos = state.get_position("", 222, &char_positions, true);
         assert_eq!(pos, None);
@@ -169,10 +176,13 @@ mod tests {
     fn test_get_position_character_priority_over_window() {
         let mut state = SessionState::new();
         state.window_positions.insert(333, Position::new(900, 1000));
-        
+
         let mut char_positions = HashMap::new();
-        char_positions.insert("Eve".to_string(), CharacterSettings::new(1100, 1200, 240, 135));
-        
+        char_positions.insert(
+            "Eve".to_string(),
+            CharacterSettings::new(1100, 1200, 240, 135),
+        );
+
         // Character position should take priority even with preserve enabled
         let pos = state.get_position("Eve", 333, &char_positions, true);
         assert_eq!(pos, Some(Position::new(1100, 1200)));
@@ -181,13 +191,19 @@ mod tests {
     #[test]
     fn test_update_window_position() {
         let mut state = SessionState::new();
-        
+
         state.update_window_position(444, 1300, 1400);
-        assert_eq!(state.window_positions.get(&444), Some(&Position::new(1300, 1400)));
-        
+        assert_eq!(
+            state.window_positions.get(&444),
+            Some(&Position::new(1300, 1400))
+        );
+
         // Update existing position
         state.update_window_position(444, 1500, 1600);
-        assert_eq!(state.window_positions.get(&444), Some(&Position::new(1500, 1600)));
+        assert_eq!(
+            state.window_positions.get(&444),
+            Some(&Position::new(1500, 1600))
+        );
     }
 
     #[test]
@@ -197,8 +213,14 @@ mod tests {
         state.update_window_position(555, 100, 200);
         state.update_window_position(666, 300, 400);
 
-        assert_eq!(state.window_positions.get(&555), Some(&Position::new(100, 200)));
-        assert_eq!(state.window_positions.get(&666), Some(&Position::new(300, 400)));
+        assert_eq!(
+            state.window_positions.get(&555),
+            Some(&Position::new(100, 200))
+        );
+        assert_eq!(
+            state.window_positions.get(&666),
+            Some(&Position::new(300, 400))
+        );
     }
 
     #[test]
@@ -212,7 +234,10 @@ mod tests {
         // Remove first window
         state.remove_window(777);
         assert_eq!(state.window_positions.get(&777), None);
-        assert_eq!(state.window_positions.get(&888), Some(&Position::new(300, 400)));
+        assert_eq!(
+            state.window_positions.get(&888),
+            Some(&Position::new(300, 400))
+        );
         assert_eq!(state.window_positions.len(), 1);
 
         // Remove second window
@@ -229,6 +254,9 @@ mod tests {
         // Removing non-existent window should be safe (no-op)
         state.remove_window(123);
         assert_eq!(state.window_positions.len(), 1);
-        assert_eq!(state.window_positions.get(&999), Some(&Position::new(100, 200)));
+        assert_eq!(
+            state.window_positions.get(&999),
+            Some(&Position::new(100, 200))
+        );
     }
 }

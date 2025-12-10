@@ -29,8 +29,7 @@ fn main() -> Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(TraceLevel::INFO)
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     let cli = Cli::parse();
 
@@ -42,9 +41,7 @@ fn main() -> Result<()> {
             .build()
             .expect("Failed to build Tokio runtime");
 
-        rt.block_on(async {
-            preview::run_preview_daemon().await
-        })
+        rt.block_on(async { preview::run_preview_daemon().await })
     } else {
         // Default mode: launch the configuration GUI which manages the daemon lifecycle
         gui::run_gui()
