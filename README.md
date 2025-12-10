@@ -4,7 +4,7 @@ EVE Preview Manager - Yet another EVE-O-Preview clone for Linux, written in Rust
 
 ## Status
 
-This project is under active development and should be working. Keep in mind it's primarily designed around my own workflow and environment on NixOS. I built this for myself first and foremost. I will try to provide binaries for people to run but I don't have extensive testing infrastructure in place to test all edge cases. You can always try building it from source if you have issues.
+This project is under active development and should be working. It's primarily designed around my own workflow and environment on NixOS. While pre-built binaries are provided, if you encounter issues, building from source is always an option.
 
 ## Features
 
