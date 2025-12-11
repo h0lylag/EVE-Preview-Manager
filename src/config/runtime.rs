@@ -76,7 +76,11 @@ impl DaemonConfig {
         DisplayConfig {
             enabled: self.profile.thumbnail_enabled,
             opacity,
-            border_size: self.profile.thumbnail_border_size,
+            border_size: if self.profile.thumbnail_border {
+                self.profile.thumbnail_border_size
+            } else {
+                0
+            },
             border_color,
             text_offset: TextOffset::from_border_edge(
                 self.profile.thumbnail_text_x,
@@ -235,7 +239,7 @@ mod tests {
                 thumbnail_default_width: 480,
                 thumbnail_default_height: 270,
                 thumbnail_opacity: opacity_percent,
-                thumbnail_border: true,
+                thumbnail_border: border_size > 0, // In tests, valid size > 0 implies enabled
                 thumbnail_border_size: border_size,
                 thumbnail_border_color: border_color.to_string(),
                 thumbnail_text_size: 18,
@@ -279,11 +283,27 @@ mod tests {
     }
 
     #[test]
+    fn test_build_display_config_border_disabled_override() {
+        let mut state = test_config(100, 5, "invalid", 10, 20, "also_invalid", false, 15);
+        // Explicitly disable border, even though size is 5
+        state.profile.thumbnail_border = false;
+
+        let config = state.build_display_config();
+
+        // Should enforce size 0
+        assert_eq!(config.border_size, 0);
+
+        // Other defaults should still apply
+        assert_eq!(config.opacity, 0xFF000000);
+    }
+
+    #[test]
     fn test_build_display_config_invalid_colors_fallback() {
         let state = test_config(100, 5, "invalid", 10, 20, "also_invalid", false, 15);
 
         let config = state.build_display_config();
         assert_eq!(config.opacity, 0xFF000000);
+        assert_eq!(config.border_size, 5); // Enabled in test helper
         assert_eq!(config.border_color.red, 65535);
         assert_eq!(config.border_color.blue, 0);
         assert_eq!(config.border_color.alpha, 65535);

@@ -512,25 +512,28 @@ impl<'a> Thumbnail<'a> {
 
     pub fn border(&self, focused: bool) -> Result<()> {
         if focused {
-            self.conn
-                .render_composite(
-                    PictOp::SRC,
-                    self.border_fill,
-                    0u32,
-                    self.overlay_picture,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    self.dimensions.width,
-                    self.dimensions.height,
-                )
-                .context(format!(
-                    "Failed to render border for '{}'",
-                    self.character_name
-                ))?;
+            // Only render border fill if we actually have a border size
+            if self.config.border_size > 0 {
+                self.conn
+                    .render_composite(
+                        PictOp::SRC,
+                        self.border_fill,
+                        0u32,
+                        self.overlay_picture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        self.dimensions.width,
+                        self.dimensions.height,
+                    )
+                    .context(format!(
+                        "Failed to render border for '{}'",
+                        self.character_name
+                    ))?;
+            }
         } else {
             self.conn
                 .render_composite(
