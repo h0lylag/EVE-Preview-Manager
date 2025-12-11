@@ -366,9 +366,18 @@ async fn run_event_loop(
             // 3. Handle X11 Events Check
             // Wait for X11 connection to be readable (meaning an event is available)
             // This is level-triggered
-            _ = x11_fd.readable() => {
-                // When readable, we loop at the top of 'loop' to poll events
-                // Just continue here effectively falls through to loop top
+            ready = x11_fd.readable() => {
+                match ready {
+                     Ok(mut guard) => {
+                         // IMPORTANT: We must clear the readiness state, otherwise readable()
+                         // will return immediately again in the next loop iteration, causing 100% CPU usage.
+                         guard.clear_ready();
+                     }
+                     Err(e) => {
+                         error!(error = ?e, "Failed to poll X11 fd readiness");
+                     }
+                }
+                // Continue to top of loop to process events
                 continue;
             }
         }
