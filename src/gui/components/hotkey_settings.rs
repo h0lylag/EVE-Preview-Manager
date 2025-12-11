@@ -238,7 +238,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     ui.style().visuals.text_color()
                 };
                 ui.label(egui::RichText::new(binding_text).strong().color(color));
-                if ui.button("🎹 Bind Key").clicked() {
+                if ui.button("⌨ Bind").clicked() {
                     state.start_key_capture(CaptureTarget::Forward);
                 }
             });
@@ -257,7 +257,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     ui.style().visuals.text_color()
                 };
                 ui.label(egui::RichText::new(binding_text).strong().color(color));
-                if ui.button("🎹 Bind Key").clicked() {
+                if ui.button("⌨ Bind").clicked() {
                     state.start_key_capture(CaptureTarget::Backward);
                 }
             });
@@ -298,7 +298,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
 
     // Key Capture Dialog
     if state.show_key_capture_dialog {
-        egui::Window::new("🎹 Capture Hotkey")
+        egui::Window::new("⌨ Capture Key")
             .collapsible(false)
             .resizable(false)
             .fixed_size([370.0, 280.0])

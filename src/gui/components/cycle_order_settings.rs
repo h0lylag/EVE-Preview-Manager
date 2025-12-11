@@ -209,7 +209,7 @@ fn render_unified_cycle_group_tab(
     hotkey_state: &mut crate::gui::components::hotkey_settings::HotkeySettingsState,
     changed: &mut bool,
 ) {
-    ui.label(egui::RichText::new("Character Cycle Order & Hotkeys").strong());
+    ui.label(egui::RichText::new("Character Cycle Order").strong());
     ui.add_space(ITEM_SPACING);
 
     // Mode selector
@@ -340,7 +340,7 @@ fn render_unified_cycle_group_tab(
                                         {
                                             "Capturing..."
                                         } else {
-                                            "Bind"
+                                            "⌨ Bind"
                                         };
 
                                         if ui
