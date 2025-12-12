@@ -87,7 +87,8 @@ pub mod eve {
     /// Known WM_CLASS values for EVE Online
     pub const WINDOW_CLASSES: &[&str] = &[
         "exefile.exe",
-        "wine", // Fallback for some wine configs
+        "wine",        // Fallback for some wine configs
+        "steam_app_0", // Flatpak/Steam launch
     ];
 }
 

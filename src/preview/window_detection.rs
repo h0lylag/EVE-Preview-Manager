@@ -1,7 +1,7 @@
 //! EVE window detection and thumbnail creation logic
 
 use anyhow::{Context, Result};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
@@ -23,21 +23,18 @@ pub fn check_eve_window(
     window: Window,
     state: &mut SessionState,
 ) -> Result<Option<String>> {
-    // 1. Check WM_CLASS first (fastest and most reliable if set correctly)
-    if let Ok(Some(class_name)) = get_window_class(ctx.conn, window, ctx.atoms) {
-        if is_eve_window_class(&class_name) {
-            debug!(window = window, class = %class_name, "Identified EVE window by WM_CLASS");
-            // Proceed to final verification
-        } else {
-            // If WM_CLASS is set but definitely not EVE, we might return early?
-            // But some users might have weird wrappers, so we fallback to PID check if it's 'wine' or generic.
-            // For now, if it's not in our list, we continue to PID check
-            debug!(window = window, class = %class_name, "WM_CLASS did not match known EVE identifiers, checking PID");
-        }
-    }
+    // 1. Get Window Class
+    let class_name = get_window_class(ctx.conn, window, ctx.atoms)
+        .ok() // Ignore errors
+        .flatten();
+    let is_known_class = class_name
+        .as_ref()
+        .map(|c| is_eve_window_class(c))
+        .unwrap_or(false);
 
+    // 2. Get PID
     let pid_atom = ctx.atoms.net_wm_pid;
-    if let Ok(prop) = ctx
+    let pid = if let Ok(prop) = ctx
         .conn
         .get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1)
         .context(format!(
@@ -47,32 +44,63 @@ pub fn check_eve_window(
         .reply()
     {
         if !prop.value.is_empty() {
-            let pid = u32::from_ne_bytes(
+            Some(u32::from_ne_bytes(
                 prop.value[0..constants::x11::PID_PROPERTY_SIZE]
                     .try_into()
-                    .context("Invalid PID property format (expected 4 bytes)")?,
-            );
-
-            // Skip our own thumbnail windows
-            if pid == std::process::id() {
-                return Ok(None);
-            }
-
-            // 2. Process Inspection
-            if !is_wine_process(pid) {
-                // Not a wine process, check if WM_CLASS matched. If not, it's likely not EVE.
-                // However, the original code ONLY checked for wine process.
-                // So if it's not Wine, we skip.
-                return Ok(None);
-            }
+                    .unwrap_or([0; 4]),
+            ))
         } else {
-            warn!(
-                window = window,
-                "_NET_WM_PID not set, assuming wine process (fallback)"
-            );
+            None
         }
+    } else {
+        None
+    };
+
+    // 3. Evaluate Process Strategy
+    let should_inspect_title = if let Some(pid) = pid {
+        // Skip our own windows (thumbnails)
+        if pid == std::process::id() {
+            return Ok(None);
+        }
+
+        if is_wine_process(pid) {
+            debug!(
+                window = window,
+                pid = pid,
+                "Identified Verified Wine Process"
+            );
+            true
+        } else if is_known_class {
+            // NOTE: PID check failed (likely namespace mismatch e.g., PID 2), but Class matched.
+            // We explicitly accept this as a container/Flatpak fallback.
+            debug!(
+                window = window,
+                class = ?class_name,
+                pid = pid,
+                "Identified Container/Flatpak process (PID verification failed, but WM_CLASS matched)"
+            );
+            true
+        } else {
+            false
+        }
+    } else {
+        // Edge case: No PID, but Class matches.
+        if is_known_class {
+            debug!(window = window, class = ?class_name, "No PID, but WM_CLASS matched");
+            true
+        } else {
+            false
+        }
+    };
+
+    if !should_inspect_title {
+        return Ok(None);
     }
 
+    // 4. Final Gate: Title Verification
+    // NOTE: Strictly require "EVE - " title to avoid false positives (e.g. other steam_app_0 games)
+
+    // Set event mask to ensure we can read properties reliably
     ctx.conn
         .change_window_attributes(
             window,
@@ -85,6 +113,13 @@ pub fn check_eve_window(
         window
     ))? {
         let character_name = eve_window.character_name().to_string();
+
+        info!(
+            window = window,
+            character = %character_name,
+            class = ?class_name,
+            "Confirmed EVE Client (Title Verified)"
+        );
 
         // Track last known character for this window (for logged-out cycling feature)
         state.update_last_character(window, &character_name);
@@ -102,6 +137,13 @@ pub fn check_eve_window(
 
         Ok(Some(character_name))
     } else {
+        // Title verification failed
+        // NOTE: It might be a valid Steam app (steam_app_0) but NOT EVE.
+        debug!(
+            window = window,
+            class = ?class_name,
+            "Window matched process/class criteria but failed EVE title verification"
+        );
         Ok(None)
     }
 }
