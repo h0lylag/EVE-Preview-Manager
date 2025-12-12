@@ -191,7 +191,9 @@ impl SharedState {
             settings_changed: false,
             selected_profile_idx,
             should_quit: false,
-            last_config_mtime: std::fs::metadata(Config::path()).ok().and_then(|m| m.modified().ok()),
+            last_config_mtime: std::fs::metadata(Config::path())
+                .ok()
+                .and_then(|m| m.modified().ok()),
         }
     }
 

@@ -281,22 +281,21 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut BehaviorSettings
             ))
             .selected_text(&selected_target)
             .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut selected_target, "---".to_string(), "---");
-                    ui.selectable_value(
-                        &mut selected_target,
-                        "All Characters".to_string(),
-                        "All Characters",
-                    );
-                    ui.separator();
+                ui.selectable_value(&mut selected_target, "---".to_string(), "---");
+                ui.selectable_value(
+                    &mut selected_target,
+                    "All Characters".to_string(),
+                    "All Characters",
+                );
+                ui.separator();
 
-                    // Add individual characters
-                    let mut char_names: Vec<_> =
-                        profile.character_thumbnails.keys().cloned().collect();
-                    char_names.sort();
-                    for char_name in char_names {
-                        ui.selectable_value(&mut selected_target, char_name.clone(), char_name);
-                    }
-                });
+                // Add individual characters
+                let mut char_names: Vec<_> = profile.character_thumbnails.keys().cloned().collect();
+                char_names.sort();
+                for char_name in char_names {
+                    ui.selectable_value(&mut selected_target, char_name.clone(), char_name);
+                }
+            });
 
             ui.data_mut(|d| d.insert_temp(id, selected_target.clone()));
         });

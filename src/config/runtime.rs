@@ -214,7 +214,6 @@ impl DaemonConfig {
         Ok(None)
     }
 
-
     /// Save a newly detected character to the config file while preserving all other state on disk.
     ///
     /// This method is used when "Auto-save thumbnail positions" is DISABLED. It ensures that
@@ -225,18 +224,14 @@ impl DaemonConfig {
     /// 1. Loads the current configuration from disk (source of truth).
     /// 2. Inserts ONLY the new character's settings.
     /// 3. Saves back to disk using the `PreserveCharacterPositions` strategy (redundant but safe).
-    pub fn save_new_character(
-        &self,
-        char_name: &str,
-        settings: CharacterSettings,
-    ) -> Result<()> {
+    pub fn save_new_character(&self, char_name: &str, settings: CharacterSettings) -> Result<()> {
         info!(character = %char_name, "Safe-saving new character to config (preserving disk state)");
 
         let config_path = Self::config_path();
-        
+
         // 1. Load current on-disk config to ensure we don't clobber unrelated changes
         let mut disk_config = if let Ok(contents) = fs::read_to_string(&config_path) {
-             serde_json::from_str::<crate::config::profile::Config>(&contents)
+            serde_json::from_str::<crate::config::profile::Config>(&contents)
                 .context("Failed to parse existing config for safe update")?
         } else {
             // Should theoretically not happen if app is running, but handle gracefully
@@ -245,19 +240,28 @@ impl DaemonConfig {
 
         // 2. Find the active profile in the disk config
         let selected_name = disk_config.global.selected_profile.clone();
-        if let Some(profile) = disk_config.profiles.iter_mut().find(|p| p.profile_name == selected_name) {
+        if let Some(profile) = disk_config
+            .profiles
+            .iter_mut()
+            .find(|p| p.profile_name == selected_name)
+        {
             // 3. Insert ONLY the new character
-            profile.character_thumbnails.insert(char_name.to_string(), settings);
+            profile
+                .character_thumbnails
+                .insert(char_name.to_string(), settings);
         } else {
-             // Fallback: modify the first profile if selected not found (unlikely)
-             if let Some(profile) = disk_config.profiles.first_mut() {
-                 profile.character_thumbnails.insert(char_name.to_string(), settings);
-             }
+            // Fallback: modify the first profile if selected not found (unlikely)
+            if let Some(profile) = disk_config.profiles.first_mut() {
+                profile
+                    .character_thumbnails
+                    .insert(char_name.to_string(), settings);
+            }
         }
 
         // 4. Save back to disk
         // We can just save the modified disk_config directly
-        disk_config.save_with_strategy(SaveStrategy::OverwriteCharacterPositions)
+        disk_config
+            .save_with_strategy(SaveStrategy::OverwriteCharacterPositions)
             .context("Failed to save config with new character")
     }
 }
