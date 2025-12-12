@@ -666,8 +666,11 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
 
                     // Update session state
                     if let Some(settings) = final_settings {
-                        ctx.session_state
-                            .update_window_position(event.window, settings.x, settings.y);
+                        ctx.session_state.update_window_position(
+                            event.window,
+                            settings.x,
+                            settings.y,
+                        );
                     }
 
                     // Update thumbnail (moves/resizes to new settings)

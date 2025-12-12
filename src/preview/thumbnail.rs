@@ -921,30 +921,32 @@ impl<'a> Thumbnail<'a> {
         new_settings: Option<crate::types::CharacterSettings>,
     ) -> Result<()> {
         self.character_name = new_name;
-        
-         // If we resized, we need to redraw the name anyway.
-         // But update_name draws TO overlay_pixmap. 
-         // If we resize, we get a NEW blank overlay_pixmap.
-         // So resize MUST happen BEFORE update_name if we are resizing.
-        
+
+        // If we resized, we need to redraw the name anyway.
+        // But update_name draws TO overlay_pixmap.
+        // If we resize, we get a NEW blank overlay_pixmap.
+        // So resize MUST happen BEFORE update_name if we are resizing.
+
         if let Some(settings) = new_settings {
             self.reposition(settings.x, settings.y).context(format!(
                 "Failed to reposition after character change to '{}'",
                 self.character_name
             ))?;
-            
-            self.resize(settings.dimensions.width, settings.dimensions.height).context(format!(
-               "Failed to resize after character change to '{}'",
-               self.character_name
-            ))?;
+
+            self.resize(settings.dimensions.width, settings.dimensions.height)
+                .context(format!(
+                    "Failed to resize after character change to '{}'",
+                    self.character_name
+                ))?;
         }
 
         self.update_name().context(format!(
             "Failed to update name overlay to '{}'",
             self.character_name
         ))?;
-        
-        self.update().context("Failed to repaint after character change")?;
+
+        self.update()
+            .context("Failed to repaint after character change")?;
 
         Ok(())
     }
