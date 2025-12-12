@@ -588,64 +588,85 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                         old_name, new_character_name
                     ))?;
 
-                // LOGIC FIX: Ensure the new character is written to disk immediately.
+                // NOTE: We must ensure the NEW character is written to disk immediately.
                 // handle_character_change only saves the OLD character (if auto-save is on).
-                // We need to ensure the NEW character is visible to the GUI.
+                // If we don't save here, the GUI won't see the new character until the next auto-save.
                 if !new_character_name.is_empty() {
-                    // 1. Ensure it's in the in-memory config (use current/new position)
-                    // If handle_character_change returned a position, it's already in config.
-                    // If not, we need to add it.
-                    let settings = if let Some(pos) = new_position {
-                        crate::types::CharacterSettings::new(
+                    let final_position = if let Some(pos) = new_position {
+                        // Character already exists in config; use its saved position
+                        Some(pos)
+                    } else {
+                        // New/Unseen character found. Determine initial position based on profile settings.
+                        let settings = if ctx.daemon_config.profile.thumbnail_preserve_position_on_swap {
+                            // Inherit position: User wants new characters to appear where the previous one was
+                            crate::types::CharacterSettings::new(
+                                current_pos.x,
+                                current_pos.y,
+                                thumbnail.dimensions.width,
+                                thumbnail.dimensions.height,
+                            )
+                        } else {
+                            // Reset position: User disabled inheritance, so snap to default offset from the EVE client window
+                            let src_geom = ctx
+                                .app_ctx
+                                .conn
+                                .get_geometry(thumbnail.src)
+                                .context("Failed to query source geometry for reset position")?
+                                .reply()
+                                .context("Failed to get source geometry reply for reset position")?;
+
+                            let default_x = src_geom.x + crate::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                            let default_y = src_geom.y + crate::constants::positioning::DEFAULT_SPAWN_OFFSET;
+
+                            crate::types::CharacterSettings::new(
+                                default_x,
+                                default_y,
+                                thumbnail.dimensions.width,
+                                thumbnail.dimensions.height,
+                            )
+                        };
+
+                        // Update memory
+                        ctx
+                            .daemon_config
+                            .character_thumbnails
+                            .insert(new_character_name.to_string(), settings);
+
+                        // Persist to disk
+                        if ctx.daemon_config.profile.thumbnail_auto_save_position {
+                            ctx.daemon_config.save().context(format!(
+                                "Failed to save config after character login '{}'",
+                                new_character_name
+                            ))?;
+                        } else {
+                            ctx.daemon_config
+                                .save_new_character(new_character_name, settings)
+                                .context(format!(
+                                    "Failed to safe-save config after character login '{}'",
+                                    new_character_name
+                                ))?;
+                        }
+
+                        Some(settings.position())
+                    };
+
+                    // Update session state
+                    if let Some(pos) = final_position {
+                        ctx.session_state.update_window_position(
+                            event.window,
                             pos.x,
                             pos.y,
-                            thumbnail.dimensions.width,
-                            thumbnail.dimensions.height,
-                        )
-                    } else {
-                        crate::types::CharacterSettings::new(
-                            current_pos.x,
-                            current_pos.y,
-                            thumbnail.dimensions.width,
-                            thumbnail.dimensions.height,
-                        )
-                    };
-                    
-                    // Always update memory
-                    ctx.daemon_config
-                        .character_thumbnails
-                        .insert(new_character_name.to_string(), settings);
-
-                    // 2. Persist to disk (Safe Save vs Full Save)
-                    // NOTE: If auto-save is DISABLED, we specifically use save_new_character to avoid
-                    // overwriting other pending state (like the old character's position if it changed but wasn't saved).
-                    if ctx.daemon_config.profile.thumbnail_auto_save_position {
-                        ctx.daemon_config.save().context(format!(
-                            "Failed to save config after character login '{}'",
-                            new_character_name
-                        ))?;
-                    } else {
-                        ctx.daemon_config.save_new_character(new_character_name, settings).context(format!(
-                            "Failed to safe-save config after character login '{}'",
-                            new_character_name
-                        ))?;
+                        );
                     }
+
+                    // Update thumbnail (moves to new position)
+                    thumbnail
+                        .set_character_name(new_character_name.to_string(), final_position)
+                        .context(format!(
+                            "Failed to update thumbnail after character change from '{}'",
+                            old_name
+                        ))?;
                 }
-
-                // Update session state
-                ctx.session_state.update_window_position(
-                    event.window,
-                    current_pos.x,
-                    current_pos.y,
-                );
-
-                // Update thumbnail (may move to new position)
-                thumbnail
-                    .set_character_name(new_character_name.to_string(), new_position)
-                    .context(format!(
-                        "Failed to update thumbnail after character change from '{}'",
-                        old_name
-                    ))?;
             } else if event.atom == ctx.app_ctx.atoms.wm_name {
                 // Check if this is a new EVE window being detected (title change from generic to character name)
                 use crate::preview::window_detection::{check_and_create_window, check_eve_window};
