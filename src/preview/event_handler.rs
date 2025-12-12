@@ -677,6 +677,14 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                             "Failed to update thumbnail after character change from '{}'",
                             old_name
                         ))?;
+                } else {
+                    // Handle logout: Clear the name, no position change
+                    thumbnail
+                        .set_character_name(String::new(), None)
+                        .context(format!(
+                            "Failed to clear thumbnail name after logout from '{}'",
+                            old_name
+                        ))?;
                 }
             } else if event.atom == ctx.app_ctx.atoms.wm_name {
                 // Check if this is a new EVE window being detected (title change from generic to character name)
