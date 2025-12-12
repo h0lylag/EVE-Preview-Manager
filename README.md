@@ -3,14 +3,11 @@
 EVE Preview Manager - Yet another EVE-O-Preview clone for Linux, written in Rust. A reimplementation of my older [EVE-L_Preview](https://github.com/h0lylag/EVE-L_Preview). Inspired by [EVE-O-Preview](https://github.com/Proopai/eve-o-preview), [EVE-X-Preview](https://github.com/g0nzo83/EVE-X-Preview), [Nicotine](https://github.com/isomerc/nicotine), and [eve-l-preview](https://github.com/ilveth/eve-l-preview).
 
 
-### [EVE Preview Manager Discord](https://discord.gg/MxdW5NCjwV)
-
-Get notified of new releases, give feedback, get help troubleshooting, etc.
-
-
 ## Status
 
-This project is under active development and should be working. It's primarily designed around my own workflow and environment on NixOS. While pre-built binaries are provided, if you encounter issues, building from source is always an option.
+This project is under active development and should be working. It's primarily designed around my own workflow and environment on NixOS. While pre-built binaries are provided, if you encounter issues, building from source is always an option. If you want to get notified of new releases, give feedback, get help troubleshooting, etc. join the Discord.
+
+https://discord.gg/MxdW5NCjwV
 
 ## Features
 
