@@ -153,6 +153,7 @@ impl ThumbnailState {
     }
 
     /// Check if the thumbnail is minimized by the window manager
+    #[allow(dead_code)]
     pub fn is_minimized(&self) -> bool {
         matches!(self, Self::Minimized)
     }

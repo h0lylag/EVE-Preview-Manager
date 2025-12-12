@@ -134,16 +134,26 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
                     thumbnail.character_name
                 ))?;
             } else {
-                 let settings = ctx.daemon_config.character_thumbnails.get(&thumbnail.character_name)
+                let settings = ctx
+                    .daemon_config
+                    .character_thumbnails
+                    .get(&thumbnail.character_name)
                     .copied()
-                    .unwrap_or_else(|| crate::types::CharacterSettings::new(
-                        geom.x, geom.y, thumbnail.dimensions.width, thumbnail.dimensions.height
-                    ));
-                 
-                 ctx.daemon_config.save_new_character(&thumbnail.character_name, settings).context(format!(
-                    "Failed to safe-save initial position for new character '{}'",
-                    thumbnail.character_name
-                 ))?;
+                    .unwrap_or_else(|| {
+                        crate::types::CharacterSettings::new(
+                            geom.x,
+                            geom.y,
+                            thumbnail.dimensions.width,
+                            thumbnail.dimensions.height,
+                        )
+                    });
+
+                ctx.daemon_config
+                    .save_new_character(&thumbnail.character_name, settings)
+                    .context(format!(
+                        "Failed to safe-save initial position for new character '{}'",
+                        thumbnail.character_name
+                    ))?;
             }
 
             ctx.eve_clients.insert(event.window, thumbnail);
@@ -215,10 +225,7 @@ fn handle_focus_out(ctx: &mut EventContext, event: FocusOutEvent) -> Result<()> 
             thumbnail.character_name
         ))?;
         if ctx.app_ctx.config.hide_when_no_focus
-            && ctx
-                .eve_clients
-                .values()
-                .all(|x| !x.state.is_focused() && !x.state.is_minimized())
+            && ctx.eve_clients.values().all(|x| !x.state.is_focused())
         {
             for thumbnail in ctx.eve_clients.values_mut() {
                 debug!(character = %thumbnail.character_name, "Hiding thumbnail due to focus loss");
@@ -597,7 +604,11 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                         Some(pos)
                     } else {
                         // New/Unseen character found. Determine initial position based on profile settings.
-                        let settings = if ctx.daemon_config.profile.thumbnail_preserve_position_on_swap {
+                        let settings = if ctx
+                            .daemon_config
+                            .profile
+                            .thumbnail_preserve_position_on_swap
+                        {
                             // Inherit position: User wants new characters to appear where the previous one was
                             crate::types::CharacterSettings::new(
                                 current_pos.x,
@@ -613,10 +624,14 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                                 .get_geometry(thumbnail.src)
                                 .context("Failed to query source geometry for reset position")?
                                 .reply()
-                                .context("Failed to get source geometry reply for reset position")?;
+                                .context(
+                                    "Failed to get source geometry reply for reset position",
+                                )?;
 
-                            let default_x = src_geom.x + crate::constants::positioning::DEFAULT_SPAWN_OFFSET;
-                            let default_y = src_geom.y + crate::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                            let default_x =
+                                src_geom.x + crate::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                            let default_y =
+                                src_geom.y + crate::constants::positioning::DEFAULT_SPAWN_OFFSET;
 
                             crate::types::CharacterSettings::new(
                                 default_x,
@@ -627,8 +642,7 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                         };
 
                         // Update memory
-                        ctx
-                            .daemon_config
+                        ctx.daemon_config
                             .character_thumbnails
                             .insert(new_character_name.to_string(), settings);
 
@@ -652,11 +666,8 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
 
                     // Update session state
                     if let Some(pos) = final_position {
-                        ctx.session_state.update_window_position(
-                            event.window,
-                            pos.x,
-                            pos.y,
-                        );
+                        ctx.session_state
+                            .update_window_position(event.window, pos.x, pos.y);
                     }
 
                     // Update thumbnail (moves to new position)
@@ -727,13 +738,21 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                                 thumbnail.character_name
                             ))?;
                         } else {
-                             let settings = ctx.daemon_config.character_thumbnails.get(&thumbnail.character_name)
+                            let settings = ctx
+                                .daemon_config
+                                .character_thumbnails
+                                .get(&thumbnail.character_name)
                                 .copied()
-                                .unwrap_or_else(|| crate::types::CharacterSettings::new(
-                                    geom.x, geom.y, thumbnail.dimensions.width, thumbnail.dimensions.height
-                                ));
-                             
-                             ctx.daemon_config.save_new_character(&thumbnail.character_name, settings).context(format!(
+                                .unwrap_or_else(|| {
+                                    crate::types::CharacterSettings::new(
+                                        geom.x,
+                                        geom.y,
+                                        thumbnail.dimensions.width,
+                                        thumbnail.dimensions.height,
+                                    )
+                                });
+
+                            ctx.daemon_config.save_new_character(&thumbnail.character_name, settings).context(format!(
                                 "Failed to safe-save initial position for newly detected character '{}'",
                                 thumbnail.character_name
                              ))?;
