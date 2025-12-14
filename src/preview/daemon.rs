@@ -171,7 +171,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
         // Select backend based on configuration
         use crate::config::HotkeyBackendType;
         use crate::input::backend::HotkeyBackend;
-        
+
         match daemon_config.profile.hotkey_backend {
             HotkeyBackendType::X11 => {
                 info!("Using X11 hotkey backend (secure, no permissions required)");
