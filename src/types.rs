@@ -137,16 +137,9 @@ pub enum ThumbnailState {
     Normal { focused: bool },
     /// Window is minimized by the window manager
     Minimized,
-    /// Hidden due to hide_when_no_focus feature (all EVE windows unfocused)
-    Hidden,
 }
 
 impl ThumbnailState {
-    /// Check if the thumbnail should be visible on screen
-    pub fn is_visible(&self) -> bool {
-        matches!(self, Self::Normal { .. } | Self::Minimized)
-    }
-
     /// Check if the thumbnail currently has input focus
     pub fn is_focused(&self) -> bool {
         matches!(self, Self::Normal { focused: true })
@@ -284,7 +277,7 @@ mod tests {
     #[test]
     fn test_thumbnail_state_normal_unfocused() {
         let state = ThumbnailState::Normal { focused: false };
-        assert!(state.is_visible());
+
         assert!(!state.is_focused());
         assert!(!state.is_minimized());
     }
@@ -292,7 +285,7 @@ mod tests {
     #[test]
     fn test_thumbnail_state_normal_focused() {
         let state = ThumbnailState::Normal { focused: true };
-        assert!(state.is_visible());
+
         assert!(state.is_focused());
         assert!(!state.is_minimized());
     }
@@ -300,24 +293,15 @@ mod tests {
     #[test]
     fn test_thumbnail_state_minimized() {
         let state = ThumbnailState::Minimized;
-        assert!(state.is_visible());
+
         assert!(!state.is_focused());
         assert!(state.is_minimized());
-    }
-
-    #[test]
-    fn test_thumbnail_state_hidden() {
-        let state = ThumbnailState::Hidden;
-        assert!(!state.is_visible());
-        assert!(!state.is_focused());
-        assert!(!state.is_minimized());
     }
 
     #[test]
     fn test_thumbnail_state_default() {
         let state = ThumbnailState::default();
         assert_eq!(state, ThumbnailState::Normal { focused: false });
-        assert!(state.is_visible());
         assert!(!state.is_focused());
     }
 

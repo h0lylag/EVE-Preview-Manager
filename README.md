@@ -47,7 +47,8 @@ https://discord.gg/MxdW5NCjwV
 
 ## Requirements
 
-- Linux x86_64 with X11 (Wayland users: works via XWayland)
+- Linux x86_64. **Note:** Although the application uses X11 protocols and should theoretically work under native X11, it is highly recommended to use Wayland (via XWayland) as native X11 support is currently problematic.
+- User must be in `input` group for hotkey detection: `sudo usermod -aG input $USER` (requires re-logging to take effect)
 - Runtime dependencies: OpenGL, fontconfig, dbus, libxkbcommon (should already be installed on most modern Linux distributions)
 
 ### Optional: evdev Backend for Advanced Hotkey Features

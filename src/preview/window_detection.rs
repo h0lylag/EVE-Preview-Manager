@@ -226,7 +226,7 @@ pub fn scan_eve_windows<'a>(
             // Query geometry to get actual position from X11
             let geom = ctx
                 .conn
-                .get_geometry(eve.window)
+                .get_geometry(eve.window())
                 .context("Failed to query geometry during initial scan")?
                 .reply()
                 .context("Failed to get geometry reply during initial scan")?;

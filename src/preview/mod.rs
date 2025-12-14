@@ -5,6 +5,8 @@ mod daemon;
 mod event_handler;
 pub mod font;
 
+mod overlay;
+mod renderer;
 mod session_state;
 mod snapping;
 mod thumbnail;

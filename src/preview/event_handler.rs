@@ -45,7 +45,7 @@ fn handle_damage_notify(
     if let Some(thumbnail) = ctx
         .eve_clients
         .values()
-        .find(|thumbnail| thumbnail.damage == event.damage)
+        .find(|thumbnail| thumbnail.damage() == event.damage)
     {
         thumbnail.update().context(format!(
             "Failed to update thumbnail for damage event (damage={})",
@@ -104,7 +104,7 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
             let geom = ctx
                 .app_ctx
                 .conn
-                .get_geometry(thumbnail.window)
+                .get_geometry(thumbnail.window())
                 .context("Failed to query geometry for new thumbnail")?
                 .reply()
                 .context("Failed to get geometry reply for new thumbnail")?;
@@ -171,7 +171,7 @@ fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) -> R
         // Linear search is fine here as we have very few clients (usually < 10)
         ctx.eve_clients
             .iter()
-            .find(|(_, thumb)| thumb.parent == Some(event.window))
+            .find(|(_, thumb)| thumb.parent() == Some(event.window))
             .map(|(win, _)| *win)
     };
 
@@ -206,9 +206,7 @@ fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()> {
 
     // Handle "Hide when no focus" logic - Reveal and refresh if needed
     // We check this BEFORE updating the specific focused window to ensure clean state transitions
-    if ctx.app_ctx.config.hide_when_no_focus
-        && ctx.eve_clients.values().any(|x| !x.state.is_visible())
-    {
+    if ctx.app_ctx.config.hide_when_no_focus && ctx.eve_clients.values().any(|x| !x.is_visible()) {
         for thumbnail in ctx.eve_clients.values_mut() {
             debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
             thumbnail.visibility(true).context(format!(
@@ -275,7 +273,7 @@ fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> Resul
     let clicked_window = ctx
         .eve_clients
         .iter()
-        .find(|(_, thumb)| thumb.is_hovered(event.root_x, event.root_y) && thumb.state.is_visible())
+        .find(|(_, thumb)| thumb.is_hovered(event.root_x, event.root_y) && thumb.is_visible())
         .map(|(win, _)| *win);
 
     let Some(clicked_window) = clicked_window else {
@@ -286,11 +284,11 @@ fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> Resul
     let snap_targets = if event.detail == mouse::BUTTON_RIGHT {
         ctx.eve_clients
             .iter()
-            .filter(|(win, t)| **win != clicked_window && t.state.is_visible())
+            .filter(|(win, t)| **win != clicked_window && t.is_visible())
             .filter_map(|(_, t)| {
                 ctx.app_ctx
                     .conn
-                    .get_geometry(t.window)
+                    .get_geometry(t.window())
                     .ok()
                     .and_then(|req| req.reply().ok())
                     .map(|geom| Rect {
@@ -307,11 +305,11 @@ fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> Resul
 
     // Now get mutable reference to the clicked thumbnail
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_window) {
-        debug!(window = thumbnail.window, character = %thumbnail.character_name, "ButtonPress on thumbnail");
+        debug!(window = thumbnail.window(), character = %thumbnail.character_name, "ButtonPress on thumbnail");
         let geom = ctx
             .app_ctx
             .conn
-            .get_geometry(thumbnail.window)
+            .get_geometry(thumbnail.window())
             .context("Failed to send geometry query on button press")?
             .reply()
             .context(format!(
@@ -327,7 +325,7 @@ fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> Resul
             thumbnail.input_state.snap_targets = snap_targets;
             thumbnail.input_state.dragging = true;
             debug!(
-                window = thumbnail.window,
+                window = thumbnail.window(),
                 snap_target_count = thumbnail.input_state.snap_targets.len(),
                 "Started dragging thumbnail with cached snap targets"
             );
@@ -357,7 +355,7 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
         .find(|(_, thumb)| {
             let hovered = thumb.is_hovered(event.root_x, event.root_y);
             if hovered {
-                debug!(window = thumb.window, character = %thumb.character_name, "Found hovered thumbnail");
+                debug!(window = thumb.window(), character = %thumb.character_name, "Found hovered thumbnail");
             }
             hovered
         })
@@ -372,8 +370,8 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
     let is_left_click = event.detail == mouse::BUTTON_LEFT;
 
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_key) {
-        debug!(window = thumbnail.window, character = %thumbnail.character_name, "ButtonRelease on thumbnail");
-        clicked_src = Some(thumbnail.src);
+        debug!(window = thumbnail.window(), character = %thumbnail.character_name, "ButtonRelease on thumbnail");
+        clicked_src = Some(thumbnail.src());
 
         // Left-click focuses the window (dragging is right-click only)
         if is_left_click {
@@ -390,7 +388,7 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
             let geom = ctx
                 .app_ctx
                 .conn
-                .get_geometry(thumbnail.window)
+                .get_geometry(thumbnail.window())
                 .context("Failed to send geometry query after drag")?
                 .reply()
                 .context(format!(
@@ -400,7 +398,7 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
 
             // Update session state (in-memory only)
             ctx.session_state
-                .update_window_position(thumbnail.window, geom.x, geom.y);
+                .update_window_position(thumbnail.window(), geom.x, geom.y);
 
             // NOTE: Update character_thumbnails in memory (for manual saves)
             // Skip logged-out clients with empty character name
@@ -419,7 +417,7 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
             // Conditionally persist to disk based on auto-save setting
             if ctx.daemon_config.profile.thumbnail_auto_save_position {
                 debug!(
-                    window = thumbnail.window,
+                    window = thumbnail.window(),
                     x = geom.x,
                     y = geom.y,
                     "Saved position after drag (auto-save enabled)"
@@ -430,7 +428,7 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
                 ))?;
             } else {
                 debug!(
-                    window = thumbnail.window,
+                    window = thumbnail.window(),
                     x = geom.x,
                     y = geom.y,
                     "Updated position in memory (auto-save disabled)"
@@ -452,8 +450,8 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
         for other_window in ctx
             .eve_clients
             .values()
-            .filter(|t| t.src != clicked_src)
-            .map(|t| t.src)
+            .filter(|t| t.src() != clicked_src)
+            .map(|t| t.src())
         {
             if let Err(e) = minimize_window(
                 ctx.app_ctx.conn,
@@ -541,7 +539,7 @@ fn handle_drag_motion(
         .unwrap_or_else(|| Position::new(new_x, new_y));
 
     trace!(
-        window = thumbnail.window,
+        window = thumbnail.window(),
         from_x = thumbnail.input_state.win_start.x,
         from_y = thumbnail.input_state.win_start.y,
         to_x = final_x,
@@ -588,12 +586,12 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                 let geom = ctx
                     .app_ctx
                     .conn
-                    .get_geometry(thumbnail.window)
+                    .get_geometry(thumbnail.window())
                     .context("Failed to send geometry query during character change")?
                     .reply()
                     .context(format!(
                         "Failed to get geometry during character change for window {}",
-                        thumbnail.window
+                        thumbnail.window()
                     ))?;
                 let current_pos = Position::new(geom.x, geom.y);
 
@@ -643,7 +641,7 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                             let src_geom = ctx
                                 .app_ctx
                                 .conn
-                                .get_geometry(thumbnail.src)
+                                .get_geometry(thumbnail.src())
                                 .context("Failed to query source geometry for reset position")?
                                 .reply()
                                 .context(
@@ -744,7 +742,7 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                         let geom = ctx
                             .app_ctx
                             .conn
-                            .get_geometry(thumbnail.window)
+                            .get_geometry(thumbnail.window())
                             .context("Failed to query geometry for newly detected thumbnail")?
                             .reply()
                             .context("Failed to get geometry reply for newly detected thumbnail")?;
@@ -859,7 +857,7 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                     parent = event.parent,
                     "ReparentNotify received - updating tracked parent"
                 );
-                thumbnail.parent = Some(event.parent);
+                thumbnail.set_parent(Some(event.parent));
             }
             Ok(())
         }
