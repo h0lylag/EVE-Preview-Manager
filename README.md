@@ -45,25 +45,10 @@ https://discord.gg/MxdW5NCjwV
 
 **Note**: Configuration is stored in `~/.config/eve-preview-manager/config.json`.
 
-## Requirements
-
-- Linux x86_64. **Note:** Although the application uses X11 protocols and should theoretically work under native X11, it is highly recommended to use Wayland (via XWayland) as native X11 support is currently problematic.
-- User must be in `input` group for hotkey detection: `sudo usermod -aG input $USER` (requires re-logging to take effect)
-- Runtime dependencies: OpenGL, fontconfig, dbus, libxkbcommon (should already be installed on most modern Linux distributions)
-
-### Optional: evdev Backend for Advanced Hotkey Features
-
-By default, the application uses **X11** for hotkey detection (**no special permissions needed**). This is secure and works for most users.
-
-If you need advanced features like **cross-device hotkeys** (e.g., Shift on keyboard + Mouse4 on mouse), you can optionally enable the **evdev backend** in Hotkey Settings:
-
-**⚠️ Security Warning**: The evdev backend requires adding your user to the `input` group, which allows **ALL applications** to read keyboard and mouse input. Only enable this if you need the advanced features and understand the security implications.
-
-```bash
-sudo usermod -aG input $USER  # Then log out and back in
-```
-
-After adding yourself to the group, select "evdev (Advanced)" from the Hotkey Backend dropdown in the application settings.
+## System Requirements
+- **Required:** OpenGL, fontconfig, dbus, libxkbcommon, libxcb (standard on most distros).
+- **Recommended:** Wayland (via XWayland). Native X11 environments are supported but users may experience issues with preview overlays fighting for Z-order and incorrect image offsets.
+- **Optional:** If using evdev instead of x11 hotkeys, you will need add your user to the `input` group. Not recommended unless you know what you're doing.
 
 ## Installation
 
