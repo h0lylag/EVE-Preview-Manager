@@ -48,8 +48,21 @@ https://discord.gg/MxdW5NCjwV
 ## Requirements
 
 - Linux x86_64 with X11 (Wayland users: works via XWayland)
-- User must be in `input` group for hotkey detection: `sudo usermod -aG input $USER` (requires re-logging to take effect)
 - Runtime dependencies: OpenGL, fontconfig, dbus, libxkbcommon (should already be installed on most modern Linux distributions)
+
+### Optional: evdev Backend for Advanced Hotkey Features
+
+By default, the application uses **X11** for hotkey detection (**no special permissions needed**). This is secure and works for most users.
+
+If you need advanced features like **cross-device hotkeys** (e.g., Shift on keyboard + Mouse4 on mouse), you can optionally enable the **evdev backend** in Hotkey Settings:
+
+**⚠️ Security Warning**: The evdev backend requires adding your user to the `input` group, which allows **ALL applications** to read keyboard and mouse input. Only enable this if you need the advanced features and understand the security implications.
+
+```bash
+sudo usermod -aG input $USER  # Then log out and back in
+```
+
+After adding yourself to the group, select "evdev (Advanced)" from the Hotkey Backend dropdown in the application settings.
 
 ## Installation
 

@@ -12,6 +12,16 @@ use tracing::info;
 
 use crate::types::CharacterSettings;
 
+/// Hotkey backend type selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HotkeyBackendType {
+    /// X11 XGrabKey backend (default, secure, no permissions required)
+    X11,
+    /// evdev raw input backend (optional, requires input group membership)
+    Evdev,
+}
+
 /// Strategy for saving configuration files
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStrategy {
@@ -91,7 +101,12 @@ pub struct Profile {
     pub client_minimize_on_switch: bool,
 
     // Hotkey settings (per-profile)
+    /// Hotkey backend selection (X11 or evdev)
+    #[serde(default = "default_hotkey_backend")]
+    pub hotkey_backend: HotkeyBackendType,
+
     /// Selected input device for hotkey monitoring (by-id name, None = all devices)
+    /// Only used by evdev backend
     #[serde(default)]
     pub hotkey_input_device: Option<String>,
 
@@ -127,6 +142,10 @@ pub struct Profile {
 // Default value functions
 fn default_profile_name() -> String {
     crate::constants::defaults::behavior::PROFILE_NAME.to_string()
+}
+
+fn default_hotkey_backend() -> HotkeyBackendType {
+    HotkeyBackendType::X11
 }
 
 fn default_window_width() -> u16 {
@@ -201,7 +220,8 @@ fn default_profiles() -> Vec<Profile> {
         thumbnail_hide_not_focused: crate::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS,
         thumbnail_preserve_position_on_swap: default_preserve_thumbnail_position_on_swap(),
         client_minimize_on_switch: crate::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH,
-        hotkey_input_device: None, // Default: no device selected (hotkeys disabled)
+        hotkey_backend: default_hotkey_backend(), // Default: X11 (secure, no permissions)
+        hotkey_input_device: None, // Default: no device selected (only used by evdev backend)
         hotkey_cycle_forward: None, // User must configure
         hotkey_cycle_backward: None, // User must configure
         hotkey_logged_out_cycle: false, // Default: off

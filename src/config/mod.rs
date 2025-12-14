@@ -9,4 +9,5 @@ pub mod profile;
 pub mod runtime;
 
 pub use hotkey_binding::HotkeyBinding;
+pub use profile::HotkeyBackendType;
 pub use runtime::{DaemonConfig, DisplayConfig};

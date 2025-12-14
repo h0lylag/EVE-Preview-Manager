@@ -152,11 +152,56 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         ui.label(egui::RichText::new("Hotkey Settings").strong());
         ui.add_space(ITEM_SPACING);
 
-        // Input device selector - moved to top
-        ui.label("Input device to monitor:");
+        // Backend selector
+        ui.label("Hotkey Backend:");
         ui.add_space(ITEM_SPACING / 2.0);
+        
+        use crate::config::HotkeyBackendType;
+        let backend_display = match profile.hotkey_backend {
+            HotkeyBackendType::X11 => "X11 (Secure - Default)",
+            HotkeyBackendType::Evdev => "evdev (Advanced - Requires Permissions)",
+        };
+        
+        egui::ComboBox::from_id_salt("hotkey_backend_selector")
+            .selected_text(backend_display)
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut profile.hotkey_backend, HotkeyBackendType::X11, "X11 (Secure - Default)").clicked() {
+                    changed = true;
+                }
+                if ui.selectable_value(&mut profile.hotkey_backend, HotkeyBackendType::Evdev, "evdev (Advanced - Requires Permissions)").clicked() {
+                    changed = true;
+                }
+            });
+        
+        ui.add_space(ITEM_SPACING / 4.0);
+        
+        // Show backend capabilities and warnings
+        match profile.hotkey_backend {
+            HotkeyBackendType::X11 => {
+                ui.label(egui::RichText::new("✓ No special permissions required").small().color(COLOR_SUCCESS));
+                ui.label(egui::RichText::new("  Secure - only registered hotkeys captured").small().weak());
+            }
+            HotkeyBackendType::Evdev => {
+                ui.colored_label(COLOR_WARNING, egui::RichText::new("⚠ Security Warning").strong());
+                ui.label(egui::RichText::new("evdev backend requires 'input' group membership, which allows ALL").small());
+                ui.label(egui::RichText::new("applications to read keyboard input. Use only if you need cross-device").small());
+                ui.label(egui::RichText::new("hotkeys (e.g., Shift on keyboard + Mouse4 on mouse).").small());
+                ui.add_space(ITEM_SPACING / 4.0);
+                ui.label(egui::RichText::new("✓ Cross-device modifier support").small().color(COLOR_SUCCESS));
+                ui.label(egui::RichText::new("✓ Device-specific filtering").small().color(COLOR_SUCCESS));
+            }
+        }
+        
+        ui.add_space(ITEM_SPACING);
+        ui.separator();
+        ui.add_space(ITEM_SPACING);
 
-        let selected_display = match profile.hotkey_input_device.as_deref() {
+        // Input device selector (only shown for evdev backend)
+        if profile.hotkey_backend == HotkeyBackendType::Evdev {
+            ui.label("Input device to monitor:");
+            ui.add_space(ITEM_SPACING / 2.0);
+
+            let selected_display = match profile.hotkey_input_device.as_deref() {
             None => "---".to_string(),
             Some("auto") => "Auto-Detect (Recommended)".to_string(),
             Some("all") => "All Devices".to_string(),
@@ -185,41 +230,45 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                 }
             });
 
-        if let Some(ref error) = state.device_load_error {
-            ui.add_space(ITEM_SPACING / 4.0);
-            ui.label(egui::RichText::new(format!("⚠ {}", error)).small().color(egui::Color32::from_rgb(200, 100, 0)));
-        }
+            if let Some(ref error) = state.device_load_error {
+                ui.add_space(ITEM_SPACING / 4.0);
+                ui.label(egui::RichText::new(format!("⚠ {}", error)).small().color(egui::Color32::from_rgb(200, 100, 0)));
+            }
 
-        // Check if device is selected - needed for helper text
-        let device_selected = profile.hotkey_input_device.is_some();
+            // Show helper text for auto-detect mode
+            if profile.hotkey_input_device.as_deref() == Some("auto") {
+                ui.add_space(ITEM_SPACING / 4.0);
+                ui.label(egui::RichText::new("Devices will be automatically detected when you bind keys")
+                    .small()
+                    .weak());
+            }
 
-        // Show helper text for auto-detect mode
-        if profile.hotkey_input_device.as_deref() == Some("auto") {
-            ui.add_space(ITEM_SPACING / 4.0);
-            ui.label(egui::RichText::new("Devices will be automatically detected when you bind keys")
-                .small()
-                .weak());
-        }
+            // Show helper text for all devices mode
+            if profile.hotkey_input_device.as_deref() == Some("all") {
+                ui.add_space(ITEM_SPACING / 4.0);
+                ui.label(egui::RichText::new("Hotkeys will work from any connected input device")
+                    .small()
+                    .weak());
+            }
 
-        // Show helper text for all devices mode
-        if profile.hotkey_input_device.as_deref() == Some("all") {
-            ui.add_space(ITEM_SPACING / 4.0);
-            ui.label(egui::RichText::new("Hotkeys will work from any connected input device")
-                .small()
-                .weak());
-        }
+            // Show message when device not selected
+            if profile.hotkey_input_device.is_none() {
+                ui.add_space(ITEM_SPACING / 4.0);
+                ui.label(egui::RichText::new("Select an input device above to configure hotkeys")
+                    .small()
+                    .weak());
+            }
 
-        // Show message when device not selected
-        if !device_selected {
-            ui.add_space(ITEM_SPACING / 4.0);
-            ui.label(egui::RichText::new("Select an input device above to configure hotkeys")
-                .small()
-                .weak());
-        }
-
-        ui.add_space(ITEM_SPACING);
-        ui.separator();
-        ui.add_space(ITEM_SPACING);
+            ui.add_space(ITEM_SPACING);
+            ui.separator();
+            ui.add_space(ITEM_SPACING);
+        } // End of evdev backend-specific device selector
+        
+        // For X11 backend, device selection is not applicable
+        let device_selected = match profile.hotkey_backend {
+            HotkeyBackendType::X11 => true, // Always enabled for X11
+            HotkeyBackendType::Evdev => profile.hotkey_input_device.is_some(),
+        };
 
         ui.add_enabled_ui(device_selected, |ui| {
             // Hotkey Bindings

@@ -12,7 +12,7 @@ use x11rb::protocol::xproto::*;
 
 use crate::config::DaemonConfig;
 use crate::constants::eve;
-use crate::input::listener::{self, CycleCommand, spawn_listener};
+use crate::input::listener::{self, CycleCommand};
 use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window};
 
 use super::cycle_state::CycleState;
@@ -168,32 +168,67 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
     let has_character_hotkeys = !character_hotkeys.is_empty();
 
     let hotkey_handle = if has_cycle_keys || has_character_hotkeys {
-        if listener::check_permissions() {
-            match spawn_listener(
-                hotkey_tx,
-                daemon_config.profile.hotkey_cycle_forward.clone(),
-                daemon_config.profile.hotkey_cycle_backward.clone(),
-                character_hotkeys.clone(),
-                daemon_config.profile.hotkey_input_device.clone(),
-            ) {
-                Ok(handle) => {
-                    info!(
-                        enabled = true,
-                        has_cycle_keys = has_cycle_keys,
-                        has_character_hotkeys = has_character_hotkeys,
-                        "Hotkey support enabled"
-                    );
-                    Some(handle)
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to start hotkey listener");
-                    listener::print_permission_error();
-                    None
+        // Select backend based on configuration
+        use crate::config::HotkeyBackendType;
+        use crate::input::backend::HotkeyBackend;
+        
+        match daemon_config.profile.hotkey_backend {
+            HotkeyBackendType::X11 => {
+                info!("Using X11 hotkey backend (secure, no permissions required)");
+                match crate::input::x11_backend::X11Backend::spawn(
+                    hotkey_tx,
+                    daemon_config.profile.hotkey_cycle_forward.clone(),
+                    daemon_config.profile.hotkey_cycle_backward.clone(),
+                    character_hotkeys.clone(),
+                    daemon_config.profile.hotkey_input_device.clone(),
+                ) {
+                    Ok(handle) => {
+                        info!(
+                            enabled = true,
+                            backend = "x11",
+                            has_cycle_keys = has_cycle_keys,
+                            has_character_hotkeys = has_character_hotkeys,
+                            "Hotkey support enabled"
+                        );
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        error!(error = %e, backend = "x11", "Failed to start hotkey listener");
+                        None
+                    }
                 }
             }
-        } else {
-            listener::print_permission_error();
-            None
+            HotkeyBackendType::Evdev => {
+                info!("Using evdev hotkey backend (requires input group membership)");
+                if !crate::input::evdev_backend::EvdevBackend::is_available() {
+                    listener::print_permission_error();
+                    None
+                } else {
+                    match crate::input::evdev_backend::EvdevBackend::spawn(
+                        hotkey_tx,
+                        daemon_config.profile.hotkey_cycle_forward.clone(),
+                        daemon_config.profile.hotkey_cycle_backward.clone(),
+                        character_hotkeys.clone(),
+                        daemon_config.profile.hotkey_input_device.clone(),
+                    ) {
+                        Ok(handle) => {
+                            info!(
+                                enabled = true,
+                                backend = "evdev",
+                                has_cycle_keys = has_cycle_keys,
+                                has_character_hotkeys = has_character_hotkeys,
+                                "Hotkey support enabled"
+                            );
+                            Some(handle)
+                        }
+                        Err(e) => {
+                            error!(error = %e, backend = "evdev", "Failed to start hotkey listener");
+                            listener::print_permission_error();
+                            None
+                        }
+                    }
+                }
+            }
         }
     } else {
         info!("No hotkeys configured - hotkey support disabled");
