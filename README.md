@@ -33,9 +33,7 @@ https://discord.gg/MxdW5NCjwV
 1. **Launch the Application**: Run `eve-preview-manager`. It starts in GUI mode and creates a system tray icon.
 2. **Manage Profiles**: Use the GUI to create specific profiles for different activities (e.g., PvP, Mining). You can add, remove, or duplicate profiles to quickly switch between setups.
 3. **Configure Display Settings**: Customize the look and feel of your thumbnails, including size, opacity, fonts, borders, and colors to match your preferences.
-4. **Set Up Hotkeys**:
-   - **Input Device**: Select your input device (auto-detect is recommended).
-   - **Cycle Hotkeys**: Configure hotkeys to cycle between clients in your active group.
+4. **Set Up Hotkeys**: Configure hotkeys to cycle between clients in your active group.
 5. **Manage Characters**:
    - **Add Characters**: Click the "Add" button to include EVE characters in your cycle group. Active and previously detected clients will appear in the popup.
    - **Manual Entry**: Alternatively, switch to "Text Editor" mode to manually paste a list of character names (one per line).
