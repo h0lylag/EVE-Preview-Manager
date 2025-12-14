@@ -178,17 +178,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         // Show backend capabilities and warnings
         match profile.hotkey_backend {
             HotkeyBackendType::X11 => {
-                ui.label(egui::RichText::new("✓ No special permissions required").small().color(COLOR_SUCCESS));
-                ui.label(egui::RichText::new("  Secure - only registered hotkeys captured").small().weak());
+                // No extra info needed for X11
             }
             HotkeyBackendType::Evdev => {
-                ui.colored_label(COLOR_WARNING, egui::RichText::new("⚠ Security Warning").strong());
-                ui.label(egui::RichText::new("evdev backend requires 'input' group membership, which allows ALL").small());
-                ui.label(egui::RichText::new("applications to read keyboard input. Use only if you need cross-device").small());
-                ui.label(egui::RichText::new("hotkeys (e.g., Shift on keyboard + Mouse4 on mouse).").small());
-                ui.add_space(ITEM_SPACING / 4.0);
-                ui.label(egui::RichText::new("✓ Cross-device modifier support").small().color(COLOR_SUCCESS));
-                ui.label(egui::RichText::new("✓ Device-specific filtering").small().color(COLOR_SUCCESS));
+                ui.label(egui::RichText::new("⚠ Security Warning: evdev backend requires 'input' group membership, which allows ALL applications to read keyboard input.").small());
             }
         }
         
