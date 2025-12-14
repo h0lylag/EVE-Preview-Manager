@@ -15,8 +15,8 @@ use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::*;
 use x11rb::protocol::Event;
+use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
 use crate::config::HotkeyBinding;
@@ -49,8 +49,7 @@ impl HotkeyBackend for X11Backend {
         );
 
         let handle = thread::spawn(move || {
-            if let Err(e) = run_x11_listener(sender, forward_key, backward_key, character_hotkeys)
-            {
+            if let Err(e) = run_x11_listener(sender, forward_key, backward_key, character_hotkeys) {
                 error!(error = %e, "X11 hotkey listener error");
             }
         });
@@ -149,7 +148,10 @@ fn run_x11_listener(
 
     conn.flush().context("Failed to flush X11 connection")?;
 
-    info!(registered_hotkeys = hotkey_map.len(), "X11 hotkeys registered, entering event loop");
+    info!(
+        registered_hotkeys = hotkey_map.len(),
+        "X11 hotkeys registered, entering event loop"
+    );
 
     // Event loop
     loop {
@@ -201,26 +203,33 @@ fn run_x11_listener(
 }
 
 /// Register a global hotkey with X11
-fn register_hotkey(conn: &RustConnection, root: Window, keycode: Keycode, modmask: ModMask) -> Result<()> {
-    // We need to grab the key with and without NumLock/CapsLock/ScrollLock
-    // because X11 treats these as different modifier combinations
+fn register_hotkey(
+    conn: &RustConnection,
+    root: Window,
+    keycode: Keycode,
+    modmask: ModMask,
+) -> Result<()> {
+    // We must grab the key for every possible combination of "ignored" modifiers
+    // (NumLock, CapsLock, ScrollLock).
+    // X11 treats "Ctrl+C" and "Ctrl+C+NumLock" as completely different hotkeys.
+    // By grabbing all permutations, we ensure the hotkey works regardless of Lock key state.
     let ignore_masks = [
-        ModMask::from(0u16),           // No lock keys
-        ModMask::M2,                   // NumLock
-        ModMask::LOCK,                 // CapsLock
-        ModMask::M2 | ModMask::LOCK,   // Both
+        ModMask::from(0u16),         // No lock keys
+        ModMask::M2,                 // NumLock (Mod2)
+        ModMask::LOCK,               // CapsLock
+        ModMask::M2 | ModMask::LOCK, // NumLock + CapsLock
     ];
 
     for ignore_mask in &ignore_masks {
         let effective_modmask = modmask | *ignore_mask;
-        
+
         conn.grab_key(
-            false, // Don't prevent other clients from receiving events (owner_events)
+            false, // owner_events: false = Send events to this client only, do not propagate to other windows
             root,
             effective_modmask,
             keycode,
-            GrabMode::ASYNC,
-            GrabMode::ASYNC,
+            GrabMode::ASYNC, // Keep keyboard processing normal (don't freeze)
+            GrabMode::ASYNC, // Keep mouse processing normal
         )
         .with_context(|| {
             format!(
@@ -237,16 +246,15 @@ fn register_hotkey(conn: &RustConnection, root: Window, keycode: Keycode, modmas
 fn normalize_modmask(state: KeyButMask) -> ModMask {
     // Convert KeyButMask to u16 and back to ModMask, filtering out lock keys
     let state_u16: u16 = state.into();
-    
+
     // Keep only Shift, Control, Mod1 (Alt), Mod4 (Super)
     // Remove Mod2 (NumLock), Lock (CapsLock), Mod5 (ScrollLock)
-    let normalized = state_u16 & (
-        ModMask::SHIFT.bits() |
-        ModMask::CONTROL.bits() |
-        ModMask::M1.bits() |
-        ModMask::M4.bits()
-    );
-    
+    let normalized = state_u16
+        & (ModMask::SHIFT.bits()
+            | ModMask::CONTROL.bits()
+            | ModMask::M1.bits()
+            | ModMask::M4.bits());
+
     ModMask::from(normalized)
 }
 
@@ -282,7 +290,7 @@ fn evdev_keycode_to_x11(evdev_code: u16) -> Option<Keycode> {
     // Most X11 servers use evdev + 8 mapping
     // Valid X11 keycodes are 8-255
     let x11_code = evdev_code.checked_add(8)?;
-    
+
     if x11_code >= 8 && x11_code <= 255 {
         Some(x11_code as Keycode)
     } else {
@@ -297,14 +305,14 @@ mod tests {
     #[test]
     fn test_evdev_to_x11_keycode() {
         // Common keys
-        assert_eq!(evdev_keycode_to_x11(1), Some(9));   // ESC: 1 -> 9
+        assert_eq!(evdev_keycode_to_x11(1), Some(9)); // ESC: 1 -> 9
         assert_eq!(evdev_keycode_to_x11(15), Some(23)); // TAB: 15 -> 23
         assert_eq!(evdev_keycode_to_x11(59), Some(67)); // F1: 59 -> 67
-        
+
         // Boundary cases
-        assert_eq!(evdev_keycode_to_x11(0), Some(8));   // Minimum valid
+        assert_eq!(evdev_keycode_to_x11(0), Some(8)); // Minimum valid
         assert_eq!(evdev_keycode_to_x11(247), Some(255)); // Maximum valid
-        assert_eq!(evdev_keycode_to_x11(248), None);    // Beyond range
+        assert_eq!(evdev_keycode_to_x11(248), None); // Beyond range
     }
 
     #[test]

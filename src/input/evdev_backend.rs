@@ -35,7 +35,13 @@ impl HotkeyBackend for EvdevBackend {
         character_hotkeys: Vec<HotkeyBinding>,
         selected_device_id: Option<String>,
     ) -> Result<Vec<JoinHandle<()>>> {
-        spawn_listener_impl(sender, forward_key, backward_key, character_hotkeys, selected_device_id)
+        spawn_listener_impl(
+            sender,
+            forward_key,
+            backward_key,
+            character_hotkeys,
+            selected_device_id,
+        )
     }
 
     fn is_available() -> bool {
@@ -68,10 +74,14 @@ fn spawn_listener_impl(
     character_hotkeys: Vec<HotkeyBinding>,
     selected_device_id: Option<String>,
 ) -> Result<Vec<thread::JoinHandle<()>>> {
-    // Get all device paths for cross-device modifier state queries
+    // We need to detect all devices upfront to support "cross-device" modifiers.
+    // For example, a user might hold 'Shift' on their keyboard while pressing a 'Mouse Button'
+    // on their mouse. To support this, every listener thread needs access to the current state
+    // of ALL other input devices.
     let devices = device_detection::find_all_input_devices_with_paths()?;
 
-    // Create shared list of paths for cross-device queries
+    // Create shared list of paths. This Arc<Vec> will be shared with every thread
+    // so they can query the global state of the system's input devices at any time.
     let all_device_paths: Vec<_> = devices.iter().map(|(_dev, path)| path.clone()).collect();
 
     let mut devices = devices;

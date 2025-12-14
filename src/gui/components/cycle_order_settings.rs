@@ -348,8 +348,10 @@ fn render_unified_cycle_group_tab(
                                             .on_hover_text("Click to capture hotkey")
                                             .clicked()
                                         {
-                                            hotkey_state
-                                                .start_key_capture_for_character(character.clone());
+                                            hotkey_state.start_key_capture_for_character(
+                                                character.clone(),
+                                                profile.hotkey_backend,
+                                            );
                                         }
                                     }
                                 },

@@ -8,9 +8,11 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::config::HotkeyBinding;
+use crate::config::{HotkeyBackendType, HotkeyBinding};
 use crate::constants::{input, paths, permissions};
 use crate::input::device_detection;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::{ConnectionExt, GrabMode, KeyButMask, ModMask};
 
 /// Result of a key capture operation
 #[derive(Debug, Clone)]
@@ -96,9 +98,11 @@ impl Default for CaptureState {
 
 /// Start capturing a key press in the background
 /// Returns a receiver that will receive updates about capture state and final result
-pub fn start_capture() -> Result<(Receiver<CaptureState>, Receiver<CaptureResult>)> {
-    // Check permissions first
-    if std::fs::read_dir(paths::DEV_INPUT).is_err() {
+pub fn start_capture(
+    backend: HotkeyBackendType,
+) -> Result<(Receiver<CaptureState>, Receiver<CaptureResult>)> {
+    // Check permissions first if using evdev
+    if backend == HotkeyBackendType::Evdev && std::fs::read_dir(paths::DEV_INPUT).is_err() {
         return Err(anyhow::anyhow!(
             "Cannot access {}. Ensure you're in '{}' group:\n{}\nThen log out and back in.",
             paths::DEV_INPUT,
@@ -110,17 +114,150 @@ pub fn start_capture() -> Result<(Receiver<CaptureState>, Receiver<CaptureResult
     let (state_tx, state_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
 
-    thread::spawn(move || match capture_key_blocking(state_tx) {
-        Ok(result) => {
-            let _ = result_tx.send(result);
-        }
-        Err(e) => {
-            warn!(error = %e, "Key capture error");
-            let _ = result_tx.send(CaptureResult::Error(e.to_string()));
+    thread::spawn(move || {
+        let result = match backend {
+            HotkeyBackendType::X11 => capture_key_x11(state_tx),
+            HotkeyBackendType::Evdev => capture_key_blocking(state_tx),
+        };
+
+        match result {
+            Ok(res) => {
+                let _ = result_tx.send(res);
+            }
+            Err(e) => {
+                warn!(error = %e, "Key capture error");
+                let _ = result_tx.send(CaptureResult::Error(e.to_string()));
+            }
         }
     });
 
     Ok((state_rx, result_rx))
+}
+
+/// Blocking key capture using X11 GrabKeyboard
+fn capture_key_x11(state_tx: Sender<CaptureState>) -> Result<CaptureResult> {
+    let (conn, screen_num) = x11rb::connect(None).context("Failed to connect to X11")?;
+    let screen = &conn.setup().roots[screen_num];
+    let root = screen.root;
+
+    // Grab keyboard to intercept all key events.
+    // This is required because we need to capture raw input that might otherwise be consumed
+    // by the window manager or focused application.
+    conn.grab_keyboard(
+        false,
+        root,
+        x11rb::CURRENT_TIME,
+        GrabMode::ASYNC,
+        GrabMode::ASYNC,
+    )
+    .context("Failed to grab keyboard")?
+    .reply()
+    .context("Failed to get grab_keyboard reply")?;
+
+    info!("Keyboard grabbed for X11 key capture");
+
+    let mut state = CaptureState::new();
+    let _ = state_tx.send(state.clone());
+
+    let timeout = Duration::from_secs(30);
+    let start = std::time::Instant::now();
+
+    // The X11 connection drop (RAII) will automatically release the keyboard grab.
+    // We don't need an explicit ungrab at exit points.
+
+    loop {
+        if start.elapsed() > timeout {
+            return Ok(CaptureResult::Timeout);
+        }
+
+        // Non-blocking poll using x11rb
+        if let Some(event) = conn.poll_for_event()? {
+            match event {
+                x11rb::protocol::Event::KeyPress(key_press) => {
+                    let keycode = key_press.detail;
+                    let state_mask = key_press.state;
+
+                    // Convert X11 keycode to evdev (usually subtract 8).
+                    // We need this conversion because `HotkeyBinding` internally stores keys
+                    // using universally consistent evdev codes, regardless of the backend.
+                    // X11 keycodes are offset by 8 from the kernel's evdev codes.
+                    let evdev_code = (keycode as u16).saturating_sub(8);
+
+                    // Check for Escape (evdev 1) first to allow cancelling
+                    if evdev_code == 1 {
+                        return Ok(CaptureResult::Cancelled);
+                    }
+
+                    debug!(x11_keycode=keycode, evdev_code=evdev_code, state=?state_mask, "X11 KeyPress");
+
+                    // Map X11 modifier mask bits to our internal boolean flags
+                    let modmask = KeyButMask::from(state_mask);
+                    state.shift = modmask.contains(KeyButMask::SHIFT);
+                    state.ctrl = modmask.contains(KeyButMask::CONTROL);
+                    state.alt = modmask.contains(KeyButMask::MOD1);
+                    state.super_key = modmask.contains(KeyButMask::MOD4);
+
+                    // Identify if the pressed key ITSELF is a modifier.
+                    // We need to special-case this because the `state` mask in X11 reflects
+                    // modifiers that were *already* down before this press.
+                    // For visual feedback in the UI ("Ctrl + ?"), we want to show the modifier
+                    // as active the moment it is pressed.
+                    let is_modifier_key =
+                        matches!(evdev_code, 42 | 54 | 29 | 97 | 56 | 100 | 125 | 126);
+
+                    if is_modifier_key {
+                        // Update the specific modifier flag for the key just pressed
+                        match evdev_code {
+                            42 | 54 => state.shift = true,
+                            29 | 97 => state.ctrl = true,
+                            56 | 100 => state.alt = true,
+                            125 | 126 => state.super_key = true,
+                            _ => {}
+                        }
+
+                        state.update_description();
+                        let _ = state_tx.send(state.clone());
+                    } else {
+                        // Non-modifier key pressed - this is our hotkey trigger
+                        state.key_code = Some(evdev_code);
+                        state.update_description();
+
+                        let binding = HotkeyBinding::new(
+                            evdev_code,
+                            state.ctrl,
+                            state.shift,
+                            state.alt,
+                            state.super_key,
+                        );
+
+                        // X11 generic capture doesn't distinguish source devices
+                        let _ = state_tx.send(state.clone());
+                        return Ok(CaptureResult::Captured(binding));
+                    }
+                }
+                x11rb::protocol::Event::KeyRelease(key_release) => {
+                    // Update modifier visual state on release.
+                    // This ensures that if a user releases 'Ctrl' without pressing another key,
+                    // the UI feedback updates correctly ("Ctrl + ?" -> "Press any key...").
+                    let evdev_code = (key_release.detail as u16).saturating_sub(8);
+                    match evdev_code {
+                        42 | 54 => state.shift = false,
+                        29 | 97 => state.ctrl = false,
+                        56 | 100 => state.alt = false,
+                        125 | 126 => state.super_key = false,
+                        _ => {}
+                    }
+                    if state.key_code.is_none() {
+                        state.update_description();
+                        let _ = state_tx.send(state.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Blocking key capture that sends state updates via channel

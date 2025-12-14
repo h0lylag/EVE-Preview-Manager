@@ -55,8 +55,12 @@ impl HotkeySettingsState {
 
     /// Start capturing a key for the specified target.
     /// Spawns a background thread via `key_capture` to listen for raw input events.
-    fn start_key_capture(&mut self, target: CaptureTarget) {
-        match key_capture::start_capture() {
+    fn start_key_capture(
+        &mut self,
+        target: CaptureTarget,
+        backend: crate::config::HotkeyBackendType,
+    ) {
+        match key_capture::start_capture(backend) {
             Ok((state_rx, result_rx)) => {
                 self.show_key_capture_dialog = true;
                 self.capture_target = Some(target);
@@ -84,8 +88,12 @@ impl HotkeySettingsState {
 
     /// Public method for starting character-specific hotkey capture
     /// Used by cycle_order_settings component's per-character hotkeys tab
-    pub fn start_key_capture_for_character(&mut self, character_name: String) {
-        self.start_key_capture(CaptureTarget::Character(character_name));
+    pub fn start_key_capture_for_character(
+        &mut self,
+        character_name: String,
+        backend: crate::config::HotkeyBackendType,
+    ) {
+        self.start_key_capture(CaptureTarget::Character(character_name), backend);
     }
 
     /// Check if currently capturing for a specific character
@@ -155,26 +163,26 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         // Backend selector
         ui.label("Hotkey Backend:");
         ui.add_space(ITEM_SPACING / 2.0);
-        
+
         use crate::config::HotkeyBackendType;
         let backend_display = match profile.hotkey_backend {
-            HotkeyBackendType::X11 => "X11 (Secure - Default)",
+            HotkeyBackendType::X11 => "X11 (Recommended)",
             HotkeyBackendType::Evdev => "evdev (Advanced - Requires Permissions)",
         };
-        
+
         egui::ComboBox::from_id_salt("hotkey_backend_selector")
             .selected_text(backend_display)
             .show_ui(ui, |ui| {
-                if ui.selectable_value(&mut profile.hotkey_backend, HotkeyBackendType::X11, "X11 (Secure - Default)").clicked() {
+                if ui.selectable_value(&mut profile.hotkey_backend, HotkeyBackendType::X11, "X11 (Recommended)").clicked() {
                     changed = true;
                 }
                 if ui.selectable_value(&mut profile.hotkey_backend, HotkeyBackendType::Evdev, "evdev (Advanced - Requires Permissions)").clicked() {
                     changed = true;
                 }
             });
-        
+
         ui.add_space(ITEM_SPACING / 4.0);
-        
+
         // Show backend capabilities and warnings
         match profile.hotkey_backend {
             HotkeyBackendType::X11 => {
@@ -184,7 +192,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                 ui.label(egui::RichText::new("⚠ Security Warning: evdev backend requires 'input' group membership, which allows ALL applications to read keyboard input.").small());
             }
         }
-        
+
         ui.add_space(ITEM_SPACING);
         ui.separator();
         ui.add_space(ITEM_SPACING);
@@ -256,7 +264,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
             ui.separator();
             ui.add_space(ITEM_SPACING);
         } // End of evdev backend-specific device selector
-        
+
         // For X11 backend, device selection is not applicable
         let device_selected = match profile.hotkey_backend {
             HotkeyBackendType::X11 => true, // Always enabled for X11
@@ -281,7 +289,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                 };
                 ui.label(egui::RichText::new(binding_text).strong().color(color));
                 if ui.button("⌨ Bind").clicked() {
-                    state.start_key_capture(CaptureTarget::Forward);
+                    state.start_key_capture(CaptureTarget::Forward, profile.hotkey_backend);
                 }
             });
 
@@ -300,7 +308,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                 };
                 ui.label(egui::RichText::new(binding_text).strong().color(color));
                 if ui.button("⌨ Bind").clicked() {
-                    state.start_key_capture(CaptureTarget::Backward);
+                    state.start_key_capture(CaptureTarget::Backward, profile.hotkey_backend);
                 }
             });
 
@@ -475,7 +483,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                             }
 
                             if should_retry && let Some(ref t) = target {
-                                state.start_key_capture(t.clone());
+                                state.start_key_capture(t.clone(), profile.hotkey_backend);
                             }
                         }
                         CaptureResult::Cancelled => {
