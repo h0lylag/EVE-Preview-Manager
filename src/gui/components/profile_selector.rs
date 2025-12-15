@@ -42,6 +42,11 @@ impl ProfileSelector {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Profile:").strong());
 
+                // Auto-clear pending if it matches the current (e.g. if updated externally via tray)
+                if self.pending_profile_idx == Some(*selected_idx) {
+                    self.pending_profile_idx = None;
+                }
+
                 // Profile dropdown - use pending index if set, otherwise use current
                 let mut display_idx = self.pending_profile_idx.unwrap_or(*selected_idx);
                 let display_profile = &config.profiles[display_idx];
