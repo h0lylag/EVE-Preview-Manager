@@ -466,7 +466,7 @@ pub async fn run_preview_daemon() -> Result<()> {
     };
 
     // 7. Initial Window Scan
-    let eve_clients =
+    let mut eve_clients =
         super::window_detection::scan_eve_windows(&ctx, &mut daemon_config, &mut session_state)
             .context("Failed to get initial list of EVE windows")?;
 
@@ -478,6 +478,29 @@ pub async fn run_preview_daemon() -> Result<()> {
     } else {
         for (window, character_name) in session_state.window_last_character.iter() {
             cycle_state.add_window(character_name.clone(), *window);
+        }
+    }
+
+    // Initialize border state for all windows (defaults to inactive/cleared)
+    // This ensures inactive borders are drawn immediately on startup if enabled
+    let active_eve_window = crate::x11::get_active_eve_window(&conn, screen, &atoms)
+        .ok()
+        .flatten();
+
+    for (window, thumbnail) in eve_clients.iter_mut() {
+        // Check if this window currently has focus
+        let is_focused = active_eve_window.map(|w| w == *window).unwrap_or(false);
+        
+        // Update state and draw appropriate border
+        thumbnail.state = crate::types::ThumbnailState::Normal { focused: is_focused };
+        if let Err(e) = thumbnail.border(is_focused) {
+            // Log warning but continue
+             tracing::warn!(
+                window = window,
+                character = %thumbnail.character_name,
+                error = %e,
+                "Failed to draw initial border"
+            );
         }
     }
 

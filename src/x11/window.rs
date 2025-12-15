@@ -162,12 +162,12 @@ pub fn is_window_minimized(
     Ok(false)
 }
 
-/// Check if the currently focused window is an EVE client
-pub fn is_eve_window_focused(
+/// Get the currently focused EVE client window ID, if any
+pub fn get_active_eve_window(
     conn: &RustConnection,
     screen: &Screen,
     atoms: &CachedAtoms,
-) -> Result<bool> {
+) -> Result<Option<Window>> {
     let active_window_prop = conn
         .get_property(
             false,
@@ -187,15 +187,30 @@ pub fn is_eve_window_focused(
                 .try_into()
                 .context("Invalid _NET_ACTIVE_WINDOW property format")?,
         );
-        Ok(is_window_eve(conn, active_window, atoms)
+        
+        if is_window_eve(conn, active_window, atoms)
             .context(format!(
                 "Failed to check if active window {} is EVE client",
                 active_window
             ))?
-            .is_some())
+            .is_some()
+        {
+            Ok(Some(active_window))
+        } else {
+            Ok(None)
+        }
     } else {
-        Ok(false)
+        Ok(None)
     }
+}
+
+/// Check if the currently focused window is an EVE client
+pub fn is_eve_window_focused(
+    conn: &RustConnection,
+    screen: &Screen,
+    atoms: &CachedAtoms,
+) -> Result<bool> {
+    Ok(get_active_eve_window(conn, screen, atoms)?.is_some())
 }
 
 /// Requests the window manager to grant focus to the specified window using standard EWMH protocols

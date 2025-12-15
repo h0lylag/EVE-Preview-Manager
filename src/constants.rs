@@ -171,8 +171,11 @@ pub mod defaults {
         /// Default border thickness in pixels
         pub const SIZE: u16 = 3;
 
-        /// Default border color
-        pub const COLOR: &str = "#40FF00";
+        /// Default active border color
+        pub const ACTIVE_COLOR: &str = "#40FF00";
+
+        /// Default inactive border color
+        pub const INACTIVE_COLOR: &str = "#707070";
     }
 
     /// Text overlay settings

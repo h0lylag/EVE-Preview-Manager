@@ -84,47 +84,91 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut VisualSettingsSt
                     }
                 });
 
-                // Border toggle
+                ui.add_space(ITEM_SPACING);
+
+                // Active Border toggle
                 ui.horizontal(|ui| {
-                    ui.label("Borders:");
+                    ui.label("Active Border:");
                     if ui
-                        .checkbox(&mut profile.thumbnail_border, "Enabled")
+                        .checkbox(&mut profile.thumbnail_active_border, "Enabled")
                         .changed()
                     {
                         changed = true;
                     }
                 });
 
-                // Border settings (greyed out if disabled)
+                // Active Border settings (greyed out if disabled)
                 ui.indent("border_settings", |ui| {
-                    ui.add_enabled_ui(profile.thumbnail_border, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Border Size:");
-                            let _ = ui
-                                .add(
-                                    egui::DragValue::new(&mut profile.thumbnail_border_size)
-                                        .range(1..=20),
-                                );
-                        });
+                    ui.add_enabled_ui(profile.thumbnail_active_border, |ui| {
 
                         ui.horizontal(|ui| {
-                            ui.label("Border Color:");
+                            ui.label("Color:");
                             let text_edit =
-                                egui::TextEdit::singleline(&mut profile.thumbnail_border_color)
+                                egui::TextEdit::singleline(&mut profile.thumbnail_active_border_color)
                                     .desired_width(100.0);
                             if ui.add(text_edit).changed() {
                                 changed = true;
                             }
 
                             // Color picker button
-                            if let Ok(mut color) = parse_hex_color(&profile.thumbnail_border_color)
+                            if let Ok(mut color) = parse_hex_color(&profile.thumbnail_active_border_color)
                                 && ui.color_edit_button_srgba(&mut color).changed()
                             {
-                                profile.thumbnail_border_color = format_hex_color(color);
+                                profile.thumbnail_active_border_color = format_hex_color(color);
                                 changed = true;
                             }
                         });
                     });
+                });
+
+                // Inactive Border Toggle
+                ui.horizontal(|ui| {
+                    ui.label("Inactive Border:");
+                    if ui
+                        .checkbox(&mut profile.thumbnail_inactive_border, "Enabled")
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+
+                // Inactive Border Color
+                ui.indent("inactive_border_settings", |ui| {
+                    ui.add_enabled_ui(profile.thumbnail_inactive_border, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Color:");
+                            let text_edit = egui::TextEdit::singleline(
+                                &mut profile.thumbnail_inactive_border_color,
+                            )
+                            .desired_width(100.0);
+                            if ui.add(text_edit).changed() {
+                                changed = true;
+                            }
+
+                            if let Ok(mut color) =
+                                parse_hex_color(&profile.thumbnail_inactive_border_color)
+                                && ui.color_edit_button_srgba(&mut color).changed()
+                            {
+                                profile.thumbnail_inactive_border_color =
+                                    format_hex_color(color);
+                                changed = true;
+                            }
+                        });
+                    });
+                });
+
+                // Shared Border Size
+                ui.horizontal(|ui| {
+                    ui.label("Border Size:");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut profile.thumbnail_active_border_size)
+                                .range(1..=20),
+                        )
+                        .changed()
+                    {
+                        changed = true;
+                    }
                 });
 
                 ui.add_space(ITEM_SPACING);

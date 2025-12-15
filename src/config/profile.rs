@@ -71,10 +71,16 @@ pub struct Profile {
     #[serde(default = "default_thumbnail_enabled")]
     pub thumbnail_enabled: bool,
     pub thumbnail_opacity: u8,
-    #[serde(default = "default_border_enabled")]
-    pub thumbnail_border: bool,
-    pub thumbnail_border_size: u16,
-    pub thumbnail_border_color: String,
+    #[serde(default = "default_border_enabled", alias = "thumbnail_border")]
+    pub thumbnail_active_border: bool,
+    #[serde(alias = "thumbnail_border_size")]
+    pub thumbnail_active_border_size: u16,
+    #[serde(alias = "thumbnail_border_color")]
+    pub thumbnail_active_border_color: String,
+    #[serde(default = "default_inactive_border_enabled")]
+    pub thumbnail_inactive_border: bool,
+    #[serde(default = "default_inactive_border_color")]
+    pub thumbnail_inactive_border_color: String,
     pub thumbnail_text_size: u16,
     pub thumbnail_text_x: i16,
     pub thumbnail_text_y: i16,
@@ -180,6 +186,14 @@ fn default_border_enabled() -> bool {
     crate::constants::defaults::border::ENABLED
 }
 
+fn default_inactive_border_enabled() -> bool {
+    false // Default: inactive borders disabled
+}
+
+fn default_inactive_border_color() -> String {
+    crate::constants::defaults::border::INACTIVE_COLOR.to_string()
+}
+
 fn default_text_font_family() -> String {
     // Try to detect best default TrueType font, but don't fail config creation
     match crate::preview::select_best_default_font() {
@@ -207,9 +221,11 @@ fn default_profiles() -> Vec<Profile> {
         thumbnail_default_height: default_thumbnail_height(),
         thumbnail_enabled: default_thumbnail_enabled(),
         thumbnail_opacity: crate::constants::defaults::thumbnail::OPACITY_PERCENT,
-        thumbnail_border: crate::constants::defaults::border::ENABLED,
-        thumbnail_border_size: crate::constants::defaults::border::SIZE,
-        thumbnail_border_color: crate::constants::defaults::border::COLOR.to_string(),
+        thumbnail_active_border: crate::constants::defaults::border::ENABLED,
+        thumbnail_active_border_size: crate::constants::defaults::border::SIZE,
+        thumbnail_active_border_color: crate::constants::defaults::border::ACTIVE_COLOR.to_string(),
+        thumbnail_inactive_border: default_inactive_border_enabled(),
+        thumbnail_inactive_border_color: default_inactive_border_color(),
         thumbnail_text_size: crate::constants::defaults::text::SIZE,
         thumbnail_text_x: crate::constants::defaults::text::OFFSET_X,
         thumbnail_text_y: crate::constants::defaults::text::OFFSET_Y,
@@ -365,7 +381,7 @@ mod tests {
             crate::constants::defaults::thumbnail::OPACITY_PERCENT
         );
         assert_eq!(
-            profile.thumbnail_border_size,
+            profile.thumbnail_active_border_size,
             crate::constants::defaults::border::SIZE
         );
         assert!(profile.character_thumbnails.is_empty());

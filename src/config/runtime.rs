@@ -19,12 +19,14 @@ use crate::types::{CharacterSettings, Position, TextOffset};
 #[derive(Debug, Clone)]
 pub struct DisplayConfig {
     pub enabled: bool,
-    pub opacity: u32,
-    pub border_size: u16,
-    pub border_color: Color,
+    pub opacity: u32,       // 0-255 mapped to 0-0xFFFFFFFF
+    pub active_border_size: u16,
+    pub active_border_color: Color,
     pub text_offset: TextOffset,
     pub text_color: u32,
     pub hide_when_no_focus: bool,
+    pub inactive_border_enabled: bool,
+    pub inactive_border_color: Color,
 }
 
 /// Daemon runtime configuration - holds selected profile settings
@@ -57,10 +59,10 @@ impl DaemonConfig {
 
     /// Build DisplayConfig from current settings
     pub fn build_display_config(&self) -> DisplayConfig {
-        let border_color = HexColor::parse(&self.profile.thumbnail_border_color)
+        let active_border_color = HexColor::parse(&self.profile.thumbnail_active_border_color)
             .map(|c| c.to_x11_color())
             .unwrap_or_else(|| {
-                error!(border_color = %self.profile.thumbnail_border_color, "Invalid border_color hex, using default");
+                error!(active_border_color = %self.profile.thumbnail_active_border_color, "Invalid active_border_color hex, using default");
                 HexColor::from_argb32(0xFFFF0000).to_x11_color()
             });
 
@@ -71,23 +73,32 @@ impl DaemonConfig {
                 HexColor::from_argb32(0xFF_FF_FF_FF).argb32()
             });
 
+        let inactive_border_color = HexColor::parse(&self.profile.thumbnail_inactive_border_color)
+            .map(|c| c.to_x11_color())
+            .unwrap_or_else(|| {
+                // If invalid, default to transparent
+                HexColor::from_argb32(0x00000000).to_x11_color()
+            });
+
         let opacity = Opacity::from_percent(self.profile.thumbnail_opacity).to_argb32();
 
         DisplayConfig {
             enabled: self.profile.thumbnail_enabled,
             opacity,
-            border_size: if self.profile.thumbnail_border {
-                self.profile.thumbnail_border_size
+            active_border_size: if self.profile.thumbnail_active_border {
+                self.profile.thumbnail_active_border_size
             } else {
                 0
             },
-            border_color,
+            active_border_color,
             text_offset: TextOffset::from_border_edge(
                 self.profile.thumbnail_text_x,
                 self.profile.thumbnail_text_y,
             ),
             text_color,
             hide_when_no_focus: self.profile.thumbnail_hide_not_focused,
+            inactive_border_enabled: self.profile.thumbnail_inactive_border,
+            inactive_border_color,
         }
     }
 
@@ -297,9 +308,11 @@ mod tests {
                 thumbnail_default_width: 480,
                 thumbnail_default_height: 270,
                 thumbnail_opacity: opacity_percent,
-                thumbnail_border: border_size > 0, // In tests, valid size > 0 implies enabled
-                thumbnail_border_size: border_size,
-                thumbnail_border_color: border_color.to_string(),
+                thumbnail_active_border: border_size > 0, // In tests, valid size > 0 implies enabled
+                thumbnail_active_border_size: border_size,
+                thumbnail_active_border_color: border_color.to_string(),
+                thumbnail_inactive_border: false,
+                thumbnail_inactive_border_color: "#00000000".to_string(),
                 thumbnail_text_size: 18,
                 thumbnail_text_x: text_x,
                 thumbnail_text_y: text_y,
@@ -330,27 +343,27 @@ mod tests {
         let state = test_config(75, 3, "#FF00FF00", 15, 25, "#FFFFFFFF", true, 20);
 
         let config = state.build_display_config();
-        assert_eq!(config.border_size, 3);
+        assert_eq!(config.active_border_size, 3);
         assert_eq!(config.text_offset.x, 15);
         assert_eq!(config.text_offset.y, 25);
         assert!(config.hide_when_no_focus);
         assert_eq!(config.opacity, 0xBF000000);
-        assert_eq!(config.border_color.red, 0);
-        assert_eq!(config.border_color.green, 65535);
-        assert_eq!(config.border_color.blue, 0);
-        assert_eq!(config.border_color.alpha, 65535);
+        assert_eq!(config.active_border_color.red, 0);
+        assert_eq!(config.active_border_color.green, 65535);
+        assert_eq!(config.active_border_color.blue, 0);
+        assert_eq!(config.active_border_color.alpha, 65535);
     }
 
     #[test]
     fn test_build_display_config_border_disabled_override() {
         let mut state = test_config(100, 5, "invalid", 10, 20, "also_invalid", false, 15);
         // Explicitly disable border, even though size is 5
-        state.profile.thumbnail_border = false;
+        state.profile.thumbnail_active_border = false;
 
         let config = state.build_display_config();
 
         // Should enforce size 0
-        assert_eq!(config.border_size, 0);
+        assert_eq!(config.active_border_size, 0);
 
         // Other defaults should still apply
         assert_eq!(config.opacity, 0xFF000000);
@@ -362,10 +375,10 @@ mod tests {
 
         let config = state.build_display_config();
         assert_eq!(config.opacity, 0xFF000000);
-        assert_eq!(config.border_size, 5); // Enabled in test helper
-        assert_eq!(config.border_color.red, 65535);
-        assert_eq!(config.border_color.blue, 0);
-        assert_eq!(config.border_color.alpha, 65535);
+        assert_eq!(config.active_border_size, 5); // Enabled in test helper
+        assert_eq!(config.active_border_color.red, 65535);
+        assert_eq!(config.active_border_color.blue, 0);
+        assert_eq!(config.active_border_color.alpha, 65535);
     }
 
     #[test]

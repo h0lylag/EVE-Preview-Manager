@@ -29,7 +29,8 @@ pub struct OverlayRenderer<'a> {
     /// X Render Picture wrapping the overlay pixmap.
     pub overlay_picture: Picture,
     overlay_gc: Gcontext, // Graphics context for text rendering
-    border_fill: Picture, // Solid color fill for border
+    active_border_fill: Picture, // Solid color fill for active border
+    inactive_border_fill: Picture, // Solid color fill for inactive border
 
     // === Borrowed Dependencies ===
     conn: &'a RustConnection,
@@ -104,13 +105,23 @@ impl<'a> OverlayRenderer<'a> {
             character_name
         ))?;
 
-        // Create border fill
-        let border_fill = conn
+        // Create active border fill
+        let active_border_fill = conn
             .generate_id()
-            .context("Failed to generate ID for border fill picture")?;
-        conn.render_create_solid_fill(border_fill, config.border_color)
+            .context("Failed to generate ID for active border fill picture")?;
+        conn.render_create_solid_fill(active_border_fill, config.active_border_color)
             .context(format!(
-                "Failed to create border fill for '{}'",
+                "Failed to create active border fill for '{}'",
+                character_name
+            ))?;
+
+        // Create inactive border fill
+        let inactive_border_fill = conn
+            .generate_id()
+            .context("Failed to generate ID for inactive border fill picture")?;
+        conn.render_create_solid_fill(inactive_border_fill, config.inactive_border_color)
+            .context(format!(
+                "Failed to create inactive border fill for '{}'",
                 character_name
             ))?;
 
@@ -118,7 +129,8 @@ impl<'a> OverlayRenderer<'a> {
             overlay_pixmap,
             overlay_picture,
             overlay_gc,
-            border_fill,
+            active_border_fill,
+            inactive_border_fill,
             conn,
             config,
             formats,
@@ -178,10 +190,10 @@ impl<'a> OverlayRenderer<'a> {
                 0,
                 0,
                 0,
-                self.config.border_size as i16,
-                self.config.border_size as i16,
-                dimensions.width - self.config.border_size * 2,
-                dimensions.height - self.config.border_size * 2,
+                self.config.active_border_size as i16,
+                self.config.active_border_size as i16,
+                dimensions.width - self.config.active_border_size * 2,
+                dimensions.height - self.config.active_border_size * 2,
             )
             .context(format!(
                 "Failed to clear overlay area for '{}'",
@@ -336,11 +348,11 @@ impl<'a> OverlayRenderer<'a> {
     ) -> Result<()> {
         if focused {
             // Only render border fill if we actually have a border size
-            if self.config.border_size > 0 {
+            if self.config.active_border_size > 0 {
                 self.conn
                     .render_composite(
                         PictOp::SRC,
-                        self.border_fill,
+                        self.active_border_fill,
                         0u32,
                         self.overlay_picture,
                         0,
@@ -352,25 +364,48 @@ impl<'a> OverlayRenderer<'a> {
                         dimensions.width,
                         dimensions.height,
                     )
-                    .context(format!("Failed to render border for '{}'", character_name))?;
+                    .context(format!("Failed to render active border for '{}'", character_name))?;
             }
         } else {
-            self.conn
-                .render_composite(
-                    PictOp::CLEAR,
-                    self.overlay_picture,
-                    0u32,
-                    self.overlay_picture,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    dimensions.width,
-                    dimensions.height,
-                )
-                .context(format!("Failed to clear border for '{}'", character_name))?;
+            // Render inactive border if enabled, otherwise clear
+            if self.config.inactive_border_enabled && self.config.active_border_size > 0 {
+                self.conn
+                    .render_composite(
+                        PictOp::SRC,
+                        self.inactive_border_fill,
+                        0u32,
+                        self.overlay_picture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        dimensions.width,
+                        dimensions.height,
+                    )
+                    .context(format!(
+                        "Failed to render inactive border for '{}'",
+                        character_name
+                    ))?;
+            } else {
+                self.conn
+                    .render_composite(
+                        PictOp::CLEAR,
+                        self.overlay_picture,
+                        0u32,
+                        self.overlay_picture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        dimensions.width,
+                        dimensions.height,
+                    )
+                    .context(format!("Failed to clear border for '{}'", character_name))?;
+            }
         }
         self.update_name(character_name, dimensions)
             .context(format!(
@@ -434,8 +469,16 @@ impl Drop for OverlayRenderer<'_> {
             error!(gc = self.overlay_gc, error = %e, "Failed to free GC");
         }
 
-        if let Err(e) = self.conn.render_free_picture(self.border_fill) {
-            error!(picture = self.border_fill, error = %e, "Failed to free border fill picture");
+        if let Err(e) = self.conn.render_free_picture(self.active_border_fill) {
+            error!(picture = self.active_border_fill, error = %e, "Failed to free active border fill picture");
+        }
+
+        if let Err(e) = self.conn.render_free_picture(self.inactive_border_fill) {
+            error!(
+                picture = self.inactive_border_fill,
+                error = %e,
+                "Failed to free inactive border fill picture"
+            );
         }
     }
 }
