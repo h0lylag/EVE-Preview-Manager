@@ -108,9 +108,8 @@ pub mod config {
 pub mod gui {
     use egui;
 
-    /// Manager window dimensions
-    pub const WINDOW_MIN_WIDTH: f32 = 500.0;
-    pub const WINDOW_MIN_HEIGHT: f32 = 600.0;
+
+
 
     /// Layout spacing
     pub const SECTION_SPACING: f32 = 15.0;

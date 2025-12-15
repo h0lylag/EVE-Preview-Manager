@@ -129,7 +129,7 @@ impl ManagerApp {
             hotkey_settings_state,
             visual_settings_state,
             cycle_order_settings_state,
-            active_tab: GuiTab::General,
+            active_tab: GuiTab::Behavior,
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -140,57 +140,13 @@ impl ManagerApp {
             hotkey_settings_state,
             visual_settings_state,
             cycle_order_settings_state,
-            active_tab: GuiTab::General,
+            active_tab: GuiTab::Behavior,
         };
 
         app
     }
 
-    fn render_general_settings_columns(&mut self, ui: &mut egui::Ui, state: &mut SharedState) {
-        let current_profile = &mut state.config.profiles[state.selected_profile_idx];
 
-        ui.columns(3, |columns| {
-            // Column 1: Behavior Settings
-            if components::behavior_settings::ui(
-                &mut columns[0],
-                current_profile,
-                &mut self.behavior_settings_state,
-            ) {
-                state.settings_changed = true;
-                state.config_status_message = None;
-            }
-
-            // Column 2: Visual Settings + Hotkey Settings
-            if components::visual_settings::ui(
-                &mut columns[1],
-                current_profile,
-                &mut self.visual_settings_state,
-            ) {
-                state.settings_changed = true;
-                state.config_status_message = None;
-            }
-            columns[1].add_space(SECTION_SPACING);
-            if components::hotkey_settings::ui(
-                &mut columns[1],
-                current_profile,
-                &mut self.hotkey_settings_state,
-            ) {
-                state.settings_changed = true;
-                state.config_status_message = None;
-            }
-
-            // Column 3: Character Cycle Order & Per-Character Hotkeys
-            if components::cycle_order_settings::ui(
-                &mut columns[2],
-                current_profile,
-                &mut self.cycle_order_settings_state,
-                &mut self.hotkey_settings_state,
-            ) {
-                state.settings_changed = true;
-                state.config_status_message = None;
-            }
-        });
-    }
 }
 
 impl eframe::App for ManagerApp {
@@ -294,15 +250,51 @@ impl eframe::App for ManagerApp {
 
         // Main Content Body
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| match self.active_tab {
-                GuiTab::General => {
-                    self.render_general_settings_columns(ui, state);
-                }
-                GuiTab::Advanced => {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(50.0);
-                        ui.label("Advanced settings coming soon...");
-                    });
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let current_profile = &mut state.config.profiles[state.selected_profile_idx];
+                
+                match self.active_tab {
+                    GuiTab::Behavior => {
+                        if components::behavior_settings::ui(
+                            ui,
+                            current_profile,
+                            &mut self.behavior_settings_state,
+                        ) {
+                            state.settings_changed = true;
+                            state.config_status_message = None;
+                        }
+                    }
+                    GuiTab::Appearance => {
+                        if components::visual_settings::ui(
+                            ui,
+                            current_profile,
+                            &mut self.visual_settings_state,
+                        ) {
+                            state.settings_changed = true;
+                            state.config_status_message = None;
+                        }
+                    }
+                    GuiTab::Hotkeys => {
+                        if components::hotkey_settings::ui(
+                            ui,
+                            current_profile,
+                            &mut self.hotkey_settings_state,
+                        ) {
+                            state.settings_changed = true;
+                            state.config_status_message = None;
+                        }
+                    }
+                    GuiTab::Characters => {
+                        if components::cycle_order_settings::ui(
+                            ui,
+                            current_profile,
+                            &mut self.cycle_order_settings_state,
+                            &mut self.hotkey_settings_state,
+                        ) {
+                            state.settings_changed = true;
+                            state.config_status_message = None;
+                        }
+                    }
                 }
             });
         });
@@ -363,7 +355,7 @@ pub fn run_gui() -> Result<()> {
 
     let mut viewport_builder = egui::ViewportBuilder::default()
         .with_inner_size([window_width, window_height])
-        .with_min_inner_size([WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT])
+
         .with_title("EVE Preview Manager - v".to_string() + env!("CARGO_PKG_VERSION"));
 
     if let Some(icon_data) = icon {

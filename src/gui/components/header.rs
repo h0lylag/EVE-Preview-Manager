@@ -35,18 +35,42 @@ pub fn render(
         // Right side: Navigation Tabs
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(5.0); // Padding from right edge
+            
+            // Render in reverse order (Right -> Left)
+            
+            // 4. Characters
             if ui
-                .add(egui::Button::new("Advanced").selected(*active_tab == GuiTab::Advanced))
+                .add(egui::Button::new("Characters").selected(*active_tab == GuiTab::Characters))
                 .clicked()
             {
-                *active_tab = GuiTab::Advanced;
+                *active_tab = GuiTab::Characters;
             }
             ui.add_space(5.0);
+
+            // 3. Hotkeys
             if ui
-                .add(egui::Button::new("General").selected(*active_tab == GuiTab::General))
+                .add(egui::Button::new("Hotkeys").selected(*active_tab == GuiTab::Hotkeys))
                 .clicked()
             {
-                *active_tab = GuiTab::General;
+                *active_tab = GuiTab::Hotkeys;
+            }
+            ui.add_space(5.0);
+
+            // 2. Appearance
+            if ui
+                .add(egui::Button::new("Appearance").selected(*active_tab == GuiTab::Appearance))
+                .clicked()
+            {
+                *active_tab = GuiTab::Appearance;
+            }
+            ui.add_space(5.0);
+
+            // 1. Behavior
+            if ui
+                .add(egui::Button::new("Behavior").selected(*active_tab == GuiTab::Behavior))
+                .clicked()
+            {
+                *active_tab = GuiTab::Behavior;
             }
         });
     });

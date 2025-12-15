@@ -11,8 +11,10 @@ use crate::gui::utils::spawn_preview_daemon;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GuiTab {
-    General,
-    Advanced,
+    Behavior,
+    Appearance,
+    Hotkeys,
+    Characters,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
