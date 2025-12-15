@@ -45,6 +45,7 @@ impl CharactersState {
 
     /// Load cycle group from profile into text buffer with hotkey suffixes
     pub fn load_from_profile(&mut self, profile: &Profile) {
+        self.cached_overrides.clear();
         self.cycle_group_text = profile
             .hotkey_cycle_group
             .iter()

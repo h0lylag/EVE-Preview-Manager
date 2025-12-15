@@ -25,10 +25,17 @@ pub enum HotkeyBackendType {
 /// Strategy for saving configuration files
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStrategy {
-    /// Preserve character_thumbnails entries already on disk (GUI edits)
-    PreserveCharacterPositions,
-    /// Overwrite character_thumbnails with in-memory data (daemon updates)
-    OverwriteCharacterPositions,
+    /// Load existing config from disk and preserve its character positions/dimensions
+    /// Used by GUI when saving general settings to avoid overwriting daemon's position updates
+    /// Load existing config from disk and preserve its character positions/dimensions
+    /// Used by GUI when saving general settings to avoid overwriting daemon's position updates
+    Preserve,
+    /// Overwrite disk config cleanly with current state
+    /// Used when we know we have the full authoritative state
+    Overwrite,
+    /// Load existing config from disk and updated ONLY character positions/dimensions from current state
+    /// Used by Daemon to save position updates without stomping GUI settings (like overrides)
+    Merge,
 }
 
 /// Top-level configuration with profile support
@@ -325,7 +332,7 @@ impl Config {
         }
 
         let config_to_save = match strategy {
-            SaveStrategy::PreserveCharacterPositions => {
+            SaveStrategy::Preserve => {
                 let mut clone = self.clone();
                 if config_path.exists()
                     && let Ok(contents) = fs::read_to_string(&config_path)
@@ -337,17 +344,75 @@ impl Config {
                             .iter()
                             .find(|p| p.profile_name == profile_to_save.profile_name)
                         {
-                            // Profile exists on disk - preserve its character positions
-                            profile_to_save.character_thumbnails =
-                                existing_profile.character_thumbnails.clone();
+                            // Profile exists on disk
+                            // Merge strategy:
+                            // 1. For characters in BOTH: keep GUI settings (overrides), update positions from Disk
+                            // 2. For characters ONLY in Disk: add to GUI (newly discovered by daemon)
+
+                            for (char_name, disk_settings) in &existing_profile.character_thumbnails
+                            {
+                                if let Some(gui_settings) =
+                                    profile_to_save.character_thumbnails.get_mut(char_name)
+                                {
+                                    // Found in both: update position/dim from disk, keep GUI overrides
+                                    gui_settings.x = disk_settings.x;
+                                    gui_settings.y = disk_settings.y;
+                                    gui_settings.dimensions = disk_settings.dimensions;
+                                } else {
+                                    // Found only on disk: add to GUI config
+                                    profile_to_save
+                                        .character_thumbnails
+                                        .insert(char_name.clone(), disk_settings.clone());
+                                }
+                            }
                         }
-                        // If profile doesn't exist on disk (new/duplicated profile),
-                        // keep the character_thumbnails from the in-memory profile (from clone/duplication)
                     }
                 }
                 clone
             }
-            SaveStrategy::OverwriteCharacterPositions => self.clone(),
+            SaveStrategy::Overwrite => self.clone(),
+            SaveStrategy::Merge => {
+                let merged = self.clone();
+                if config_path.exists()
+                    && let Ok(contents) = fs::read_to_string(&config_path)
+                    && let Ok(mut existing_config) = serde_json::from_str::<Config>(&contents)
+                {
+                    // Goal: Update existing_config with positions from 'self' (daemon),
+                    // but keep everything else from 'existing_config' (GUI).
+
+                    // Iterate over daemon's profiles (self)
+                    for daemon_profile in merged.profiles.iter() {
+                        if let Some(disk_profile) = existing_config
+                            .profiles
+                            .iter_mut()
+                            .find(|p| p.profile_name == daemon_profile.profile_name)
+                        {
+                            // Update positions for each character
+                            for (char_name, daemon_char_settings) in
+                                &daemon_profile.character_thumbnails
+                            {
+                                // Get or insert character entry in disk profile
+                                let disk_char_settings = disk_profile
+                                    .character_thumbnails
+                                    .entry(char_name.clone())
+                                    .or_insert_with(|| daemon_char_settings.clone());
+
+                                // STRICTLY update only position and dimensions
+                                disk_char_settings.x = daemon_char_settings.x;
+                                disk_char_settings.y = daemon_char_settings.y;
+                                disk_char_settings.dimensions = daemon_char_settings.dimensions;
+
+                                // Intentionally NOT updating overrides or other fields
+                                // disk_char_settings.override_* fields remain as they are on disk
+                            }
+                        }
+                    }
+                    existing_config
+                } else {
+                    // Fallback to overwrite if disk read fails (should be rare)
+                    merged
+                }
+            }
         };
 
         let json_string = serde_json::to_string_pretty(&config_to_save)
@@ -362,7 +427,7 @@ impl Config {
 
     /// Convenience helper: save preserving character positions (GUI default)
     pub fn save(&self) -> Result<()> {
-        self.save_with_strategy(SaveStrategy::PreserveCharacterPositions)
+        self.save_with_strategy(SaveStrategy::Preserve)
     }
 }
 

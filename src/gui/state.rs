@@ -160,6 +160,7 @@ impl SharedState {
                         // Character exists in both: keep GUI dimensions, use disk position (x, y)
                         gui_settings.x = disk_settings.x;
                         gui_settings.y = disk_settings.y;
+                        gui_settings.dimensions = disk_settings.dimensions;
                     } else if !char_name.is_empty() {
                         // Character only in disk (daemon added it): preserve it completely
                         merged_profile
@@ -179,8 +180,9 @@ impl SharedState {
         };
 
         // Save the merged config
+        // Default: preserve character positions from disk (daemon's source of truth)
         final_config
-            .save_with_strategy(SaveStrategy::OverwriteCharacterPositions)
+            .save_with_strategy(SaveStrategy::Preserve)
             .context("Failed to save configuration")?;
 
         // Update in-memory config immediately (no need to reload from disk)

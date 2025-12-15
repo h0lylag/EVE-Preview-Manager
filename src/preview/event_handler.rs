@@ -470,10 +470,12 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
                     y = geom.y,
                     "Saved position after drag (auto-save enabled)"
                 );
-                ctx.daemon_config.save().context(format!(
-                    "Failed to save position for '{}' after drag",
-                    thumbnail.character_name
-                ))?;
+                ctx.daemon_config
+                    .save_with_strategy(crate::config::profile::SaveStrategy::Merge)
+                    .context(format!(
+                        "Failed to save position for '{}' after drag",
+                        thumbnail.character_name
+                    ))?;
             } else {
                 debug!(
                     window = thumbnail.window(),
@@ -812,10 +814,12 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
 
                             // Persist to disk
                             if ctx.daemon_config.profile.thumbnail_auto_save_position {
-                                ctx.daemon_config.save().context(format!(
-                                    "Failed to save position for new log in '{}'",
-                                    thumbnail.character_name
-                                ))?;
+                                ctx.daemon_config
+                                    .save_with_strategy(crate::config::profile::SaveStrategy::Merge)
+                                    .context(format!(
+                                        "Failed to save position for new log in '{}'",
+                                        thumbnail.character_name
+                                    ))?;
                             } else {
                                 // If auto-save is OFF, we still need to track this character so it appears in the menu
                                 // But we won't clutter the config file with positions for every character until explicitly saved
