@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::*;
+
 use x11rb::rust_connection::RustConnection;
 
 use crate::config::HotkeyBinding;
@@ -32,6 +33,7 @@ impl HotkeyBackend for X11Backend {
         backward_key: Option<HotkeyBinding>,
         character_hotkeys: Vec<HotkeyBinding>,
         _device_id: Option<String>, // Not used by X11 backend
+        require_eve_focus: bool,
     ) -> Result<Vec<JoinHandle<()>>> {
         // Check if we have any hotkeys to register
         let has_cycle = forward_key.is_some() && backward_key.is_some();
@@ -49,7 +51,13 @@ impl HotkeyBackend for X11Backend {
         );
 
         let handle = thread::spawn(move || {
-            if let Err(e) = run_x11_listener(sender, forward_key, backward_key, character_hotkeys) {
+            if let Err(e) = run_x11_listener(
+                sender,
+                forward_key,
+                backward_key,
+                character_hotkeys,
+                require_eve_focus,
+            ) {
                 error!(error = %e, "X11 hotkey listener error");
             }
         });
@@ -82,6 +90,7 @@ fn run_x11_listener(
     forward_key: Option<HotkeyBinding>,
     backward_key: Option<HotkeyBinding>,
     character_hotkeys: Vec<HotkeyBinding>,
+    require_eve_focus: bool,
 ) -> Result<()> {
     // Connect to X11
     let (conn, screen_num) =
@@ -153,19 +162,83 @@ fn run_x11_listener(
         "X11 hotkeys registered, entering event loop"
     );
 
-    // Event loop
-    loop {
-        let event = conn
-            .wait_for_event()
-            .context("Failed to wait for X11 event")?;
+    // Track whether hotkeys are currently grabbed
+    let mut hotkeys_grabbed = true;
+    let mut last_focused_window: Option<Window> = None;
 
-        match event {
-            Event::KeyPress(key_event) => {
-                debug!(
-                    keycode = key_event.detail,
-                    state = u16::from(key_event.state),
-                    "KeyPress event"
-                );
+    // Event loop with periodic focus checking
+    loop {
+        // Poll for events with a small timeout to allow periodic focus checking
+        let event = conn.poll_for_event()?;
+        
+        if event.is_none() {
+            // No event available, sleep briefly and check focus
+            // 500ms is plenty fast for human interaction while minimizing CPU overhead
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+
+        // Check focus changes and dynamically ungrab/regrab hotkeys
+        let focus_cookie = conn.get_input_focus()?;
+        let focused_window = focus_cookie.reply()?.focus;
+        
+        // Only check class if focus changed (optimization)
+        if last_focused_window != Some(focused_window) {
+            last_focused_window = Some(focused_window);
+            let focused_class = get_window_class_sync(&conn, focused_window).unwrap_or_default();
+            let is_epm_focused = focused_class.eq_ignore_ascii_case("eve-preview-manager");
+            
+            // If EPM gained focus, ungrab hotkeys
+            if is_epm_focused && hotkeys_grabbed {
+                info!("EPM gained focus, ungrabbing hotkeys to allow normal input");
+                for ((keycode, modmask), _) in &hotkey_map {
+                    ungrab_hotkey(&conn, root, *keycode, *modmask)?;
+                }
+                hotkeys_grabbed = false;
+                conn.flush()?;
+            }
+            // If EPM lost focus, regrab hotkeys
+            else if !is_epm_focused && !hotkeys_grabbed {
+                info!("EPM lost focus, re-grabbing hotkeys");
+                for ((keycode, modmask), _) in &hotkey_map {
+                    register_hotkey(&conn, root, *keycode, *modmask)?;
+                }
+                hotkeys_grabbed = true;
+                conn.flush()?;
+            }
+        }
+
+        // Only process event if one is available
+        if let Some(event) = event {
+            match event {
+                Event::KeyPress(key_event) => {
+                    // If hotkeys are not grabbed, this event shouldn't reach us
+                    // But handle it anyway for robustness
+                    if !hotkeys_grabbed {
+                        conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                        conn.flush()?;
+                        continue;
+                    }
+                // Hotkeys are grabbed, process normally
+                // Check if we need EVE focus
+
+                if require_eve_focus {
+                    let title = get_window_title_sync(&conn, focused_window).unwrap_or_default();
+                    let is_eve = title.starts_with(crate::constants::eve::WINDOW_TITLE_PREFIX) 
+                        || title == crate::constants::eve::LOGGED_OUT_TITLE;
+
+                    if !is_eve {
+                        debug!(title = %title, "EVE focus required but not focused, replaying");
+                        conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                        conn.flush()?;
+                        continue;
+                    }
+                }
+
+                
+                // If we got here, we consume the event.
+                info!(keycode = key_event.detail, "Consuming hotkey event");
+                conn.allow_events(Allow::ASYNC_KEYBOARD, key_event.time)?;
+                conn.flush()?;
 
                 // Normalize modifiers (remove NumLock, CapsLock, etc.)
                 let modmask = normalize_modmask(key_event.state);
@@ -189,6 +262,7 @@ fn run_x11_listener(
                         "KeyPress event didn't match any registered hotkey"
                     );
                 }
+
             }
             Event::MappingNotify(_) => {
                 // Keyboard mapping changed, we should re-register hotkeys
@@ -199,6 +273,82 @@ fn run_x11_listener(
                 // Ignore other events
             }
         }
+        }  // End of if let Some(event)
+    }
+}
+
+/// Helper to synchronously get window class
+fn get_window_class_sync(conn: &RustConnection, window: Window) -> Result<String> {
+    let cookie = conn.get_property(
+        false,
+        window,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        0,
+        1024,
+    )?;
+    let reply = cookie.reply()?;
+    
+    if let Some(val) = reply.value8() {
+        // WM_CLASS contains two null-terminated strings: <instance>\0<class>\0
+        let bytes: Vec<u8> = val.collect();
+        // Split by null byte
+        let parts: Vec<&[u8]> = bytes.split(|&b| b == 0).collect();
+        
+        // We usually care about the class (second string)
+        if parts.len() >= 2 && !parts[1].is_empty() {
+             Ok(String::from_utf8_lossy(parts[1]).into_owned())
+        } else if !parts.is_empty() {
+             Ok(String::from_utf8_lossy(parts[0]).into_owned())
+        } else {
+             Ok(String::new())
+        }
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// Helper to ungrab a hotkey (reverse of register_hotkey)
+fn ungrab_hotkey(
+    conn: &RustConnection,
+    root: Window,
+    keycode: Keycode,
+    modmask: ModMask,
+) -> Result<()> {
+    // Ungrab all the same permutations we grabbed in register_hotkey
+    let ignore_masks = [
+        ModMask::from(0u16),         // No lock keys
+        ModMask::M2,                 // NumLock (Mod2)
+        ModMask::LOCK,               // CapsLock
+        ModMask::M2 | ModMask::LOCK, // NumLock + CapsLock
+    ];
+
+    for ignore_mask in &ignore_masks {
+        let effective_modmask = modmask | *ignore_mask;
+        conn.ungrab_key(keycode, root, effective_modmask)?;
+    }
+
+    Ok(())
+}
+
+
+fn get_window_title_sync(conn: &RustConnection, window: Window) -> Result<String> {
+    let cookie = conn.get_property(
+        false,
+        window,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        0,
+        1024,
+    )?;
+    let reply = cookie.reply()?;
+    
+    if let Some(val) = reply.value8() {
+        // WM_NAME is typically a string, possibly Latin-1 but often ASCII/UTF-8 compatible for our prefix
+        let bytes: Vec<u8> = val.collect();
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    } else {
+        Ok(String::new())
     }
 }
 
@@ -228,7 +378,7 @@ fn register_hotkey(
             root,
             effective_modmask,
             keycode,
-            GrabMode::ASYNC, // Keep keyboard processing normal (don't freeze)
+            GrabMode::SYNC, // SYNC to allow ReplayKeyboard decision
             GrabMode::ASYNC, // Keep mouse processing normal
         )
         .with_context(|| {

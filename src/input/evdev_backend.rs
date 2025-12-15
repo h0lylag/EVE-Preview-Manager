@@ -34,6 +34,7 @@ impl HotkeyBackend for EvdevBackend {
         backward_key: Option<HotkeyBinding>,
         character_hotkeys: Vec<HotkeyBinding>,
         selected_device_id: Option<String>,
+        require_eve_focus: bool,
     ) -> Result<Vec<JoinHandle<()>>> {
         spawn_listener_impl(
             sender,
@@ -41,6 +42,7 @@ impl HotkeyBackend for EvdevBackend {
             backward_key,
             character_hotkeys,
             selected_device_id,
+            require_eve_focus,
         )
     }
 
@@ -73,6 +75,7 @@ fn spawn_listener_impl(
     backward_key: Option<HotkeyBinding>,
     character_hotkeys: Vec<HotkeyBinding>,
     selected_device_id: Option<String>,
+    _require_eve_focus: bool, // Not currently implemented for evdev backend
 ) -> Result<Vec<thread::JoinHandle<()>>> {
     // We need to detect all devices upfront to support "cross-device" modifiers.
     // For example, a user might hold 'Shift' on their keyboard while pressing a 'Mouse Button'

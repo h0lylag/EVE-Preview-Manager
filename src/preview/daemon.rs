@@ -181,6 +181,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                     daemon_config.profile.hotkey_cycle_backward.clone(),
                     character_hotkeys.clone(),
                     daemon_config.profile.hotkey_input_device.clone(),
+                    daemon_config.profile.hotkey_require_eve_focus,
                 ) {
                     Ok(handle) => {
                         info!(
@@ -210,6 +211,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                         daemon_config.profile.hotkey_cycle_backward.clone(),
                         character_hotkeys.clone(),
                         daemon_config.profile.hotkey_input_device.clone(),
+                        daemon_config.profile.hotkey_require_eve_focus,
                     ) {
                         Ok(handle) => {
                             info!(
