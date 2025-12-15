@@ -157,6 +157,18 @@ impl DaemonConfig {
 
     /// Save character positions to the profile config
     pub fn save(&self) -> Result<()> {
+        let profile_config = self.prepare_config_to_save()?;
+        profile_config.save_with_strategy(SaveStrategy::Overwrite)
+    }
+
+    /// Save character positions using a specific strategy
+    pub fn save_with_strategy(&self, strategy: SaveStrategy) -> Result<()> {
+        let profile_config = self.prepare_config_to_save()?;
+        profile_config.save_with_strategy(strategy)
+    }
+
+    /// Prepare config for saving by merging current daemon state into a fresh disk config
+    fn prepare_config_to_save(&self) -> Result<crate::config::profile::Config> {
         let config_path = Self::config_path();
         let mut profile_config = if let Ok(contents) = fs::read_to_string(&config_path) {
             serde_json::from_str::<crate::config::profile::Config>(&contents)
@@ -178,6 +190,8 @@ impl DaemonConfig {
                 profile_positions
                     .entry(char_name.clone())
                     .and_modify(|e| {
+                        // Update ONLY the position/dimensions from the daemon's state.
+                        // Essential to PRESERVE any override settings (colors, sizes) that were loaded from disk.
                         e.x = char_settings.x;
                         e.y = char_settings.y;
                         e.dimensions = char_settings.dimensions;
@@ -192,50 +206,7 @@ impl DaemonConfig {
             profile.character_thumbnails.remove("");
         }
 
-        profile_config.save_with_strategy(SaveStrategy::Overwrite)
-    }
-
-    /// Save character positions using a specific strategy
-    pub fn save_with_strategy(&self, strategy: SaveStrategy) -> Result<()> {
-        let config_path = Self::config_path();
-        let mut profile_config = if let Ok(contents) = fs::read_to_string(&config_path) {
-            serde_json::from_str::<crate::config::profile::Config>(&contents)
-                .context("Failed to parse profile config for save")?
-        } else {
-            crate::config::profile::Config::default()
-        };
-
-        let selected_name = profile_config.global.selected_profile.clone();
-        let profile_idx = profile_config
-            .profiles
-            .iter()
-            .position(|p| p.profile_name == selected_name)
-            .unwrap_or(0);
-
-        // Update the current profile with our in-memory character settings
-        let profile = &mut profile_config.profiles[profile_idx];
-        // Only update positions for characters we know about
-        let profile_positions = &mut profile.character_thumbnails;
-
-        for (char_name, char_settings) in &self.character_thumbnails {
-            if !char_name.is_empty() {
-                profile_positions
-                    .entry(char_name.clone())
-                    .and_modify(|e| {
-                        e.x = char_settings.x;
-                        e.y = char_settings.y;
-                        e.dimensions = char_settings.dimensions;
-                    })
-                    .or_insert_with(|| char_settings.clone());
-            }
-        }
-
-        // Sanitize ALL profiles to ensure the config file is clean globally
-        for profile in &mut profile_config.profiles {
-            profile.character_thumbnails.remove("");
-        }
-
-        profile_config.save_with_strategy(strategy)
+        Ok(profile_config)
     }
 
     /// Handle character name change (login/logout)

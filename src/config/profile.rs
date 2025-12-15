@@ -562,11 +562,10 @@ mod tests {
     }
 
     #[test]
-    fn test_save_strategy_preserve_character_thumbnails() {
-        // This tests the strategy concept - actual file I/O is integration test territory
-        let strategy = SaveStrategy::PreserveCharacterPositions;
-        assert_eq!(strategy, SaveStrategy::PreserveCharacterPositions);
-        assert_ne!(strategy, SaveStrategy::OverwriteCharacterPositions);
+    fn test_save_strategy_variants() {
+        let strategy = SaveStrategy::Preserve;
+        assert_eq!(strategy, SaveStrategy::Preserve);
+        assert_ne!(strategy, SaveStrategy::Overwrite);
     }
 
     #[test]
