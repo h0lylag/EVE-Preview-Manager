@@ -446,6 +446,12 @@ impl SharedState {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum GuiTab {
+    General,
+    Advanced,
+}
+
 struct ManagerApp {
     state: Arc<Mutex<SharedState>>,
 
@@ -459,6 +465,8 @@ struct ManagerApp {
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
     #[cfg(target_os = "linux")]
     update_signal: std::sync::Arc<tokio::sync::Notify>,
+
+    active_tab: GuiTab,
 }
 
 impl ManagerApp {
@@ -554,6 +562,7 @@ impl ManagerApp {
             hotkey_settings_state,
             visual_settings_state,
             cycle_order_settings_state,
+            active_tab: GuiTab::General,
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -564,117 +573,13 @@ impl ManagerApp {
             hotkey_settings_state,
             visual_settings_state,
             cycle_order_settings_state,
+            active_tab: GuiTab::General,
         };
 
         app
     }
 
-    fn render_unified_settings(&mut self, ui: &mut egui::Ui, state: &mut SharedState) {
-        let mut action = ui
-            .horizontal(|ui| {
-                // Profile dropdown group
-                let action = self.profile_selector.render_dropdown(
-                    ui,
-                    &mut state.config,
-                    &mut state.selected_profile_idx,
-                );
-
-                // Save/Discard buttons aligned to the right
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Discard button
-                    if ui.button("✖ Discard Changes").clicked() {
-                        state.discard_changes();
-                    }
-
-                    // Save button
-                    if ui.button("💾 Save & Apply").clicked() {
-                        if let Err(err) = state.save_config() {
-                            error!(error = ?err, "Failed to save config");
-                            state.status_message = Some(StatusMessage {
-                                text: format!("Save failed: {err}"),
-                                color: COLOR_ERROR,
-                            });
-                        } else {
-                            state.reload_daemon_config();
-                            #[cfg(target_os = "linux")]
-                            self.update_signal.notify_one();
-                        }
-                    }
-                });
-
-                action
-            })
-            .inner;
-
-        //ui.add_space(ITEM_SPACING); // Removed to reduce gap
-
-        ui.horizontal(|ui| {
-            self.profile_selector
-                .render_buttons(ui, &state.config, state.selected_profile_idx);
-
-            // Status text aligned to the right
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(message) = &state.config_status_message {
-                    ui.colored_label(message.color, &message.text);
-                } else if state.settings_changed {
-                    ui.colored_label(COLOR_WARNING, "Unsaved changes");
-                }
-            });
-        });
-
-        // Render modal dialogs (must be called at context level, not inside layout)
-        let dialog_action = self.profile_selector.render_dialogs(
-            ui.ctx(),
-            &mut state.config,
-            &mut state.selected_profile_idx,
-        );
-
-        // Merge dialog action with dropdown action
-        if !matches!(dialog_action, ProfileAction::None) {
-            action = dialog_action;
-        }
-
-        match action {
-            ProfileAction::SwitchProfile => {
-                // Load cycle order text when switching profiles
-                let current_profile = &state.config.profiles[state.selected_profile_idx];
-                self.cycle_order_settings_state
-                    .load_from_profile(current_profile);
-
-                // Save config and reload daemon
-                if let Err(err) = state.save_config() {
-                    error!(error = ?err, "Failed to save config after profile switch");
-                    state.status_message = Some(StatusMessage {
-                        text: format!("Save failed: {err}"),
-                        color: COLOR_ERROR,
-                    });
-                } else {
-                    state.reload_daemon_config();
-                    #[cfg(target_os = "linux")]
-                    self.update_signal.notify_one();
-                }
-            }
-            ProfileAction::ProfileCreated
-            | ProfileAction::ProfileDeleted
-            | ProfileAction::ProfileUpdated => {
-                // Save config and reload daemon
-                if let Err(err) = state.save_config() {
-                    error!(error = ?err, "Failed to save config after profile action");
-                    state.status_message = Some(StatusMessage {
-                        text: format!("Save failed: {err}"),
-                        color: COLOR_ERROR,
-                    });
-                } else {
-                    state.reload_daemon_config();
-                    #[cfg(target_os = "linux")]
-                    self.update_signal.notify_one();
-                }
-            }
-            ProfileAction::None => {}
-        }
-
-        ui.separator();
-
+    fn render_general_settings_columns(&mut self, ui: &mut egui::Ui, state: &mut SharedState) {
         let current_profile = &mut state.config.profiles[state.selected_profile_idx];
 
         ui.columns(3, |columns| {
@@ -726,13 +631,14 @@ impl eframe::App for ManagerApp {
         // Lock shared state
         // Clone Arc to separate borrow from self
         let state_arc = self.state.clone();
-        let mut state = match state_arc.lock() {
+        let mut state_guard = match state_arc.lock() {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to lock shared state: {:?}", e);
                 return;
             }
         };
+        let mut state = &mut *state_guard;
 
         state.poll_daemon();
 
@@ -761,13 +667,20 @@ impl eframe::App for ManagerApp {
         }
 
         // Handle quit request from tray menu
+        // Handle quit request from tray menu
         if state.should_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let mut action = ProfileAction::None;
+
+        // Global Header Panel (Fixed at top)
+        // We use a TopBottomPanel to ensure this section remains visible while the content below scrolls.
+        egui::TopBottomPanel::top("global_header").show(ctx, |ui| {
+            // Row 0: Daemon Status (Left) | Tabs (Right)
             ui.horizontal(|ui| {
+                // Left side: Status indicators
                 ui.colored_label(state.daemon_status.color(), state.daemon_status.label());
                 if let Some(child) = &state.daemon {
                     ui.label(format!("(PID: {})", child.id()));
@@ -776,12 +689,137 @@ impl eframe::App for ManagerApp {
                     ui.add_space(10.0);
                     ui.colored_label(message.color, &message.text);
                 }
-            });
 
+                // Right side: Navigation Tabs
+                // We use right_to_left layout to anchor the tabs to the top-right corner,
+                // keeping them distinct from the profile controls below.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(5.0); // Padding from right edge
+                    if ui.add(egui::Button::new("Advanced").selected(self.active_tab == GuiTab::Advanced)).clicked() {
+                        self.active_tab = GuiTab::Advanced;
+                    }
+                    ui.add_space(5.0);
+                    if ui.add(egui::Button::new("General").selected(self.active_tab == GuiTab::General)).clicked() {
+                        self.active_tab = GuiTab::General;
+                    }
+                });
+            });
             ui.separator();
 
+            // Row 1: Control Bar - Profile Selector (Left) | Save Actions (Right)
+            ui.horizontal(|ui| {
+                // Ensure the row has enough height for standard buttons/dropdowns
+                ui.set_min_height(30.0);
+                
+                // 1. Left: Profile Dropdown
+                action = self.profile_selector.render_dropdown(
+                    ui,
+                    &mut state.config,
+                    &mut state.selected_profile_idx,
+                );
+
+                // 2. Right: Save & Discard Buttons
+                // Anchored right to keep the primary actions easily accessible
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Discard button
+                    if ui.button("✖ Discard Changes").clicked() {
+                        state.discard_changes();
+                    }
+
+                    // Save button
+                    if ui.button("💾 Save & Apply").clicked() {
+                        if let Err(err) = state.save_config() {
+                            error!(error = ?err, "Failed to save config");
+                            state.status_message = Some(StatusMessage {
+                                text: format!("Save failed: {err}"),
+                                color: COLOR_ERROR,
+                            });
+                        } else {
+                            state.reload_daemon_config();
+                            #[cfg(target_os = "linux")]
+                            self.update_signal.notify_one();
+                        }
+                    }
+                });
+            });
+
+            // Row 2: Profile Actions | Config Status
+            ui.horizontal(|ui| {
+                self.profile_selector
+                    .render_buttons(ui, &state.config, state.selected_profile_idx);
+
+                // Status text aligned to the right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(message) = &state.config_status_message {
+                        ui.colored_label(message.color, &message.text);
+                    } else if state.settings_changed {
+                        ui.colored_label(COLOR_WARNING, "Unsaved changes");
+                    }
+                });
+            });
+            
+            ui.add_space(5.0);
+        });
+        
+        // Handle Dialogs (Context level)
+        let dialog_action = self.profile_selector.render_dialogs(
+            ctx,
+            &mut state.config,
+            &mut state.selected_profile_idx,
+        );
+
+        if !matches!(dialog_action, ProfileAction::None) {
+            action = dialog_action;
+        }
+
+        // Handle Actions
+        match action {
+            ProfileAction::SwitchProfile => {
+                let current_profile = &state.config.profiles[state.selected_profile_idx];
+                self.cycle_order_settings_state.load_from_profile(current_profile);
+
+                if let Err(err) = state.save_config() {
+                    error!(error = ?err, "Failed to save config after profile switch");
+                    state.status_message = Some(StatusMessage {
+                        text: format!("Save failed: {err}"),
+                        color: COLOR_ERROR,
+                    });
+                } else {
+                    state.reload_daemon_config();
+                    #[cfg(target_os = "linux")]
+                    self.update_signal.notify_one();
+                }
+            }
+            ProfileAction::ProfileCreated | ProfileAction::ProfileDeleted | ProfileAction::ProfileUpdated => {
+                if let Err(err) = state.save_config() {
+                    error!(error = ?err, "Failed to save config after profile action");
+                    state.status_message = Some(StatusMessage {
+                        text: format!("Save failed: {err}"),
+                        color: COLOR_ERROR,
+                    });
+                } else {
+                    state.reload_daemon_config();
+                    #[cfg(target_os = "linux")]
+                    self.update_signal.notify_one();
+                }
+            }
+            ProfileAction::None => {}
+        }
+
+        // Main Content Body
+        egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                self.render_unified_settings(ui, &mut state);
+                match self.active_tab {
+                    GuiTab::General => {
+                        self.render_general_settings_columns(ui, &mut state);
+                    }
+                    GuiTab::Advanced => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(50.0);
+                            ui.label("Advanced settings coming soon...");
+                        });
+                    }
+                }
             });
         });
 
