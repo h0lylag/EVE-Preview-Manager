@@ -383,7 +383,7 @@ impl CycleState {
             return None;
         }
 
-        // 5. Find starting position based on `current_window`
+        // 5. Find starting position based on `current_window` or fallback to `current_index`
         let start_pos = if let Some(curr_win) = self.current_window
             // Find which character owns this window
             && let Some((curr_char, _)) = self.active_windows.iter().find(|&(_, &w)| w == curr_win)
@@ -391,6 +391,18 @@ impl CycleState {
             && let Some(pos) = sorted_candidates.iter().position(|&c| c == curr_char)
         {
             pos
+        } else if !self.config_order.is_empty() {
+            // Fallback: Check if the currently indexed character is in the group (e.g. detached or windowless)
+            let current_char_name = &self.config_order[self.current_index];
+            if let Some(pos) = sorted_candidates
+                .iter()
+                .position(|&c| c == current_char_name)
+            {
+                pos
+            } else {
+                // Current char not in group, default to end (so next increment wraps to 0)
+                sorted_candidates.len().saturating_sub(1)
+            }
         } else {
             // Default to starting before the first item
             sorted_candidates.len().saturating_sub(1)
