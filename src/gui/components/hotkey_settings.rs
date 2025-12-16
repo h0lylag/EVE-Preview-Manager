@@ -11,6 +11,7 @@ use std::sync::mpsc::Receiver;
 enum CaptureTarget {
     Forward,
     Backward,
+    ToggleSkip,        // Hotkey to temporarily skip current character
     Profile,           // Hotkey to switch to this profile
     Character(String), // Character name for per-character hotkey
 }
@@ -355,6 +356,41 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                  ui.add_space(ITEM_SPACING);
                  ui.label(egui::RichText::new("Pressing this hotkey will immediately switch to this profile.").weak().small());
 
+                 ui.add_space(ITEM_SPACING);
+                 ui.separator();
+                 ui.add_space(ITEM_SPACING);
+
+                 // Toggle Skip Hotkey
+                 ui.label("Toggle Skip Hotkey:");
+                 ui.add_space(ITEM_SPACING / 2.0);
+
+                 ui.horizontal(|ui| {
+                    let binding_text = profile.hotkey_toggle_skip.as_ref()
+                        .map(|b| b.display_name())
+                        .unwrap_or_else(|| "Not set".to_string());
+
+                    // Use default text color if set, weak if not (optional feature)
+                    let color = if profile.hotkey_toggle_skip.is_none() {
+                         ui.style().visuals.weak_text_color()
+                    } else {
+                        ui.style().visuals.text_color()
+                    };
+
+                    ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                    if ui.button("⌨ Bind").clicked() {
+                        state.start_key_capture(CaptureTarget::ToggleSkip, profile.hotkey_backend);
+                    }
+
+                    if profile.hotkey_toggle_skip.is_some() && ui.small_button("✖").on_hover_text("Clear binding").clicked() {
+                        profile.hotkey_toggle_skip = None;
+                        changed = true;
+                    }
+                 });
+                 ui.add_space(ITEM_SPACING);
+                 ui.label(egui::RichText::new("Temporarily skip the current character from cycling.").weak().small());
+
+
                  if profile.hotkey_backend == HotkeyBackendType::Evdev {
                       ui.add_space(ITEM_SPACING);
                       ui.label(egui::RichText::new("Note: Global profile hotkeys require the Evdev backend to work reliably when the EVE client is not focused.").weak().small().italics());
@@ -423,6 +459,7 @@ pub fn render_key_capture_modal(
             let target_name = match state.capture_target {
                 Some(CaptureTarget::Forward) => "Forward Cycle".to_string(),
                 Some(CaptureTarget::Backward) => "Backward Cycle".to_string(),
+                Some(CaptureTarget::ToggleSkip) => "Toggle Skip".to_string(),
                 Some(CaptureTarget::Profile) => "Switch to Profile".to_string(),
                 Some(CaptureTarget::Character(ref name)) => format!("Character: {}", name),
                 None => "Unknown".to_string(),
@@ -536,6 +573,10 @@ pub fn render_key_capture_modal(
                                 }
                                 Some(CaptureTarget::Backward) => {
                                     profile.hotkey_cycle_backward = Some(binding_clone);
+                                    changed = true;
+                                }
+                                Some(CaptureTarget::ToggleSkip) => {
+                                    profile.hotkey_toggle_skip = Some(binding_clone);
                                     changed = true;
                                 }
                                 Some(CaptureTarget::Profile) => {

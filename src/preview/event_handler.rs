@@ -159,7 +159,8 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
 
             // Draw initial border (inactive) for the new thumbnail to ensure it matches configuration
             if let Some(thumb) = ctx.eve_clients.get_mut(&event.window)
-                && let Err(e) = thumb.border(false)
+                && let Err(e) =
+                    thumb.border(false, ctx.cycle_state.is_skipped(&thumb.character_name))
             {
                 tracing::warn!(window = event.window, error = %e, "Failed to draw initial border for new window");
             }
@@ -243,20 +244,24 @@ fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()> {
             // This window gained focus
             if !thumbnail.state.is_focused() {
                 thumbnail.state = ThumbnailState::Normal { focused: true };
-                thumbnail.border(true).context(format!(
-                    "Failed to update border on focus for '{}'",
-                    thumbnail.character_name
-                ))?;
+                thumbnail
+                    .border(true, ctx.cycle_state.is_skipped(&thumbnail.character_name))
+                    .context(format!(
+                        "Failed to update border on focus for '{}'",
+                        thumbnail.character_name
+                    ))?;
             }
         } else if thumbnail.state.is_focused() {
             // This window lost focus (to another EVE window)
             // We explicitly toggle it to inactive/gray border
             thumbnail.state = ThumbnailState::Normal { focused: false };
-            thumbnail.border(false).context(format!(
-                "Failed to clear border for '{}' (focus moved to '{}')",
-                thumbnail.character_name,
-                event.event // Just using ID for logging context
-            ))?;
+            thumbnail
+                .border(false, ctx.cycle_state.is_skipped(&thumbnail.character_name))
+                .context(format!(
+                    "Failed to clear border for '{}' (focus moved to '{}')",
+                    thumbnail.character_name,
+                    event.event // Just using ID for logging context
+                ))?;
         }
     }
     Ok(())

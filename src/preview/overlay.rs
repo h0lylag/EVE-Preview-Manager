@@ -28,9 +28,10 @@ pub struct OverlayRenderer<'a> {
     pub overlay_pixmap: Pixmap,
     /// X Render Picture wrapping the overlay pixmap.
     pub overlay_picture: Picture,
-    overlay_gc: Gcontext,          // Graphics context for text rendering
-    active_border_fill: Picture,   // Solid color fill for active border
-    inactive_border_fill: Picture, // Solid color fill for inactive border
+    overlay_gc: Gcontext,           // Graphics context for text rendering
+    active_border_fill: Picture,    // Solid color fill for active border
+    inactive_border_fill: Picture,  // Solid color fill for inactive border
+    skipped_indicator_gc: Gcontext, // GC for drawing skipped indicator (Red X)
 
     // === Borrowed Dependencies ===
     conn: &'a RustConnection,
@@ -105,6 +106,22 @@ impl<'a> OverlayRenderer<'a> {
             character_name
         ))?;
 
+        // Create skipped indicator GC (Red)
+        let skipped_indicator_gc = conn
+            .generate_id()
+            .context("Failed to generate ID for skipped indicator GC")?;
+        conn.create_gc(
+            skipped_indicator_gc,
+            overlay_pixmap,
+            &CreateGCAux::new()
+                .foreground(0xFFFF0000) // Opaque Red
+                .line_width(3), // Thicker lines for visibility
+        )
+        .context(format!(
+            "Failed to create skipped indicator GC for '{}'",
+            character_name
+        ))?;
+
         // Create active border fill
         let active_border_fill = conn
             .generate_id()
@@ -131,6 +148,7 @@ impl<'a> OverlayRenderer<'a> {
             overlay_gc,
             active_border_fill,
             inactive_border_fill,
+            skipped_indicator_gc,
             conn,
             config,
             formats,
@@ -139,6 +157,13 @@ impl<'a> OverlayRenderer<'a> {
 
         // Render initial name
         let initial_border_size = renderer.calculate_border_size(character_name, false);
+        renderer
+            .clear_content_area(dimensions, initial_border_size)
+            .context(format!(
+                "Failed to clear content area for initial render of '{}'",
+                character_name
+            ))?;
+
         renderer
             .update_name(character_name, dimensions, initial_border_size)
             .context(format!(
@@ -174,6 +199,35 @@ impl<'a> OverlayRenderer<'a> {
         Ok(())
     }
 
+    // ... (calculate_border_size, update_name unchanged)
+
+    /// Draws the skipped indicator (diagonal red lines)
+    pub fn draw_skipped_indicator(&self, dimensions: Dimensions) -> Result<()> {
+        let w = dimensions.width as i16;
+        let h = dimensions.height as i16;
+
+        let segments = [
+            x11rb::protocol::xproto::Segment {
+                x1: 0,
+                y1: 0,
+                x2: w,
+                y2: h,
+            },
+            x11rb::protocol::xproto::Segment {
+                x1: w,
+                y1: 0,
+                x2: 0,
+                y2: h,
+            },
+        ];
+
+        self.conn
+            .poly_segment(self.overlay_pixmap, self.skipped_indicator_gc, &segments)
+            .context("Failed to draw skipped indicator segments")?;
+
+        Ok(())
+    }
+
     /// Calculates the effective border size implementation
     pub fn calculate_border_size(&self, character_name: &str, focused: bool) -> u16 {
         if let Some(settings) = self.config.character_settings.get(character_name) {
@@ -193,14 +247,36 @@ impl<'a> OverlayRenderer<'a> {
         }
     }
 
+    /// Clears the center content area (inside the border).
+    pub fn clear_content_area(&self, dimensions: Dimensions, border_size: u16) -> Result<()> {
+        self.conn
+            .render_composite(
+                PictOp::CLEAR,
+                self.overlay_picture,
+                0u32,
+                self.overlay_picture,
+                0,
+                0,
+                0,
+                0,
+                border_size as i16,
+                border_size as i16,
+                dimensions.width.saturating_sub(border_size * 2),
+                dimensions.height.saturating_sub(border_size * 2),
+            )
+            .context("Failed to clear content area")?;
+        Ok(())
+    }
+
     /// Renders the character name onto the overlay.
     ///
     /// Handles both direct X11 text rendering (if core fonts are used) and
     /// client-side rendering (if TrueType fonts are used via `fontdue`).
+    /// NOTE: This does NOT clear the background. You must call `clear_content_area` first.
     pub fn update_name(
         &self,
         character_name: &str,
-        dimensions: Dimensions,
+        _dimensions: Dimensions,
         border_size: u16,
     ) -> Result<()> {
         // Resolve settings overrides
@@ -218,27 +294,6 @@ impl<'a> OverlayRenderer<'a> {
             } else {
                 (character_name, self.config.text_color)
             };
-
-        // Clear the overlay area (inside border)
-        self.conn
-            .render_composite(
-                PictOp::CLEAR,
-                self.overlay_picture,
-                0u32,
-                self.overlay_picture,
-                0,
-                0,
-                0,
-                0,
-                border_size as i16,
-                border_size as i16,
-                dimensions.width.saturating_sub(border_size * 2),
-                dimensions.height.saturating_sub(border_size * 2),
-            )
-            .context(format!(
-                "Failed to clear overlay area for '{}'",
-                character_name
-            ))?;
 
         // Render text based on font renderer type
         if self.font_renderer.requires_direct_rendering() {
@@ -387,6 +442,7 @@ impl<'a> OverlayRenderer<'a> {
         character_name: &str,
         dimensions: Dimensions,
         focused: bool,
+        skipped: bool,
     ) -> Result<()> {
         // Determine border settings (color, fill picture, and size)
 
@@ -524,6 +580,16 @@ impl<'a> OverlayRenderer<'a> {
             self.conn.render_free_picture(pid)?;
         }
 
+        // Clear content area to prepare for text/indicators
+        self.clear_content_area(dimensions, effective_size)
+            .context("Failed to clear content area in draw_border")?;
+
+        // Draw skipped indicator if needed
+        // Drawn BEFORE text so text appears on top, but AFTER clear so lines persist
+        if skipped {
+            self.draw_skipped_indicator(dimensions)?;
+        }
+
         // After drawing the border background (or clearing it), we must redraw the text hole and text
         self.update_name(character_name, dimensions, effective_size)
             .context(format!(
@@ -536,7 +602,7 @@ impl<'a> OverlayRenderer<'a> {
 
     /// Draws the "MINIMIZED" state overlay.
     pub fn draw_minimized(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
-        self.draw_border(character_name, dimensions, false)
+        self.draw_border(character_name, dimensions, false, false)
             .context(format!(
                 "Failed to clear border for minimized window '{}'",
                 character_name
@@ -586,6 +652,10 @@ impl Drop for OverlayRenderer<'_> {
 
         if let Err(e) = self.conn.free_gc(self.overlay_gc) {
             error!(gc = self.overlay_gc, error = %e, "Failed to free GC");
+        }
+
+        if let Err(e) = self.conn.free_gc(self.skipped_indicator_gc) {
+            error!(gc = self.skipped_indicator_gc, error = %e, "Failed to free skipped indicator GC");
         }
 
         if let Err(e) = self.conn.render_free_picture(self.active_border_fill) {

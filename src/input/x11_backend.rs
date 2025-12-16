@@ -22,7 +22,7 @@ use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
 use crate::config::HotkeyBinding;
-use crate::input::backend::{BackendCapabilities, HotkeyBackend};
+use crate::input::backend::{BackendCapabilities, HotkeyBackend, HotkeyConfiguration};
 use crate::input::listener::CycleCommand;
 
 pub struct X11Backend;
@@ -30,38 +30,30 @@ pub struct X11Backend;
 impl HotkeyBackend for X11Backend {
     fn spawn(
         sender: Sender<CycleCommand>,
-        forward_key: Option<HotkeyBinding>,
-        backward_key: Option<HotkeyBinding>,
-        character_hotkeys: Vec<HotkeyBinding>,
-        profile_hotkeys: Vec<HotkeyBinding>,
+        config: HotkeyConfiguration,
         _device_id: Option<String>, // Not used by X11 backend
         require_eve_focus: bool,
     ) -> Result<Vec<JoinHandle<()>>> {
         // Check if we have any hotkeys to register
-        let has_cycle = forward_key.is_some() && backward_key.is_some();
-        let has_character = !character_hotkeys.is_empty();
-        let has_profile = !profile_hotkeys.is_empty();
+        let has_cycle = config.forward_key.is_some() && config.backward_key.is_some();
+        let has_character = !config.character_hotkeys.is_empty();
+        let has_profile = !config.profile_hotkeys.is_empty();
+        let has_skip = config.toggle_skip_key.is_some();
 
-        if !has_cycle && !has_character && !has_profile {
+        if !has_cycle && !has_character && !has_profile && !has_skip {
             info!("No hotkeys configured - X11 listener will not be started");
             return Ok(Vec::new());
         }
 
         info!(
             has_cycle_keys = has_cycle,
-            character_hotkey_count = character_hotkeys.len(),
+            has_skip_key = has_skip,
+            character_hotkey_count = config.character_hotkeys.len(),
             "Starting X11 hotkey listener"
         );
 
         let handle = thread::spawn(move || {
-            if let Err(e) = run_x11_listener(
-                sender,
-                forward_key,
-                backward_key,
-                character_hotkeys,
-                profile_hotkeys,
-                require_eve_focus,
-            ) {
+            if let Err(e) = run_x11_listener(sender, config, require_eve_focus) {
                 error!(error = %e, "X11 hotkey listener error");
             }
         });
@@ -92,10 +84,7 @@ impl HotkeyBackend for X11Backend {
 #[allow(unsafe_code)] // Required for libc::poll() system call
 fn run_x11_listener(
     sender: Sender<CycleCommand>,
-    forward_key: Option<HotkeyBinding>,
-    backward_key: Option<HotkeyBinding>,
-    character_hotkeys: Vec<HotkeyBinding>,
-    profile_hotkeys: Vec<HotkeyBinding>,
+    config: HotkeyConfiguration,
     require_eve_focus: bool,
 ) -> Result<()> {
     // Connect to X11
@@ -111,7 +100,7 @@ fn run_x11_listener(
     let mut hotkey_map: HashMap<(Keycode, ModMask), CycleCommand> = HashMap::new();
 
     // Register cycle hotkeys
-    if let Some(ref fwd) = forward_key {
+    if let Some(ref fwd) = config.forward_key {
         if let Some((keycode, modmask)) = evdev_to_x11_key(fwd) {
             register_hotkey(&conn, root, keycode, modmask)?;
             hotkey_map.insert((keycode, modmask), CycleCommand::Forward);
@@ -126,7 +115,7 @@ fn run_x11_listener(
         }
     }
 
-    if let Some(ref bwd) = backward_key {
+    if let Some(ref bwd) = config.backward_key {
         if let Some((keycode, modmask)) = evdev_to_x11_key(bwd) {
             register_hotkey(&conn, root, keycode, modmask)?;
             hotkey_map.insert((keycode, modmask), CycleCommand::Backward);
@@ -141,8 +130,24 @@ fn run_x11_listener(
         }
     }
 
+    // Register toggle skip hotkey
+    if let Some(ref skip_key) = config.toggle_skip_key {
+        if let Some((keycode, modmask)) = evdev_to_x11_key(skip_key) {
+            register_hotkey(&conn, root, keycode, modmask)?;
+            hotkey_map.insert((keycode, modmask), CycleCommand::ToggleSkip);
+            info!(
+                binding = %skip_key.display_name(),
+                x11_keycode = keycode,
+                modmask = ?modmask,
+                "Registered toggle skip hotkey"
+            );
+        } else {
+            warn!(binding = %skip_key.display_name(), "Failed to map toggle skip key to X11");
+        }
+    }
+
     // Register character hotkeys
-    let character_hotkeys = Arc::new(character_hotkeys);
+    let character_hotkeys = Arc::new(config.character_hotkeys);
     for char_hotkey in character_hotkeys.iter() {
         if let Some((keycode, modmask)) = evdev_to_x11_key(char_hotkey) {
             register_hotkey(&conn, root, keycode, modmask)?;
@@ -162,7 +167,7 @@ fn run_x11_listener(
     }
 
     // Register profile hotkeys
-    let profile_hotkeys = Arc::new(profile_hotkeys);
+    let profile_hotkeys = Arc::new(config.profile_hotkeys);
     for profile_hotkey in profile_hotkeys.iter() {
         if let Some((keycode, modmask)) = evdev_to_x11_key(profile_hotkey) {
             register_hotkey(&conn, root, keycode, modmask)?;

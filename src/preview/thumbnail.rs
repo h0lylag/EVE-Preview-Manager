@@ -177,9 +177,9 @@ impl<'a> Thumbnail<'a> {
     }
 
     /// Updates the thumbnail border based on focus state.
-    pub fn border(&self, focused: bool) -> Result<()> {
+    pub fn border(&self, focused: bool, skipped: bool) -> Result<()> {
         self.renderer
-            .border(&self.character_name, self.dimensions, focused)
+            .border(&self.character_name, self.dimensions, focused, skipped)
     }
 
     /// Sets the thumbnail to "Minimized" state and renders the localized overlay.

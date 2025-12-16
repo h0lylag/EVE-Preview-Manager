@@ -442,14 +442,16 @@ impl<'a> ThumbnailRenderer<'a> {
     ///
     /// # Arguments
     /// * `focused` - If true, draws the border. If false, clears the border area.
+    /// * `skipped` - If true, draws the skipped indicator (diagonal red lines).
     pub fn border(
         &self,
         character_name: &str,
         dimensions: Dimensions,
         focused: bool,
+        skipped: bool,
     ) -> Result<()> {
         self.overlay
-            .draw_border(character_name, dimensions, focused)
+            .draw_border(character_name, dimensions, focused, skipped)
     }
 
     /// Renders the "MINIMIZED" state overlay.
@@ -470,6 +472,15 @@ impl<'a> ThumbnailRenderer<'a> {
         // We default to focused=false since this is usually called during initialization or generic updates
         // However, if we are focused, the next border() call will correct it.
         let border_size = self.overlay.calculate_border_size(character_name, false);
+
+        // Must clear content area explicitly now
+        self.overlay
+            .clear_content_area(dimensions, border_size)
+            .context(format!(
+                "Failed to clear content area for '{}'",
+                character_name
+            ))?;
+
         self.overlay
             .update_name(character_name, dimensions, border_size)
     }

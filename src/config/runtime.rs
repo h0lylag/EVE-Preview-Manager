@@ -376,6 +376,7 @@ mod tests {
                 thumbnail_enabled: true,
                 character_thumbnails: HashMap::new(),
                 hotkey_profile_switch: None,
+                hotkey_toggle_skip: None,
             },
             character_thumbnails: HashMap::new(),
             profile_hotkeys: HashMap::new(),

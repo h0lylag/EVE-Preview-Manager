@@ -19,9 +19,9 @@ use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
 
-use crate::config::HotkeyBinding;
+// use crate::config::HotkeyBinding; // Unused
 use crate::constants::{input, paths, permissions};
-use crate::input::backend::{BackendCapabilities, HotkeyBackend};
+use crate::input::backend::{BackendCapabilities, HotkeyBackend, HotkeyConfiguration};
 use crate::input::device_detection;
 use crate::input::listener::CycleCommand;
 
@@ -30,22 +30,11 @@ pub struct EvdevBackend;
 impl HotkeyBackend for EvdevBackend {
     fn spawn(
         sender: Sender<CycleCommand>,
-        forward_key: Option<HotkeyBinding>,
-        backward_key: Option<HotkeyBinding>,
-        character_hotkeys: Vec<HotkeyBinding>,
-        profile_hotkeys: Vec<HotkeyBinding>,
+        config: HotkeyConfiguration,
         selected_device_id: Option<String>,
         require_eve_focus: bool,
     ) -> Result<Vec<JoinHandle<()>>> {
-        spawn_listener_impl(
-            sender,
-            forward_key,
-            backward_key,
-            character_hotkeys,
-            profile_hotkeys,
-            selected_device_id,
-            require_eve_focus,
-        )
+        spawn_listener_impl(sender, config, selected_device_id, require_eve_focus)
     }
 
     fn is_available() -> bool {
@@ -73,10 +62,7 @@ impl HotkeyBackend for EvdevBackend {
 /// Initializes and manages background threads for low-latency input event monitoring across multiple devices
 fn spawn_listener_impl(
     sender: tokio::sync::mpsc::Sender<CycleCommand>,
-    forward_key: Option<HotkeyBinding>,
-    backward_key: Option<HotkeyBinding>,
-    character_hotkeys: Vec<HotkeyBinding>,
-    profile_hotkeys: Vec<HotkeyBinding>,
+    config: HotkeyConfiguration,
     selected_device_id: Option<String>,
     _require_eve_focus: bool, // Not currently implemented for evdev backend
 ) -> Result<Vec<thread::JoinHandle<()>>> {
@@ -107,17 +93,20 @@ fn spawn_listener_impl(
             info!("Auto-detect mode: using devices from hotkey bindings");
 
             let mut required_devices = std::collections::HashSet::new();
-            if let Some(ref fwd) = forward_key {
+            if let Some(ref fwd) = config.forward_key {
                 required_devices.extend(fwd.source_devices.iter().cloned());
             }
-            if let Some(ref bwd) = backward_key {
+            if let Some(ref bwd) = config.backward_key {
                 required_devices.extend(bwd.source_devices.iter().cloned());
             }
-            for binding in &character_hotkeys {
+            for binding in &config.character_hotkeys {
                 required_devices.extend(binding.source_devices.iter().cloned());
             }
-            for binding in &profile_hotkeys {
+            for binding in &config.profile_hotkeys {
                 required_devices.extend(binding.source_devices.iter().cloned());
+            }
+            if let Some(ref skip) = config.toggle_skip_key {
+                required_devices.extend(skip.source_devices.iter().cloned());
             }
 
             if required_devices.is_empty() {
@@ -177,22 +166,20 @@ fn spawn_listener_impl(
     // Share all device paths so each listener can query modifier state from all devices
     let all_device_paths = Arc::new(all_device_paths);
 
-    let cycle_configured = forward_key.is_some() && backward_key.is_some();
-    let has_character_hotkeys = !character_hotkeys.is_empty();
+    let cycle_configured = config.forward_key.is_some() && config.backward_key.is_some();
+    let has_character_hotkeys = !config.character_hotkeys.is_empty();
+    let has_profile_hotkeys = !config.profile_hotkeys.is_empty();
+    let has_skip_key = config.toggle_skip_key.is_some();
 
-    if cycle_configured {
+    if cycle_configured || has_character_hotkeys || has_profile_hotkeys || has_skip_key {
         info!(
-            forward = %forward_key.as_ref().unwrap().display_name(),
-            backward = %backward_key.as_ref().unwrap().display_name(),
-            character_hotkey_count = character_hotkeys.len(),
+            forward = %config.forward_key.as_ref().map_or("None".to_string(), |k| k.display_name()),
+            backward = %config.backward_key.as_ref().map_or("None".to_string(), |k| k.display_name()),
+            character_hotkey_count = config.character_hotkeys.len(),
+            profile_hotkey_count = config.profile_hotkeys.len(),
+            has_skip_key = has_skip_key,
             device_count = devices.len(),
-            "Starting hotkey listeners with cycle and per-character bindings"
-        );
-    } else if has_character_hotkeys {
-        info!(
-            character_hotkey_count = character_hotkeys.len(),
-            device_count = devices.len(),
-            "Starting hotkey listeners with per-character bindings only"
+            "Starting hotkey listeners"
         );
     } else {
         warn!("No hotkeys configured - hotkey listener will not be started");
@@ -201,23 +188,12 @@ fn spawn_listener_impl(
 
     for (device, device_path) in devices {
         let sender = sender.clone();
-        let forward_key = forward_key.clone();
-        let backward_key = backward_key.clone();
-        let character_hotkeys = character_hotkeys.clone();
-        let profile_hotkeys = profile_hotkeys.clone();
+        let config = config.clone();
         let all_device_paths = Arc::clone(&all_device_paths);
 
         let handle = thread::spawn(move || {
             info!(device = ?device.name(), path = %device_path.display(), "Hotkey listener started");
-            if let Err(e) = listen_for_hotkeys(
-                device,
-                sender,
-                forward_key,
-                backward_key,
-                character_hotkeys,
-                profile_hotkeys,
-                all_device_paths,
-            ) {
+            if let Err(e) = listen_for_hotkeys(device, sender, config, all_device_paths) {
                 error!(error = %e, "Hotkey listener error");
             }
         });
@@ -231,10 +207,7 @@ fn spawn_listener_impl(
 fn listen_for_hotkeys(
     mut device: Device,
     sender: Sender<CycleCommand>,
-    forward_key: Option<HotkeyBinding>,
-    backward_key: Option<HotkeyBinding>,
-    character_hotkeys: Vec<HotkeyBinding>,
-    profile_hotkeys: Vec<HotkeyBinding>,
+    config: HotkeyConfiguration,
     all_device_paths: Arc<Vec<std::path::PathBuf>>,
 ) -> Result<()> {
     loop {
@@ -255,16 +228,28 @@ fn listen_for_hotkeys(
 
             // Collect non-modifier key presses that might be hotkeys
             if pressed {
-                let is_cycle_key = forward_key
+                let is_cycle_key = config
+                    .forward_key
                     .as_ref()
                     .is_some_and(|fwd| fwd.key_code == key_code)
-                    || backward_key
+                    || config
+                        .backward_key
                         .as_ref()
                         .is_some_and(|bwd| bwd.key_code == key_code);
-                let is_character_key = character_hotkeys.iter().any(|hk| hk.key_code == key_code);
-                let is_profile_key = profile_hotkeys.iter().any(|hk| hk.key_code == key_code);
+                let is_character_key = config
+                    .character_hotkeys
+                    .iter()
+                    .any(|hk| hk.key_code == key_code);
+                let is_profile_key = config
+                    .profile_hotkeys
+                    .iter()
+                    .any(|hk| hk.key_code == key_code);
+                let is_skip_key = config
+                    .toggle_skip_key
+                    .as_ref()
+                    .is_some_and(|k| k.key_code == key_code);
 
-                if is_cycle_key || is_character_key || is_profile_key {
+                if is_cycle_key || is_character_key || is_profile_key || is_skip_key {
                     potential_hotkey_presses.push(key_code);
                 }
             }
@@ -297,7 +282,7 @@ fn listen_for_hotkeys(
             // Check cycle hotkeys first (Forward/Backward take priority)
             let mut handled = false;
 
-            if let Some(ref fwd) = forward_key
+            if let Some(ref fwd) = config.forward_key
                 && fwd.matches(
                     key_code,
                     ctrl_pressed,
@@ -317,7 +302,7 @@ fn listen_for_hotkeys(
             }
 
             if !handled
-                && let Some(ref bwd) = backward_key
+                && let Some(ref bwd) = config.backward_key
                 && bwd.matches(
                     key_code,
                     ctrl_pressed,
@@ -336,9 +321,29 @@ fn listen_for_hotkeys(
                 handled = true;
             }
 
+            if !handled
+                && let Some(ref skip_key) = config.toggle_skip_key
+                && skip_key.matches(
+                    key_code,
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    super_pressed,
+                )
+            {
+                info!(
+                    binding = %skip_key.display_name(),
+                    "Toggle skip hotkey pressed, sending command"
+                );
+                sender
+                    .blocking_send(CycleCommand::ToggleSkip)
+                    .context("Failed to send toggle skip command")?;
+                handled = true;
+            }
+
             if !handled {
                 // Check per-character hotkeys
-                for char_hotkey in &character_hotkeys {
+                for char_hotkey in &config.character_hotkeys {
                     if char_hotkey.matches(
                         key_code,
                         ctrl_pressed,
@@ -360,7 +365,7 @@ fn listen_for_hotkeys(
 
             if !handled {
                 // Check profile hotkeys
-                for profile_hotkey in &profile_hotkeys {
+                for profile_hotkey in &config.profile_hotkeys {
                     if profile_hotkey.matches(
                         key_code,
                         ctrl_pressed,

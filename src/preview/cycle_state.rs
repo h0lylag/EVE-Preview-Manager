@@ -3,7 +3,7 @@
 //! Tracks active EVE windows and their cycle order for hotkey-based navigation.
 //! Only characters listed in the profile's cycle_group are included in cycling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 use x11rb::protocol::xproto::Window;
 
@@ -18,6 +18,9 @@ pub struct CycleState {
     /// Active windows: character_name → window_id
     /// Only includes characters that currently have windows
     active_windows: HashMap<String, Window>,
+
+    /// Characters temporarily skipped from cycling
+    skipped_characters: HashSet<String>,
 }
 
 impl CycleState {
@@ -26,6 +29,7 @@ impl CycleState {
             config_order,
             current_index: 0,
             active_windows: HashMap::new(),
+            skipped_characters: HashSet::new(),
         }
     }
 
@@ -71,6 +75,25 @@ impl CycleState {
         self.add_window(new_name, window);
     }
 
+    /// Toggle skip status for a character
+    /// Returns new skipped state (true = skipped, false = active)
+    pub fn toggle_skip(&mut self, character_name: &str) -> bool {
+        if self.skipped_characters.contains(character_name) {
+            debug!(character = %character_name, "Unskipping character");
+            self.skipped_characters.remove(character_name);
+            false
+        } else {
+            debug!(character = %character_name, "Skipping character");
+            self.skipped_characters.insert(character_name.to_string());
+            true
+        }
+    }
+
+    /// Check if a character is currently skipped
+    pub fn is_skipped(&self, character_name: &str) -> bool {
+        self.skipped_characters.contains(character_name)
+    }
+
     /// Move to next character in config order (forward cycle hotkey)
     /// Returns (window, character_name) to activate, or None if no active characters
     /// Only cycles through characters in the configured cycle_group list
@@ -103,6 +126,16 @@ impl CycleState {
 
             let character_name = &self.config_order[self.current_index];
 
+            // Skip characters marked as skipped
+            if self.skipped_characters.contains(character_name) {
+                // Check termination condition (wrapped around to start)
+                if self.current_index == start_index {
+                    warn!("All active characters are skipped");
+                    return None;
+                }
+                continue;
+            }
+
             // Check logged-in characters first
             if let Some(&window) = self.active_windows.get(character_name) {
                 debug!(character = %character_name, index = self.current_index, "Cycling forward to logged-in character");
@@ -121,11 +154,8 @@ impl CycleState {
 
             // Wrapped around without finding active or logged-out character
             if self.current_index == start_index {
-                warn!(
-                    config_order_len = self.config_order.len(),
-                    active_windows = self.active_windows.len(),
-                    "No active characters found in config order (configured characters may not be running)"
-                );
+                // If we get here, it means we scanned everything unskipped but found nothing active
+                // (Warning already logged in normal logic flow or implicitly handled)
                 return None;
             }
         }
@@ -167,6 +197,16 @@ impl CycleState {
 
             let character_name = &self.config_order[self.current_index];
 
+            // Skip characters marked as skipped
+            if self.skipped_characters.contains(character_name) {
+                // Check termination condition (wrapped around to start)
+                if self.current_index == start_index {
+                    warn!("All active characters are skipped");
+                    return None;
+                }
+                continue;
+            }
+
             // Check logged-in characters first
             if let Some(&window) = self.active_windows.get(character_name) {
                 debug!(character = %character_name, index = self.current_index, "Cycling backward to logged-in character");
@@ -185,11 +225,6 @@ impl CycleState {
 
             // Wrapped around without finding active or logged-out character
             if self.current_index == start_index {
-                warn!(
-                    config_order_len = self.config_order.len(),
-                    active_windows = self.active_windows.len(),
-                    "No active characters found in config order (configured characters may not be running)"
-                );
                 return None;
             }
         }
@@ -308,6 +343,11 @@ impl CycleState {
 
         // 4. Search forward: find the first available character in the group after the current position
         for (idx, name) in &group_indices {
+            // Respect skipped status
+            if self.skipped_characters.contains(*name) {
+                continue;
+            }
+
             if *idx > current_pos
                 && let Some((window, _)) = self.activate_character(name, logged_out_map)
             {
@@ -320,6 +360,11 @@ impl CycleState {
         // Since we filtered internally and sorted, the first available character
         // in the group will be the correct wrap-around target.
         for (_, name) in &group_indices {
+            // Respect skipped status
+            if self.skipped_characters.contains(*name) {
+                continue;
+            }
+
             if let Some((window, _)) = self.activate_character(name, logged_out_map) {
                 debug!(character = %name, "Activated next in group (wrapped)");
                 return Some((window, name.to_string()));

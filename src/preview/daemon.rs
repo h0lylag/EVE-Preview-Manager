@@ -169,21 +169,31 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
         && daemon_config.profile.hotkey_cycle_backward.is_some();
     let has_character_hotkeys = !character_hotkeys.is_empty();
     let has_profile_hotkeys = !profile_hotkeys.is_empty();
+    let has_skip_key = daemon_config.profile.hotkey_toggle_skip.is_some();
 
-    let hotkey_handle = if has_cycle_keys || has_character_hotkeys || has_profile_hotkeys {
+    let hotkey_handle = if has_cycle_keys
+        || has_character_hotkeys
+        || has_profile_hotkeys
+        || has_skip_key
+    {
         // Select backend based on configuration
         use crate::config::HotkeyBackendType;
-        use crate::input::backend::HotkeyBackend;
+        use crate::input::backend::{HotkeyBackend, HotkeyConfiguration};
+
+        let hotkey_config = HotkeyConfiguration {
+            forward_key: daemon_config.profile.hotkey_cycle_forward.clone(),
+            backward_key: daemon_config.profile.hotkey_cycle_backward.clone(),
+            character_hotkeys: character_hotkeys.clone(),
+            profile_hotkeys: profile_hotkeys.clone(),
+            toggle_skip_key: daemon_config.profile.hotkey_toggle_skip.clone(),
+        };
 
         match daemon_config.profile.hotkey_backend {
             HotkeyBackendType::X11 => {
                 info!("Using X11 hotkey backend (secure, no permissions required)");
                 match crate::input::x11_backend::X11Backend::spawn(
                     hotkey_tx,
-                    daemon_config.profile.hotkey_cycle_forward.clone(),
-                    daemon_config.profile.hotkey_cycle_backward.clone(),
-                    character_hotkeys.clone(),
-                    profile_hotkeys.clone(),
+                    hotkey_config,
                     daemon_config.profile.hotkey_input_device.clone(),
                     daemon_config.profile.hotkey_require_eve_focus,
                 ) {
@@ -192,10 +202,9 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                             enabled = true,
                             backend = "x11",
                             has_cycle_keys = has_cycle_keys,
-                            backend = "x11",
-                            has_cycle_keys = has_cycle_keys,
                             has_character_hotkeys = has_character_hotkeys,
                             has_profile_hotkeys = has_profile_hotkeys,
+                            has_skip_key = has_skip_key,
                             "Hotkey support enabled"
                         );
                         Some(handle)
@@ -214,10 +223,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                 } else {
                     match crate::input::evdev_backend::EvdevBackend::spawn(
                         hotkey_tx,
-                        daemon_config.profile.hotkey_cycle_forward.clone(),
-                        daemon_config.profile.hotkey_cycle_backward.clone(),
-                        character_hotkeys.clone(),
-                        profile_hotkeys.clone(),
+                        hotkey_config,
                         daemon_config.profile.hotkey_input_device.clone(),
                         daemon_config.profile.hotkey_require_eve_focus,
                     ) {
@@ -226,10 +232,9 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                                 enabled = true,
                                 backend = "evdev",
                                 has_cycle_keys = has_cycle_keys,
-                                backend = "evdev",
-                                has_cycle_keys = has_cycle_keys,
                                 has_character_hotkeys = has_character_hotkeys,
                                 has_profile_hotkeys = has_profile_hotkeys,
+                                has_skip_key = has_skip_key,
                                 "Hotkey support enabled"
                             );
                             Some(handle)
@@ -398,6 +403,32 @@ async fn run_event_loop(
                              }
                              None
                         }
+                        CycleCommand::ToggleSkip => {
+                            // Identify focused window to determine which character to skip
+                            let active_window = crate::x11::get_active_eve_window(ctx.conn, ctx.screen, ctx.atoms)
+                                .ok()
+                                .flatten();
+
+                            if let Some(window) = active_window {
+                                if let Some(thumbnail) = resources.eve_clients.get_mut(&window) {
+                                    let char_name = thumbnail.character_name.clone();
+                                    let is_skipped = resources.cycle.toggle_skip(&char_name);
+                                    info!(character = %char_name, skipped = is_skipped, "Toggled skip status");
+
+                                    // Force redraw of border to show/hide indicator
+                                    // Use current focused state from thumbnail (should be true if active)
+                                    let focused = thumbnail.state.is_focused();
+                                    if let Err(e) = thumbnail.border(focused, is_skipped) {
+                                         warn!(character = %char_name, error = %e, "Failed to update border after toggle skip");
+                                    }
+                                } else {
+                                    warn!("Focused EVE window not found in client list");
+                                }
+                            } else {
+                                warn!("Cannot toggle skip: No EVE window focused");
+                            }
+                            None
+                        }
                     };
 
                     if let Some((window, character_name)) = result {
@@ -536,7 +567,10 @@ pub async fn run_preview_daemon() -> Result<()> {
         thumbnail.state = crate::types::ThumbnailState::Normal {
             focused: is_focused,
         };
-        if let Err(e) = thumbnail.border(is_focused) {
+        if let Err(e) = thumbnail.border(
+            is_focused,
+            cycle_state.is_skipped(&thumbnail.character_name),
+        ) {
             // Log warning but continue
             tracing::warn!(
                 window = window,

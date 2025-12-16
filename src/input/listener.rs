@@ -17,6 +17,8 @@ pub enum CycleCommand {
     CharacterHotkey(HotkeyBinding),
     /// Triggered when a profile switch hotkey is pressed
     ProfileHotkey(HotkeyBinding),
+    /// Triggered when the toggle skip hotkey is pressed
+    ToggleSkip,
 }
 
 /// Print helpful error message if evdev permissions are missing
