@@ -277,7 +277,7 @@ impl<'a> OverlayRenderer<'a> {
         &self,
         character_name: &str,
         _dimensions: Dimensions,
-        border_size: u16,
+        _border_size: u16,
     ) -> Result<()> {
         // Resolve settings overrides
         let (display_name, text_color) =
@@ -324,9 +324,8 @@ impl<'a> OverlayRenderer<'a> {
                     .image_text8(
                         self.overlay_pixmap,
                         gc,
-                        self.config.text_offset.x + border_size as i16,
+                        self.config.text_offset.x,
                         self.config.text_offset.y
-                            + border_size as i16
                             + self.font_renderer.size() as i16, // Baseline adjustment
                         display_name.as_bytes(),
                     )
@@ -413,8 +412,8 @@ impl<'a> OverlayRenderer<'a> {
                         0,
                         0,
                         0,
-                        self.config.text_offset.x + border_size as i16,
-                        self.config.text_offset.y + border_size as i16,
+                        self.config.text_offset.x,
+                        self.config.text_offset.y,
                         rendered.width as u16,
                         rendered.height as u16,
                     )
