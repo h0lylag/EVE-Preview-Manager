@@ -264,6 +264,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     if ui.button("⌨ Bind").clicked() {
                         state.start_key_capture(CaptureTarget::Forward, profile.hotkey_backend);
                     }
+                    if profile.hotkey_cycle_forward.is_some() && ui.small_button("✖").on_hover_text("Clear binding").clicked() {
+                        profile.hotkey_cycle_forward = None;
+                        changed = true;
+                    }
                 });
 
                 ui.add_space(ITEM_SPACING / 2.0);
@@ -282,6 +286,10 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     ui.label(egui::RichText::new(binding_text).strong().color(color));
                     if ui.button("⌨ Bind").clicked() {
                         state.start_key_capture(CaptureTarget::Backward, profile.hotkey_backend);
+                    }
+                    if profile.hotkey_cycle_backward.is_some() && ui.small_button("✖").on_hover_text("Clear binding").clicked() {
+                        profile.hotkey_cycle_backward = None;
+                        changed = true;
                     }
                 });
 
@@ -308,7 +316,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
         // --- Column 2: Profile Settings ---
         columns[1].group(|ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(egui::RichText::new("Profile Activation").strong());
+            ui.label(egui::RichText::new("Other Hotkeys").strong());
             ui.add_space(ITEM_SPACING);
 
             // For X11 backend, device selection is not applicable (duplicated logic for right column enabled state)
@@ -338,7 +346,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                         state.start_key_capture(CaptureTarget::Profile, profile.hotkey_backend);
                     }
 
-                     if profile.hotkey_profile_switch.is_some() && ui.small_button("Clear").clicked() {
+                     if profile.hotkey_profile_switch.is_some() && ui.small_button("✖").on_hover_text("Clear binding").clicked() {
                         profile.hotkey_profile_switch = None;
                         changed = true;
                     }
