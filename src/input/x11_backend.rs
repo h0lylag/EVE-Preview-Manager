@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc::Sender;
@@ -85,6 +86,7 @@ impl HotkeyBackend for X11Backend {
 }
 
 /// Main X11 listener loop
+#[allow(unsafe_code)] // Required for libc::poll() system call
 fn run_x11_listener(
     sender: Sender<CycleCommand>,
     forward_key: Option<HotkeyBinding>,
@@ -166,27 +168,111 @@ fn run_x11_listener(
     let mut hotkeys_grabbed = true;
     let mut last_focused_window: Option<Window> = None;
 
-    // Event loop with periodic focus checking
+    // Get the raw file descriptor for poll()-based blocking
+    let x11_fd = conn.stream().as_raw_fd();
+
+    // Event loop - block on X11 fd with timeout for focus checking
     loop {
-        // Poll for events with a small timeout to allow periodic focus checking
-        let event = conn.poll_for_event()?;
-        
-        if event.is_none() {
-            // No event available, sleep briefly and check focus
-            // 500ms is plenty fast for human interaction while minimizing CPU overhead
-            std::thread::sleep(std::time::Duration::from_millis(500));
+        // Use poll() to block with 250ms timeout
+        // This gives us:
+        // - Zero CPU usage when idle (thread sleeps in kernel)
+        // - Instant event response (wakes immediately when event arrives)
+        // - Periodic focus checking (every 250ms on timeout)
+        let mut poll_fds = [libc::pollfd {
+            fd: x11_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+
+        let poll_result = unsafe { libc::poll(poll_fds.as_mut_ptr(), 1, 250) };
+
+        if poll_result < 0 {
+            return Err(anyhow::anyhow!("poll() failed"));
         }
 
-        // Check focus changes and dynamically ungrab/regrab hotkeys
+        // Check if X11 events are available
+        if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
+            // Process all available events (may be multiple)
+            while let Some(event) = conn.poll_for_event()? {
+                match event {
+                    Event::KeyPress(key_event) => {
+                        // If hotkeys are not grabbed, this event shouldn't reach us
+                        // But handle it anyway for robustness
+                        if !hotkeys_grabbed {
+                            conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                            conn.flush()?;
+                            continue;
+                        }
+
+                        // Hotkeys are grabbed, process normally
+                        // Check if we need EVE focus
+                        if require_eve_focus {
+                            let focus_cookie = conn.get_input_focus()?;
+                            let focused_window = focus_cookie.reply()?.focus;
+                            let title =
+                                get_window_title_sync(&conn, focused_window).unwrap_or_default();
+                            let is_eve = title.starts_with(crate::constants::eve::WINDOW_TITLE_PREFIX)
+                                || title == crate::constants::eve::LOGGED_OUT_TITLE;
+
+                            if !is_eve {
+                                debug!(title = %title, "EVE focus required but not focused, replaying");
+                                conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                                conn.flush()?;
+                                continue;
+                            }
+                        }
+
+                        // If we got here, we consume the event.
+                        info!(keycode = key_event.detail, "Consuming hotkey event");
+                        conn.allow_events(Allow::ASYNC_KEYBOARD, key_event.time)?;
+                        conn.flush()?;
+
+                        // Normalize modifiers (remove NumLock, CapsLock, etc.)
+                        let modmask = normalize_modmask(key_event.state);
+
+                        // Look up the hotkey
+                        if let Some(command) = hotkey_map.get(&(key_event.detail, modmask)) {
+                            info!(
+                                keycode = key_event.detail,
+                                modmask = ?modmask,
+                                command = ?command,
+                                "Hotkey pressed, sending command"
+                            );
+
+                            if let Err(e) = sender.blocking_send(command.clone()) {
+                                error!(error = %e, "Failed to send hotkey command");
+                            }
+                        } else {
+                            debug!(
+                                keycode = key_event.detail,
+                                modmask = ?modmask,
+                                "KeyPress event didn't match any registered hotkey"
+                            );
+                        }
+                    }
+                    Event::MappingNotify(_) => {
+                        // Keyboard mapping changed, we should re-register hotkeys
+                        // For now, just log it - full implementation would rebuild the map
+                        warn!("Keyboard mapping changed - hotkeys may not work correctly until restart");
+                    }
+                    _ => {
+                        // Ignore other events
+                    }
+                }
+            }
+        }
+
+        // Timeout expired or poll returned - check focus
+        // This runs every 100ms (the poll timeout) when no events are arriving
         let focus_cookie = conn.get_input_focus()?;
         let focused_window = focus_cookie.reply()?.focus;
-        
+
         // Only check class if focus changed (optimization)
         if last_focused_window != Some(focused_window) {
             last_focused_window = Some(focused_window);
             let focused_class = get_window_class_sync(&conn, focused_window).unwrap_or_default();
             let is_epm_focused = focused_class.eq_ignore_ascii_case("eve-preview-manager");
-            
+
             // If EPM gained focus, ungrab hotkeys
             if is_epm_focused && hotkeys_grabbed {
                 info!("EPM gained focus, ungrabbing hotkeys to allow normal input");
@@ -206,74 +292,6 @@ fn run_x11_listener(
                 conn.flush()?;
             }
         }
-
-        // Only process event if one is available
-        if let Some(event) = event {
-            match event {
-                Event::KeyPress(key_event) => {
-                    // If hotkeys are not grabbed, this event shouldn't reach us
-                    // But handle it anyway for robustness
-                    if !hotkeys_grabbed {
-                        conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
-                        conn.flush()?;
-                        continue;
-                    }
-                // Hotkeys are grabbed, process normally
-                // Check if we need EVE focus
-
-                if require_eve_focus {
-                    let title = get_window_title_sync(&conn, focused_window).unwrap_or_default();
-                    let is_eve = title.starts_with(crate::constants::eve::WINDOW_TITLE_PREFIX) 
-                        || title == crate::constants::eve::LOGGED_OUT_TITLE;
-
-                    if !is_eve {
-                        debug!(title = %title, "EVE focus required but not focused, replaying");
-                        conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
-                        conn.flush()?;
-                        continue;
-                    }
-                }
-
-                
-                // If we got here, we consume the event.
-                info!(keycode = key_event.detail, "Consuming hotkey event");
-                conn.allow_events(Allow::ASYNC_KEYBOARD, key_event.time)?;
-                conn.flush()?;
-
-                // Normalize modifiers (remove NumLock, CapsLock, etc.)
-                let modmask = normalize_modmask(key_event.state);
-
-                // Look up the hotkey
-                if let Some(command) = hotkey_map.get(&(key_event.detail, modmask)) {
-                    info!(
-                        keycode = key_event.detail,
-                        modmask = ?modmask,
-                        command = ?command,
-                        "Hotkey pressed, sending command"
-                    );
-
-                    if let Err(e) = sender.blocking_send(command.clone()) {
-                        error!(error = %e, "Failed to send hotkey command");
-                    }
-                } else {
-                    debug!(
-                        keycode = key_event.detail,
-                        modmask = ?modmask,
-                        "KeyPress event didn't match any registered hotkey"
-                    );
-                }
-
-            }
-            Event::MappingNotify(_) => {
-                // Keyboard mapping changed, we should re-register hotkeys
-                // For now, just log it - full implementation would rebuild the map
-                warn!("Keyboard mapping changed - hotkeys may not work correctly until restart");
-            }
-            _ => {
-                // Ignore other events
-            }
-        }
-        }  // End of if let Some(event)
     }
 }
 

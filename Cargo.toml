@@ -20,6 +20,7 @@ evdev = "0.13.2"
 fontdue = "0.9"
 fontconfig = "0.10"
 clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"
 
 eframe = { version = "0.33.2", default-features = false, features = ["glow", "x11"] }
 egui = "0.33.2"
