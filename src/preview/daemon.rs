@@ -115,23 +115,13 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
     // Create channel for hotkey thread → main loop
     let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
 
-    // Build character hotkey list from character_hotkeys HashMap, using cycle group order
+    // Build character hotkey list from ALL defined character hotkeys
+    // This ensures detached characters still have their hotkeys registered
     let character_hotkeys: Vec<_> = daemon_config
         .profile
-        .hotkey_cycle_group
-        .iter()
-        .filter_map(|char_name| {
-            if let Some(binding) = daemon_config.profile.character_hotkeys.get(char_name) {
-                debug!(
-                    character = %char_name,
-                    binding = %binding.display_name(),
-                    "Loaded per-character hotkey"
-                );
-                Some(binding.clone())
-            } else {
-                None
-            }
-        })
+        .character_hotkeys
+        .values()
+        .cloned()
         .collect();
 
     let profile_hotkeys: Vec<_> = daemon_config.profile_hotkeys.keys().cloned().collect();
@@ -140,13 +130,13 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
     // This allows users to bind 'F1' to Cycle [Char1, Char2] effectively
     let mut hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>> = HashMap::new();
 
-    for char_name in &daemon_config.profile.hotkey_cycle_group {
-        if let Some(binding) = daemon_config.profile.character_hotkeys.get(char_name) {
-            hotkey_groups
-                .entry(binding.clone())
-                .or_default()
-                .push(char_name.clone());
-        }
+    // Iterate over ALL defined character hotkeys, not just those in the cycle group.
+    // This allows characters outside the cycle group to still be activated via hotkey.
+    for (char_name, binding) in &daemon_config.profile.character_hotkeys {
+        hotkey_groups
+            .entry(binding.clone())
+            .or_default()
+            .push(char_name.clone());
     }
 
     info!(
@@ -160,7 +150,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
         debug!(
             binding = %binding.display_name(),
             characters = ?chars,
-            "Hotkey group"
+            "Hotkey group registered"
         );
     }
 

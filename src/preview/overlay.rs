@@ -471,9 +471,9 @@ impl<'a> OverlayRenderer<'a> {
 
         // Determine effective border size and color source
         let effective_size = self.calculate_border_size(character_name, focused);
-        
+
         // 3. Draw Text
-        // We pass effective_size mainly if text positioning depended on it, 
+        // We pass effective_size mainly if text positioning depended on it,
         // but currently text is positioned by config offset.
         self.update_name(character_name, dimensions, effective_size)
             .context(format!(
@@ -490,20 +490,26 @@ impl<'a> OverlayRenderer<'a> {
         };
 
         if should_draw_border {
-            let (fill_picture, temp_fill_id) = if let Some(settings) =
-                self.config.character_settings.get(character_name)
-            {
-                let override_color_hex = if focused {
-                    settings.override_active_border_color.as_ref()
-                } else {
-                    settings.override_inactive_border_color.as_ref()
-                };
+            let (fill_picture, temp_fill_id) =
+                if let Some(settings) = self.config.character_settings.get(character_name) {
+                    let override_color_hex = if focused {
+                        settings.override_active_border_color.as_ref()
+                    } else {
+                        settings.override_inactive_border_color.as_ref()
+                    };
 
-                if let Some(hex) = override_color_hex {
-                    if let Some(color) = crate::color::HexColor::parse(hex).map(|c| c.to_x11_color()) {
-                        let pid = self.conn.generate_id()?;
-                        self.conn.render_create_solid_fill(pid, color)?;
-                        (pid, Some(pid))
+                    if let Some(hex) = override_color_hex {
+                        if let Some(color) =
+                            crate::color::HexColor::parse(hex).map(|c| c.to_x11_color())
+                        {
+                            let pid = self.conn.generate_id()?;
+                            self.conn.render_create_solid_fill(pid, color)?;
+                            (pid, Some(pid))
+                        } else if focused {
+                            (self.active_border_fill, None)
+                        } else {
+                            (self.inactive_border_fill, None)
+                        }
                     } else if focused {
                         (self.active_border_fill, None)
                     } else {
@@ -513,12 +519,7 @@ impl<'a> OverlayRenderer<'a> {
                     (self.active_border_fill, None)
                 } else {
                     (self.inactive_border_fill, None)
-                }
-            } else if focused {
-                (self.active_border_fill, None)
-            } else {
-                (self.inactive_border_fill, None)
-            };
+                };
 
             // Draw 4 strips for the border
             let w = dimensions.width as i16;
@@ -531,9 +532,14 @@ impl<'a> OverlayRenderer<'a> {
                 fill_picture,
                 0u32,
                 self.overlay_picture,
-                0, 0, 0, 0,
-                0, 0,
-                dimensions.width, effective_size
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                dimensions.width,
+                effective_size,
             )?;
             // Bottom
             self.conn.render_composite(
@@ -541,9 +547,14 @@ impl<'a> OverlayRenderer<'a> {
                 fill_picture,
                 0u32,
                 self.overlay_picture,
-                0, 0, 0, 0,
-                0, h - b,
-                dimensions.width, effective_size
+                0,
+                0,
+                0,
+                0,
+                0,
+                h - b,
+                dimensions.width,
+                effective_size,
             )?;
             // Left
             self.conn.render_composite(
@@ -551,9 +562,14 @@ impl<'a> OverlayRenderer<'a> {
                 fill_picture,
                 0u32,
                 self.overlay_picture,
-                0, 0, 0, 0,
-                0, b,
-                effective_size, (h - 2*b).max(0) as u16
+                0,
+                0,
+                0,
+                0,
+                0,
+                b,
+                effective_size,
+                (h - 2 * b).max(0) as u16,
             )?;
             // Right
             self.conn.render_composite(
@@ -561,9 +577,14 @@ impl<'a> OverlayRenderer<'a> {
                 fill_picture,
                 0u32,
                 self.overlay_picture,
-                0, 0, 0, 0,
-                w - b, b,
-                effective_size, (h - 2*b).max(0) as u16
+                0,
+                0,
+                0,
+                0,
+                w - b,
+                b,
+                effective_size,
+                (h - 2 * b).max(0) as u16,
             )?;
 
             // Clean up temp fill
