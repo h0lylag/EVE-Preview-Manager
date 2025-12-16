@@ -434,7 +434,10 @@ impl<'a> OverlayRenderer<'a> {
         Ok(())
     }
 
-    /// Draws (or clears) the border around the thumbnail overlay.
+    /// Draws the overlay content with strict Z-order:
+    /// 1. Skipped Indicator (Red X) - Bottom
+    /// 2. Text (Name) - Middle
+    /// 3. Border - Top (covers everything at edges)
     pub fn draw_border(
         &self,
         character_name: &str,
@@ -442,158 +445,132 @@ impl<'a> OverlayRenderer<'a> {
         focused: bool,
         skipped: bool,
     ) -> Result<()> {
-        // Determine border settings (color, fill picture, and size)
+        // 1. Clear the entire overlay first (transparent background)
+        self.conn
+            .render_composite(
+                PictOp::CLEAR,
+                self.overlay_picture,
+                0u32,
+                self.overlay_picture,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                dimensions.width,
+                dimensions.height,
+            )
+            .context("Failed to clear overlay")?;
 
-        let effective_size = self.calculate_border_size(character_name, focused);
-
-        let (fill_picture, temp_fill_id) = if let Some(settings) =
-            self.config.character_settings.get(character_name)
-        {
-            // Determine override color based on focus
-            let override_color_hex = if focused {
-                settings.override_active_border_color.as_ref()
-            } else {
-                settings.override_inactive_border_color.as_ref()
-            };
-
-            if let Some(hex) = override_color_hex {
-                if let Some(color) = crate::color::HexColor::parse(hex).map(|c| c.to_x11_color()) {
-                    let pid = self
-                        .conn
-                        .generate_id()
-                        .context("Failed to generate temp fill ID")?;
-                    self.conn
-                        .render_create_solid_fill(pid, color)
-                        .context("Failed to create temp fill")?;
-                    (pid, Some(pid))
-                } else {
-                    // Invalid override color, fallback to global color
-                    if focused {
-                        (self.active_border_fill, None)
-                    } else {
-                        (self.inactive_border_fill, None)
-                    }
-                }
-            } else {
-                // No color override, use global color
-                if focused {
-                    (self.active_border_fill, None)
-                } else {
-                    (self.inactive_border_fill, None)
-                }
-            }
-        } else {
-            // No settings at all, use global defaults
-            if focused {
-                (self.active_border_fill, None)
-            } else {
-                (self.inactive_border_fill, None)
-            }
-        };
-
-        if focused {
-            // Only render border fill if we actually have a border size
-            if effective_size > 0 {
-                self.conn
-                    .render_composite(
-                        PictOp::SRC,
-                        fill_picture,
-                        0u32,
-                        self.overlay_picture,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        dimensions.width,
-                        dimensions.height,
-                    )
-                    .context(format!(
-                        "Failed to render active border for '{}'",
-                        character_name
-                    ))?;
-            } else {
-                // Clear everything if size is 0
-                self.conn.render_composite(
-                    PictOp::CLEAR,
-                    self.overlay_picture, // src
-                    0u32,
-                    self.overlay_picture, // dst
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    dimensions.width,
-                    dimensions.height,
-                )?;
-            }
-        } else {
-            // Inactive border logic
-            // Render inactive border if enabled (size > 0), otherwise clear
-            if self.config.inactive_border_enabled && effective_size > 0 {
-                self.conn
-                    .render_composite(
-                        PictOp::SRC,
-                        fill_picture,
-                        0u32,
-                        self.overlay_picture,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        dimensions.width,
-                        dimensions.height,
-                    )
-                    .context(format!(
-                        "Failed to render inactive border for '{}'",
-                        character_name
-                    ))?;
-            } else {
-                self.conn
-                    .render_composite(
-                        PictOp::CLEAR,
-                        self.overlay_picture,
-                        0u32,
-                        self.overlay_picture,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        dimensions.width,
-                        dimensions.height,
-                    )
-                    .context(format!("Failed to clear border for '{}'", character_name))?;
-            }
-        }
-
-        // Cleanup temp fill if created
-        if let Some(pid) = temp_fill_id {
-            self.conn.render_free_picture(pid)?;
-        }
-
-        // Clear content area to prepare for text/indicators
-        self.clear_content_area(dimensions, effective_size)
-            .context("Failed to clear content area in draw_border")?;
-
-        // Draw skipped indicator if needed
-        // Drawn BEFORE text so text appears on top, but AFTER clear so lines persist
+        // 2. Draw skipped indicator (Red X)
+        // Drawn first so text appears on top of it
         if skipped {
             self.draw_skipped_indicator(dimensions)?;
         }
 
-        // After drawing the border background (or clearing it), we must redraw the text hole and text
+        // Determine effective border size and color source
+        let effective_size = self.calculate_border_size(character_name, focused);
+        
+        // 3. Draw Text
+        // We pass effective_size mainly if text positioning depended on it, 
+        // but currently text is positioned by config offset.
         self.update_name(character_name, dimensions, effective_size)
             .context(format!(
-                "Failed to update name overlay after border change for '{}'",
+                "Failed to update name overlay for '{}'",
                 character_name
             ))?;
+
+        // 4. Draw Border (Top Layer)
+        // Only if size > 0 and enabled
+        let should_draw_border = if focused {
+            effective_size > 0
+        } else {
+            self.config.inactive_border_enabled && effective_size > 0
+        };
+
+        if should_draw_border {
+            let (fill_picture, temp_fill_id) = if let Some(settings) =
+                self.config.character_settings.get(character_name)
+            {
+                let override_color_hex = if focused {
+                    settings.override_active_border_color.as_ref()
+                } else {
+                    settings.override_inactive_border_color.as_ref()
+                };
+
+                if let Some(hex) = override_color_hex {
+                    if let Some(color) = crate::color::HexColor::parse(hex).map(|c| c.to_x11_color()) {
+                        let pid = self.conn.generate_id()?;
+                        self.conn.render_create_solid_fill(pid, color)?;
+                        (pid, Some(pid))
+                    } else if focused {
+                        (self.active_border_fill, None)
+                    } else {
+                        (self.inactive_border_fill, None)
+                    }
+                } else if focused {
+                    (self.active_border_fill, None)
+                } else {
+                    (self.inactive_border_fill, None)
+                }
+            } else if focused {
+                (self.active_border_fill, None)
+            } else {
+                (self.inactive_border_fill, None)
+            };
+
+            // Draw 4 strips for the border
+            let w = dimensions.width as i16;
+            let h = dimensions.height as i16;
+            let b = effective_size as i16;
+
+            // Top
+            self.conn.render_composite(
+                PictOp::SRC,
+                fill_picture,
+                0u32,
+                self.overlay_picture,
+                0, 0, 0, 0,
+                0, 0,
+                dimensions.width, effective_size
+            )?;
+            // Bottom
+            self.conn.render_composite(
+                PictOp::SRC,
+                fill_picture,
+                0u32,
+                self.overlay_picture,
+                0, 0, 0, 0,
+                0, h - b,
+                dimensions.width, effective_size
+            )?;
+            // Left
+            self.conn.render_composite(
+                PictOp::SRC,
+                fill_picture,
+                0u32,
+                self.overlay_picture,
+                0, 0, 0, 0,
+                0, b,
+                effective_size, (h - 2*b).max(0) as u16
+            )?;
+            // Right
+            self.conn.render_composite(
+                PictOp::SRC,
+                fill_picture,
+                0u32,
+                self.overlay_picture,
+                0, 0, 0, 0,
+                w - b, b,
+                effective_size, (h - 2*b).max(0) as u16
+            )?;
+
+            // Clean up temp fill
+            if let Some(pid) = temp_fill_id {
+                self.conn.render_free_picture(pid)?;
+            }
+        }
 
         Ok(())
     }
