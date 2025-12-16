@@ -325,8 +325,7 @@ impl<'a> OverlayRenderer<'a> {
                         self.overlay_pixmap,
                         gc,
                         self.config.text_offset.x,
-                        self.config.text_offset.y
-                            + self.font_renderer.size() as i16, // Baseline adjustment
+                        self.config.text_offset.y + self.font_renderer.size() as i16, // Baseline adjustment
                         display_name.as_bytes(),
                     )
                     .context(format!(

@@ -119,6 +119,19 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut VisualSettingsSt
                                 changed = true;
                             }
                         });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Size:");
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut profile.thumbnail_active_border_size)
+                                        .range(1..=20),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
                     });
                 });
 
@@ -170,20 +183,6 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut VisualSettingsSt
                             }
                         });
                     });
-                });
-
-                // Active Border Size
-                ui.horizontal(|ui| {
-                    ui.label("Active Border Size:");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut profile.thumbnail_active_border_size)
-                                .range(1..=20),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
                 });
 
                 ui.add_space(ITEM_SPACING);
