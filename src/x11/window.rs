@@ -219,6 +219,7 @@ pub fn activate_window(
     screen: &Screen,
     atoms: &CachedAtoms,
     window: Window,
+    timestamp: u32,
 ) -> Result<()> {
     conn.configure_window(
         window,
@@ -234,7 +235,7 @@ pub fn activate_window(
         type_: atoms.net_active_window,
         data: ClientMessageData::from([
             x11::ACTIVE_WINDOW_SOURCE_PAGER,
-            x11rb::CURRENT_TIME,
+            timestamp,
             0,
             0,
             0,

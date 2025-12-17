@@ -22,13 +22,13 @@ use tracing::{debug, error, info, warn};
 use crate::constants::{input, paths, permissions};
 use crate::input::backend::{BackendCapabilities, HotkeyBackend, HotkeyConfiguration};
 use crate::input::device_detection;
-use crate::input::listener::CycleCommand;
+use crate::input::listener::{CycleCommand, TimestampedCommand};
 
 pub struct EvdevBackend;
 
 impl HotkeyBackend for EvdevBackend {
     fn spawn(
-        sender: Sender<CycleCommand>,
+        sender: Sender<TimestampedCommand>,
         config: HotkeyConfiguration,
         selected_device_id: Option<String>,
         require_eve_focus: bool,
@@ -60,7 +60,7 @@ impl HotkeyBackend for EvdevBackend {
 
 /// Initializes and manages background threads for low-latency input event monitoring across multiple devices
 fn spawn_listener_impl(
-    sender: tokio::sync::mpsc::Sender<CycleCommand>,
+    sender: tokio::sync::mpsc::Sender<crate::input::listener::TimestampedCommand>,
     config: HotkeyConfiguration,
     selected_device_id: Option<String>,
     _require_eve_focus: bool, // Not currently implemented for evdev backend
@@ -139,9 +139,9 @@ fn spawn_listener_impl(
                 target_path
             } else {
                 std::path::Path::new("/dev/input/by-id")
-                    .join(&target_path)
-                    .canonicalize()
-                    .with_context(|| format!("Failed to canonicalize {}", target_path.display()))?
+                .join(&target_path)
+                .canonicalize()
+                .with_context(|| format!("Failed to canonicalize {}", target_path.display()))?
             };
 
             info!(selected_device = %absolute_target.display(), "Resolved device path");
@@ -205,7 +205,7 @@ fn spawn_listener_impl(
 /// Event loop processing raw input events from a single device, handling key presses and state tracking
 fn listen_for_hotkeys(
     mut device: Device,
-    sender: Sender<CycleCommand>,
+    sender: Sender<TimestampedCommand>,
     config: HotkeyConfiguration,
     all_device_paths: Arc<Vec<std::path::PathBuf>>,
 ) -> Result<()> {
@@ -232,9 +232,9 @@ fn listen_for_hotkeys(
                     .as_ref()
                     .is_some_and(|fwd| fwd.key_code == key_code)
                     || config
-                        .backward_key
-                        .as_ref()
-                        .is_some_and(|bwd| bwd.key_code == key_code);
+                    .backward_key
+                    .as_ref()
+                    .is_some_and(|bwd| bwd.key_code == key_code);
                 let is_character_key = config
                     .character_hotkeys
                     .iter()
@@ -249,13 +249,18 @@ fn listen_for_hotkeys(
                     .is_some_and(|k| k.key_code == key_code);
 
                 if is_cycle_key || is_character_key || is_profile_key || is_skip_key {
-                    potential_hotkey_presses.push(key_code);
+                    // Capture timestamp from the event
+                    let timestamp = event.timestamp();
+                    let millis = timestamp.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u32;
+                    potential_hotkey_presses.push((key_code, millis));
                 }
             }
         }
 
         // For each potential hotkey, query current modifier state from ALL devices
-        for key_code in potential_hotkey_presses {
+        for (key_code, timestamp) in potential_hotkey_presses {
             // Query modifier state across all devices to handle cross-device hotkeys
             // (e.g., Shift held on keyboard + Mouse Button pressed on mouse)
             let mut ctrl_pressed = false;
@@ -280,6 +285,7 @@ fn listen_for_hotkeys(
 
             // Check cycle hotkeys first (Forward/Backward take priority)
             let mut handled = false;
+            let mut command_to_send = None;
 
             if let Some(ref fwd) = config.forward_key
                 && fwd.matches(
@@ -294,9 +300,7 @@ fn listen_for_hotkeys(
                     binding = %fwd.display_name(),
                     "Forward hotkey pressed, sending command"
                 );
-                sender
-                    .blocking_send(CycleCommand::Forward)
-                    .context("Failed to send cycle command")?;
+                command_to_send = Some(CycleCommand::Forward);
                 handled = true;
             }
 
@@ -314,9 +318,7 @@ fn listen_for_hotkeys(
                     binding = %bwd.display_name(),
                     "Backward hotkey pressed, sending command"
                 );
-                sender
-                    .blocking_send(CycleCommand::Backward)
-                    .context("Failed to send cycle command")?;
+                command_to_send = Some(CycleCommand::Backward);
                 handled = true;
             }
 
@@ -334,9 +336,7 @@ fn listen_for_hotkeys(
                     binding = %skip_key.display_name(),
                     "Toggle skip hotkey pressed, sending command"
                 );
-                sender
-                    .blocking_send(CycleCommand::ToggleSkip)
-                    .context("Failed to send toggle skip command")?;
+                command_to_send = Some(CycleCommand::ToggleSkip);
                 handled = true;
             }
 
@@ -354,34 +354,40 @@ fn listen_for_hotkeys(
                             binding = %char_hotkey.display_name(),
                             "Per-character hotkey pressed, sending command"
                         );
-                        sender
-                            .blocking_send(CycleCommand::CharacterHotkey(char_hotkey.clone()))
-                            .context("Failed to send character hotkey command")?;
+                        command_to_send = Some(CycleCommand::CharacterHotkey(char_hotkey.clone()));
                         break; // Only send one command per keypress
                     }
                 }
             }
 
-            if !handled {
-                // Check profile hotkeys
-                for profile_hotkey in &config.profile_hotkeys {
-                    if profile_hotkey.matches(
-                        key_code,
-                        ctrl_pressed,
-                        shift_pressed,
-                        alt_pressed,
-                        super_pressed,
-                    ) {
-                        info!(
-                            binding = %profile_hotkey.display_name(),
-                            "Profile hotkey pressed, sending command"
-                        );
-                        sender
-                            .blocking_send(CycleCommand::ProfileHotkey(profile_hotkey.clone()))
-                            .context("Failed to send profile hotkey command")?;
-                        break; // Only send one command per keypress
-                    }
-                }
+            if !handled && command_to_send.is_none() {
+                 // Check profile hotkeys
+                 for profile_hotkey in &config.profile_hotkeys {
+                     if profile_hotkey.matches(
+                         key_code,
+                         ctrl_pressed,
+                         shift_pressed,
+                         alt_pressed,
+                         super_pressed,
+                     ) {
+                         info!(
+                             binding = %profile_hotkey.display_name(),
+                             "Profile hotkey pressed, sending command"
+                         );
+                         command_to_send = Some(CycleCommand::ProfileHotkey(profile_hotkey.clone()));
+                         break; // Only send one command per keypress
+                     }
+                 }
+            }
+
+            if let Some(command) = command_to_send {
+                let timestamped_command = TimestampedCommand {
+                    command,
+                    timestamp,
+                };
+                sender
+                    .blocking_send(timestamped_command)
+                    .context("Failed to send hotkey command")?;
             }
         }
     }

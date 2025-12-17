@@ -21,6 +21,14 @@ pub enum CycleCommand {
     ToggleSkip,
 }
 
+/// A wrapper around CycleCommand that includes the timestamp of the input event
+#[derive(Debug, Clone)]
+pub struct TimestampedCommand {
+    pub command: CycleCommand,
+    /// X11-compatible timestamp (milliseconds)
+    pub timestamp: u32,
+}
+
 /// Print helpful error message if evdev permissions are missing
 pub fn print_permission_error() {
     evdev_backend::print_permission_error()

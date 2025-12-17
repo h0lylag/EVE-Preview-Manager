@@ -12,7 +12,7 @@ use x11rb::protocol::xproto::*;
 
 use crate::config::DaemonConfig;
 use crate::constants::eve;
-use crate::input::listener::{self, CycleCommand};
+use crate::input::listener::{self, CycleCommand, TimestampedCommand};
 use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window};
 
 use super::cycle_state::CycleState;
@@ -27,7 +27,7 @@ use x11rb::rust_connection::RustConnection;
 struct HotkeyResources {
     #[allow(dead_code)]
     handle: Option<Vec<JoinHandle<()>>>,
-    rx: mpsc::Receiver<CycleCommand>,
+    rx: mpsc::Receiver<TimestampedCommand>,
     groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
 }
 
@@ -253,7 +253,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
 async fn run_event_loop(
     ctx: AppContext<'_>,
     mut resources: DaemonResources<'_>,
-    mut hotkey_rx: mpsc::Receiver<CycleCommand>,
+    mut hotkey_rx: mpsc::Receiver<TimestampedCommand>,
     hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
     mut sigusr1: tokio::signal::unix::Signal,
 ) -> Result<()> {
@@ -302,7 +302,9 @@ async fn run_event_loop(
             }
 
             // 2. Handle Hotkey Commands
-            Some(command) = hotkey_rx.recv() => {
+            Some(msg) = hotkey_rx.recv() => {
+                 let TimestampedCommand { command, timestamp } = msg;
+
                  // Check if we should only allow hotkeys when EVE window is focused
                 let should_process = if resources.config.profile.hotkey_require_eve_focus {
                     crate::x11::is_eve_window_focused(ctx.conn, ctx.screen, ctx.atoms)
@@ -433,7 +435,7 @@ async fn run_event_loop(
                             "Activating window via hotkey"
                         );
 
-                        if let Err(e) = activate_window(ctx.conn, ctx.screen, ctx.atoms, window) {
+                        if let Err(e) = activate_window(ctx.conn, ctx.screen, ctx.atoms, window, timestamp) {
                             error!(window = window, error = %e, "Failed to activate window");
                         } else {
                             debug!(window = window, "activate_window completed successfully");

@@ -521,14 +521,14 @@ impl<'a> ThumbnailRenderer<'a> {
     }
 
     /// Sends a request to the Window Manager to focus the source window.
-    pub fn focus(&self, character_name: &str) -> Result<()> {
+    pub fn focus(&self, character_name: &str, timestamp: u32) -> Result<()> {
         let ev = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
             sequence: 0,
             window: self.src,
             type_: self.atoms.net_active_window,
-            data: [2, 0, 0, 0, 0].into(),
+            data: [2, timestamp, 0, 0, 0].into(),
         };
 
         self.conn
@@ -548,6 +548,7 @@ impl<'a> ThumbnailRenderer<'a> {
         info!(
             window = self.window,
             character = %character_name,
+            timestamp = timestamp,
             "Focused window"
         );
         Ok(())

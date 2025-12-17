@@ -23,13 +23,13 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::config::HotkeyBinding;
 use crate::input::backend::{BackendCapabilities, HotkeyBackend, HotkeyConfiguration};
-use crate::input::listener::CycleCommand;
+use crate::input::listener::{CycleCommand, TimestampedCommand};
 
 pub struct X11Backend;
 
 impl HotkeyBackend for X11Backend {
     fn spawn(
-        sender: Sender<CycleCommand>,
+        sender: Sender<TimestampedCommand>,
         config: HotkeyConfiguration,
         _device_id: Option<String>, // Not used by X11 backend
         require_eve_focus: bool,
@@ -83,7 +83,7 @@ impl HotkeyBackend for X11Backend {
 /// Main X11 listener loop
 #[allow(unsafe_code)] // Required for libc::poll() system call
 fn run_x11_listener(
-    sender: Sender<CycleCommand>,
+    sender: Sender<TimestampedCommand>,
     config: HotkeyConfiguration,
     require_eve_focus: bool,
 ) -> Result<()> {
@@ -272,7 +272,12 @@ fn run_x11_listener(
                                 "Hotkey pressed, sending command"
                             );
 
-                            if let Err(e) = sender.blocking_send(command.clone()) {
+                            let timestamped_command = TimestampedCommand {
+                                command: command.clone(),
+                                timestamp: key_event.time,
+                            };
+
+                            if let Err(e) = sender.blocking_send(timestamped_command) {
                                 error!(error = %e, "Failed to send hotkey command");
                             }
                         } else {

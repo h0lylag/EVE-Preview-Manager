@@ -217,8 +217,8 @@ impl<'a> Thumbnail<'a> {
     }
 
     /// Requests focus for the source EVE client.
-    pub fn focus(&self) -> Result<()> {
-        self.renderer.focus(&self.character_name)
+    pub fn focus(&self, timestamp: u32) -> Result<()> {
+        self.renderer.focus(&self.character_name, timestamp)
     }
 
     /// Moves the thumbnail to a new position updates the cached state.

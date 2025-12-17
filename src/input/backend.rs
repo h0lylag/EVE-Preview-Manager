@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::HotkeyBinding;
-use crate::input::listener::CycleCommand;
+use crate::input::listener::TimestampedCommand;
 
 /// Capabilities and limitations of a hotkey backend
 #[allow(dead_code)]
@@ -48,7 +48,7 @@ pub trait HotkeyBackend: Sized {
     ///
     /// Returns handles to spawned threads for cleanup on shutdown
     fn spawn(
-        sender: Sender<CycleCommand>,
+        sender: Sender<TimestampedCommand>,
         config: HotkeyConfiguration,
         device_id: Option<String>,
         require_eve_focus: bool,

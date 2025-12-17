@@ -428,7 +428,7 @@ fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> R
 
         // Left-click focuses the window (dragging is right-click only)
         if is_left_click {
-            thumbnail.focus().context(format!(
+            thumbnail.focus(event.time).context(format!(
                 "Failed to focus window for '{}'",
                 thumbnail.character_name
             ))?;
