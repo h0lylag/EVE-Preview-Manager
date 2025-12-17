@@ -3,7 +3,9 @@
   <id>com.evepreview.manager</id>
 
   <name>EVE Preview Manager</name>
-  <developer_name>h0lylag</developer_name>
+  <developer id="io.github.h0lylag">
+    <name>h0lylag</name>
+  </developer>
   <summary>Window preview manager for EVE Online</summary>
 
   <description>
@@ -53,29 +55,29 @@
       <description>
         <p>New Features:</p>
         <ul>
-          <li><strong>Tabbed GUI:</strong> Rearranged the GUI to use a tabbed structure for settings components.</li>
-          <li><strong>Inactive Client Borders:</strong> Customizable border color and thickness for inactive clients.</li>
-          <li><strong>Advanced Character Management:</strong>
-            <ul>
-              <li><strong>Aliases:</strong> Create custom names (e.g., "Main", "Super") for previews.</li>
-              <li><strong>Visual Overrides:</strong> Configure border color, text color, and size on a per-character basis.</li>
-            </ul>
-          </li>
-          <li><strong>Load Profile Hotkey:</strong> Instantly load a specific profile via hotkey.</li>
-          <li><strong>Temporary Cycle Skip:</strong> Hotkey to temporarily skip a character in the cycle group (resets on refresh/swap).</li>
+          <li>Tabbed GUI: Rearranged the GUI to use a tabbed structure for settings components.</li>
+          <li>Inactive Client Borders: Customizable border color and thickness for inactive clients.</li>
+          <li>Advanced Character Management:</li>
+          <li>Aliases: Create custom names (e.g., "Main", "Super") for previews.</li>
+          <li>Visual Overrides: Configure border color, text color, and size on a per-character basis.</li>
+          <li>Load Profile Hotkey: Instantly load a specific profile via hotkey.</li>
+          <li>Temporary Cycle Skip: Hotkey to temporarily skip a character in the cycle group (resets on refresh/swap).</li>
         </ul>
         <p>Tweaks:</p>
         <ul>
-          <li><strong>Flexible Character Hotkeys:</strong> Per-character hotkeys now work even if not in the cycle group.</li>
-          <li><strong>Enforced XWayland:</strong> The app now enforces X11/XWayland mode to ensure reliable hotkeys without the user being in the input group.</li>
+          <li>Flexible Character Hotkeys: Per-character hotkeys now work even if not in the cycle group.</li>
+          <li>Enforced XWayland: The app now enforces X11/XWayland mode to ensure reliable hotkeys without the user being in the input group.</li>
         </ul>
       </description>
     </release>
   </releases>
 
-  <requires>
+  <supports>
     <control>keyboard</control>
     <control>pointing</control>
+  </supports>
+
+  <requires>
     <display_length compare="ge">768</display_length>
   </requires>
 
