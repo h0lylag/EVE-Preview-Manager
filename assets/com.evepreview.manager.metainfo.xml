@@ -10,14 +10,13 @@
 
   <description>
     <p>
-      EVE Preview Manager is a lightweight utility designed to enhance the EVE Online multi-boxing experience. It renders live, low-latency thumbnails of all your active EVE clients, allowing you to maintain situational awareness across multiple accounts simultaneously.
+      EVE Preview Manager is a lightweight utility designed to enhance the EVE Online multi-boxing experience.
     </p>
     <p>Key features include:</p>
     <ul>
       <li>Live Previews: Real-time thumbnails of all running clients.</li>
       <li>Rapid Switching: Robust hotkey support to instantly switch focus between clients.</li>
       <li>Custom layouts: Configure thumbnail position, size, and opacity to fit your screen setup.</li>
-      <li>Performance Focused: Built with Rust for minimal CPU/GPU overhead.</li>
     </ul>
     <p>NOTE: This application is not affiliated with CCP Games.</p>
   </description>
@@ -51,6 +50,14 @@
   </screenshots>
 
   <releases>
+    <release version="1.3.1" date="2025-12-18">
+      <description>
+        <p>Other:</p>
+        <ul>
+          <li>Preparations for Flathub and Arch AUR submissions</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.0" date="2025-12-16">
       <description>
         <p>New Features:</p>
