@@ -31,6 +31,7 @@ pub struct DisplayConfig {
     pub character_settings: std::collections::HashMap<String, crate::types::CharacterSettings>,
     pub inactive_border_color: Color,
     pub inactive_border_size: u16,
+    pub minimized_overlay_enabled: bool,
 }
 
 /// Daemon runtime configuration - holds selected profile settings
@@ -109,6 +110,7 @@ impl DaemonConfig {
             } else {
                 0
             },
+            minimized_overlay_enabled: self.profile.client_minimize_show_overlay,
             character_settings: self.profile.character_thumbnails.clone(),
         }
     }
@@ -377,6 +379,7 @@ mod tests {
                 character_thumbnails: HashMap::new(),
                 hotkey_profile_switch: None,
                 hotkey_toggle_skip: None,
+                client_minimize_show_overlay: false,
             },
             character_thumbnails: HashMap::new(),
             profile_hotkeys: HashMap::new(),
@@ -397,6 +400,7 @@ mod tests {
         assert_eq!(config.active_border_color.green, 65535);
         assert_eq!(config.active_border_color.blue, 0);
         assert_eq!(config.active_border_color.alpha, 65535);
+        assert!(!config.minimized_overlay_enabled);
     }
 
     #[test]

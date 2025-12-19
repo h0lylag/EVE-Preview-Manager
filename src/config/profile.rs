@@ -117,6 +117,9 @@ pub struct Profile {
     // Client behavior settings
     #[serde(default)]
     pub client_minimize_on_switch: bool,
+    /// When minimized, show "MINIMIZED" text overlay
+    #[serde(default)]
+    pub client_minimize_show_overlay: bool,
 
     // Hotkey settings (per-profile)
     /// Hotkey backend selection (X11 or evdev)
@@ -261,6 +264,7 @@ fn default_profiles() -> Vec<Profile> {
         thumbnail_hide_not_focused: crate::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS,
         thumbnail_preserve_position_on_swap: default_preserve_thumbnail_position_on_swap(),
         client_minimize_on_switch: crate::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH,
+        client_minimize_show_overlay: false, // Default: off (clean minimized look)
         hotkey_backend: default_hotkey_backend(), // Default: X11 (secure, no permissions)
         hotkey_input_device: None, // Default: no device selected (only used by evdev backend)
         hotkey_cycle_forward: None, // User must configure
@@ -566,6 +570,7 @@ mod tests {
             profile.client_minimize_on_switch,
             crate::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH
         );
+        assert!(!profile.client_minimize_show_overlay);
         assert_eq!(
             profile.thumbnail_hide_not_focused,
             crate::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS

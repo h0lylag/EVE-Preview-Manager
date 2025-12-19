@@ -603,6 +603,11 @@ impl<'a> OverlayRenderer<'a> {
                 "Failed to clear border for minimized window '{}'",
                 character_name
             ))?;
+
+        if !self.config.minimized_overlay_enabled {
+            return Ok(());
+        }
+
         let extents = self
             .conn
             .query_text_extents(
