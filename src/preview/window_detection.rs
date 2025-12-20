@@ -148,25 +148,24 @@ pub fn check_and_create_window<'a>(
     );
 
     // Get dimensions and preview_mode from CharacterSettings or use defaults
-    let (dimensions, preview_mode) =
-        if let Some(settings) = daemon_config.character_thumbnails.get(&character_name) {
-            // If dimensions are 0 (not yet saved), auto-detect
-            let dims = if settings.dimensions.width == 0 || settings.dimensions.height == 0 {
-                let (w, h) = daemon_config.default_thumbnail_size(
-                    ctx.screen.width_in_pixels,
-                    ctx.screen.height_in_pixels,
-                );
-                Dimensions::new(w, h)
-            } else {
-                settings.dimensions
-            };
-            (dims, settings.preview_mode.clone())
-        } else {
-            // Character not in settings yet - auto-detect
+    let (dimensions, preview_mode) = if let Some(settings) =
+        daemon_config.character_thumbnails.get(&character_name)
+    {
+        // If dimensions are 0 (not yet saved), auto-detect
+        let dims = if settings.dimensions.width == 0 || settings.dimensions.height == 0 {
             let (w, h) = daemon_config
                 .default_thumbnail_size(ctx.screen.width_in_pixels, ctx.screen.height_in_pixels);
-            (Dimensions::new(w, h), crate::types::PreviewMode::default())
+            Dimensions::new(w, h)
+        } else {
+            settings.dimensions
         };
+        (dims, settings.preview_mode.clone())
+    } else {
+        // Character not in settings yet - auto-detect
+        let (w, h) = daemon_config
+            .default_thumbnail_size(ctx.screen.width_in_pixels, ctx.screen.height_in_pixels);
+        (Dimensions::new(w, h), crate::types::PreviewMode::default())
+    };
 
     let mut thumbnail = Thumbnail::new(
         ctx,

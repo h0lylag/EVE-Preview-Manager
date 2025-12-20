@@ -39,7 +39,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, _state: &mut BehaviorSetting
 
         if profile.client_minimize_on_switch {
             ui.indent("minimize_overlay_indent", |ui| {
-                if ui.checkbox(&mut profile.client_minimize_show_overlay, 
+                if ui.checkbox(&mut profile.client_minimize_show_overlay,
                     "Show 'MINIMIZED' text overlay").changed() {
                     changed = true;
                 }

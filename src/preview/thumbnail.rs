@@ -211,31 +211,26 @@ impl<'a> Thumbnail<'a> {
                 self.renderer
                     .minimized(&self.character_name, self.dimensions)?;
             }
-            _ => {
-                match &self.preview_mode {
-                    crate::types::PreviewMode::Live => {
-                        self.renderer
-                            .update(&self.character_name, self.dimensions)?;
-                    }
-                    crate::types::PreviewMode::Static { color } => {
-                        let color_u32 = crate::gui::utils::parse_hex_color(color)
-                            .map_err(|_| anyhow::anyhow!("Invalid hex color: {}", color))?;
-
-                        let x_color = x11rb::protocol::render::Color {
-                            red: (color_u32.r() as u16) * 257,
-                            green: (color_u32.g() as u16) * 257,
-                            blue: (color_u32.b() as u16) * 257,
-                            alpha: (color_u32.a() as u16) * 257,
-                        };
-
-                        self.renderer.update_static(
-                            &self.character_name,
-                            self.dimensions,
-                            x_color,
-                        )?;
-                    }
+            _ => match &self.preview_mode {
+                crate::types::PreviewMode::Live => {
+                    self.renderer
+                        .update(&self.character_name, self.dimensions)?;
                 }
-            }
+                crate::types::PreviewMode::Static { color } => {
+                    let color_u32 = crate::gui::utils::parse_hex_color(color)
+                        .map_err(|_| anyhow::anyhow!("Invalid hex color: {}", color))?;
+
+                    let x_color = x11rb::protocol::render::Color {
+                        red: (color_u32.r() as u16) * 257,
+                        green: (color_u32.g() as u16) * 257,
+                        blue: (color_u32.b() as u16) * 257,
+                        alpha: (color_u32.a() as u16) * 257,
+                    };
+
+                    self.renderer
+                        .update_static(&self.character_name, self.dimensions, x_color)?;
+                }
+            },
         }
         Ok(())
     }

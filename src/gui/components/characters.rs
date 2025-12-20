@@ -628,7 +628,10 @@ fn render_overrides_section(
         // Preview Mode (Static Mode)
         ui.horizontal(|ui| {
             ui.label("Static Mode:");
-            let mut is_static = matches!(settings.preview_mode, crate::types::PreviewMode::Static { .. });
+            let mut is_static = matches!(
+                settings.preview_mode,
+                crate::types::PreviewMode::Static { .. }
+            );
 
             if ui.checkbox(&mut is_static, "Enabled").changed() {
                 if is_static {
