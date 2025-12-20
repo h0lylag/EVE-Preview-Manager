@@ -210,19 +210,14 @@ impl CharacterSettings {
 }
 
 /// Preview rendering mode for the thumbnail
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewMode {
     /// Live preview from the source window (default)
+    #[default]
     Live,
     /// Static solid color fill
     Static { color: String },
-}
-
-impl Default for PreviewMode {
-    fn default() -> Self {
-        Self::Live
-    }
 }
 
 #[cfg(test)]
