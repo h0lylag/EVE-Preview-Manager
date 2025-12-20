@@ -36,20 +36,35 @@
 
   <screenshots>
     <screenshot type="default">
-      <image>https://manager.evepreview.com/screenshots/appearance.png</image>
+      <image>https://epm.sh/assets/images/appearance.png</image>
       <caption>Appearance settings</caption>
     </screenshot>
     <screenshot type="default">
-      <image>https://manager.evepreview.com/screenshots/hotkeys.png</image>
+      <image>https://epm.sh/assets/images/hotkeys.png</image>
       <caption>Hotkey settings</caption>
     </screenshot>
     <screenshot type="default">
-      <image>https://manager.evepreview.com/screenshots/characters.png</image>
+      <image>https://epm.sh/assets/images/characters.png</image>
       <caption>Character settings</caption>
     </screenshot>
   </screenshots>
 
   <releases>
+    <release version="1.4.0" date="2025-12-20">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Static Mode: A new per-character override that allows you to use a solid color for the thumbnail background instead of a live preview.</li>
+        </ul>
+        <ul>
+          <li>Added a setting to disable/enable the "MINIMIZED" overlay text when using the "Minimize EVE clients when switching focus" feature.</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>Fixed a bug where inactive client borders were not rendered until the client was focused at least once before.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.2" date="2025-12-18">
       <description>
         <p>Other:</p>
