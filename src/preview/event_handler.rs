@@ -755,6 +755,17 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                             "Failed to update thumbnail after character change from '{}'",
                             old_name
                         ))?;
+
+                    // If the window is in "Normal" state (not minimized), the border was just wiped by the resize/update_name in set_character_name.
+                    // We must redraw it. (Minimized state is handled by set_character_name -> update -> minimized render)
+                    if !thumbnail.state.is_minimized() {
+                        thumbnail
+                            .border(
+                                thumbnail.state.is_focused(),
+                                ctx.cycle_state.is_skipped(&thumbnail.character_name),
+                            )
+                            .context("Failed to restore border after character change")?;
+                    }
                 } else {
                     // Handle logout: Clear the name, no position/size change
                     thumbnail
@@ -855,6 +866,14 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                         }
 
                         ctx.eve_clients.insert(event.window, thumbnail);
+
+                        // Draw initial border (inactive) for the new thumbnail to ensure it matches configuration
+                        if let Some(thumb) = ctx.eve_clients.get_mut(&event.window)
+                            && let Err(e) = thumb
+                                .border(false, ctx.cycle_state.is_skipped(&thumb.character_name))
+                        {
+                            tracing::warn!(window = event.window, error = %e, "Failed to draw initial border for newly detected window");
+                        }
                     }
                 }
             } else if event.atom == ctx.app_ctx.atoms.net_wm_state

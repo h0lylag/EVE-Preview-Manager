@@ -453,12 +453,7 @@ impl<'a> ThumbnailRenderer<'a> {
         };
 
         self.conn
-            .render_fill_rectangles(
-                PictOp::SRC,
-                self.dst_picture,
-                color,
-                &[rect],
-            )
+            .render_fill_rectangles(PictOp::SRC, self.dst_picture, color, &[rect])
             .context(format!(
                 "Failed to fill static color for '{}'",
                 character_name
@@ -479,7 +474,10 @@ impl<'a> ThumbnailRenderer<'a> {
         skipped: bool,
     ) -> Result<()> {
         self.overlay
-            .draw_border(character_name, dimensions, focused, skipped)
+            .draw_border(character_name, dimensions, focused, skipped)?;
+
+        self.overlay(character_name, dimensions)
+            .context(format!("Failed to apply overlay for '{}'", character_name))
     }
 
     /// Renders the "MINIMIZED" state overlay.
