@@ -12,6 +12,26 @@ use tracing::info;
 
 use crate::types::CharacterSettings;
 
+/// Rule for identifying and naming arbitrary application windows
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomWindowRule {
+    /// Pattern to match window title (optional)
+    pub title_pattern: Option<String>,
+    /// Pattern to match window class/process (optional)
+    pub class_pattern: Option<String>,
+    /// Display name used as the identifier ("Character Name")
+    pub alias: String,
+    /// Default width for this source type
+    #[serde(default = "default_thumbnail_width")]
+    pub default_width: u16,
+    /// Default height for this source type
+    #[serde(default = "default_thumbnail_height")]
+    pub default_height: u16,
+    /// If true, only preview the first matching window found
+    #[serde(default)]
+    pub limit: bool,
+}
+
 /// Hotkey backend type selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -166,6 +186,10 @@ pub struct Profile {
     // Per-profile character positions and dimensions
     #[serde(default)]
     pub character_thumbnails: HashMap<String, CharacterSettings>,
+
+    /// Custom window matching rules for external applications
+    #[serde(default)]
+    pub custom_windows: Vec<CustomWindowRule>,
 }
 
 // Default value functions
@@ -276,6 +300,7 @@ fn default_profiles() -> Vec<Profile> {
         hotkey_cycle_group: Vec::new(),
         character_hotkeys: HashMap::new(),
         character_thumbnails: HashMap::new(),
+        custom_windows: Vec::new(),
     }]
 }
 

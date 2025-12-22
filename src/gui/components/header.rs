@@ -37,6 +37,15 @@ pub fn render(
             ui.add_space(5.0); // Padding from right edge
 
             // Render in reverse order (Right -> Left)
+            
+            // 5. Sources
+            if ui
+                .add(egui::Button::new("Sources").selected(*active_tab == GuiTab::Sources))
+                .clicked()
+            {
+                *active_tab = GuiTab::Sources;
+            }
+            ui.add_space(5.0);
 
             // 4. Characters
             if ui

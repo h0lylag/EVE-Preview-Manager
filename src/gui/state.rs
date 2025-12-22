@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use eframe::egui;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::profile::{Config, SaveStrategy};
 use crate::constants::gui::*;
@@ -15,6 +15,7 @@ pub enum GuiTab {
     Appearance,
     Hotkeys,
     Characters,
+    Sources,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,15 +108,30 @@ impl SharedState {
     pub fn stop_daemon(&mut self) -> Result<()> {
         if let Some(mut child) = self.daemon.take() {
             info!(pid = child.id(), "Stopping preview daemon");
-            let _ = child.kill();
-            let status = child
-                .wait()
-                .context("Failed to wait for preview daemon exit")?;
-            self.daemon_status = if status.success() {
-                DaemonStatus::Stopped
+            
+            // Allow some time for the daemon to process signals? No, kill() is immediate.
+            // But verify if kill succeeds.
+            if let Err(e) = child.kill() {
+                error!(pid = child.id(), error = %e, "Failed to send SIGKILL to daemon");
             } else {
-                DaemonStatus::Crashed(status.code())
-            };
+                debug!(pid = child.id(), "SIGKILL sent successfully");
+            }
+
+            match child.wait() {
+                Ok(status) => {
+                    info!(pid = child.id(), status = ?status, "Daemon exited");
+                    self.daemon_status = if status.success() {
+                        DaemonStatus::Stopped
+                    } else {
+                        DaemonStatus::Crashed(status.code())
+                    };
+                }
+                Err(e) => {
+                    error!(pid = child.id(), error = %e, "Failed to wait for daemon exit");
+                    // Assuming crashed if we cant wait
+                    self.daemon_status = DaemonStatus::Crashed(None);
+                }
+            }
         }
         Ok(())
     }

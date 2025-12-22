@@ -28,6 +28,7 @@ struct ManagerApp {
     hotkey_settings_state: components::hotkey_settings::HotkeySettingsState,
     visual_settings_state: components::visual_settings::VisualSettingsState,
     characters_state: components::characters::CharactersState,
+    sources_state: components::sources::SourcesTab,
     #[cfg(target_os = "linux")]
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
     #[cfg(target_os = "linux")]
@@ -137,6 +138,7 @@ impl ManagerApp {
             hotkey_settings_state,
             visual_settings_state,
             characters_state,
+            sources_state: components::sources::SourcesTab::default(),
             active_tab: GuiTab::Behavior,
         };
 
@@ -148,6 +150,7 @@ impl ManagerApp {
             hotkey_settings_state,
             visual_settings_state,
             characters_state,
+            sources_state: components::sources::SourcesTab::default(),
             active_tab: GuiTab::Behavior,
         };
 
@@ -302,6 +305,12 @@ impl eframe::App for ManagerApp {
                             &mut self.characters_state,
                             &mut self.hotkey_settings_state,
                         ) {
+                            state.settings_changed = true;
+                            state.config_status_message = None;
+                        }
+                    }
+                    GuiTab::Sources => {
+                        if self.sources_state.ui(ui, current_profile) {
                             state.settings_changed = true;
                             state.config_status_message = None;
                         }

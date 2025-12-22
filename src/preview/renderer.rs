@@ -188,8 +188,20 @@ impl<'a> ThumbnailRenderer<'a> {
         ctx: &AppContext,
         window: Window,
         src: Window,
+        src_depth: u8,
         character_name: &str,
     ) -> Result<(Picture, Picture)> {
+        // Determine source format based on window depth
+        let src_format = if src_depth == 32 {
+            info!(character = %character_name, depth = src_depth, format = "ARGB32", "Using ARGB format for source window");
+            ctx.formats.argb
+        } else {
+            // Default to RGB (usually 24-bit)
+            // If it's not 32 or root depth, this might still be wrong, but it covers standard cases.
+            info!(character = %character_name, depth = src_depth, format = "RGB24", "Using RGB format for source window");
+            ctx.formats.rgb
+        };
+
         // Source picture
         let src_picture = ctx
             .conn
@@ -197,7 +209,7 @@ impl<'a> ThumbnailRenderer<'a> {
             .context("Failed to generate ID for source picture")?;
 
         ctx.conn
-            .render_create_picture(src_picture, src, ctx.formats.rgb, &CreatePictureAux::new())
+            .render_create_picture(src_picture, src, src_format, &CreatePictureAux::new())
             .context(format!(
                 "Failed to create source picture for '{}'",
                 character_name
@@ -256,6 +268,7 @@ impl<'a> ThumbnailRenderer<'a> {
     /// * `ctx` - The application context containing X11 connection and config.
     /// * `character_name` - Name of the character (for logging and window titles).
     /// * `src` - The source window ID to preview.
+    /// * `src_depth` - The depth of the source window (to select correct Render format).
     /// * `font_renderer` - Renderer for text overlays.
     /// * `x`, `y` - Initial screen coordinates.
     /// * `dimensions` - Initial size of the thumbnail.
@@ -266,6 +279,7 @@ impl<'a> ThumbnailRenderer<'a> {
         ctx: &AppContext<'a>,
         character_name: &str,
         src: Window,
+        src_depth: u8,
         font_renderer: &'a FontRenderer,
         x: i16,
         y: i16,
@@ -311,7 +325,7 @@ impl<'a> ThumbnailRenderer<'a> {
 
         // Create rendering resources
         let (src_picture, dst_picture) =
-            Self::create_render_resources(ctx, window, src, character_name)?;
+            Self::create_render_resources(ctx, window, src, src_depth, character_name)?;
 
         // Create overlay renderer
         let overlay = OverlayRenderer::new(
@@ -407,6 +421,26 @@ impl<'a> ThumbnailRenderer<'a> {
                 "Failed to get geometry for source window (character: '{}')",
                 character_name
             ))?;
+            
+        // Debug logging for capture issues
+        tracing::debug!(
+             character = character_name,
+             src_window = self.src,
+             width = geom.width,
+             height = geom.height,
+             depth = geom.depth,
+             x = geom.x,
+             y = geom.y,
+             "Capturing source window"
+        );
+
+        // Safety Check: Skip capture if window is effectively empty/unmapped to avoid X server crashes
+        // A 1x1 window (like seen with Firefox initially) can crash X11 drivers when used in Render operations
+        if geom.width <= 1 || geom.height <= 1 {
+            tracing::warn!(character = character_name, width = geom.width, height = geom.height, "Skipping capture of 1x1/empty window (likely not mapped yet)");
+            return Ok(());
+        }
+
         let transform = Transform {
             matrix11: to_fixed(geom.width as f32 / dimensions.width as f32),
             matrix22: to_fixed(geom.height as f32 / dimensions.height as f32),
