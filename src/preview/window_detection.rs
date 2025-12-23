@@ -222,15 +222,14 @@ pub fn check_and_create_window<'a>(
     let (dimensions, preview_mode) = if let Some(settings) =
         daemon_config.character_thumbnails.get(&character_name)
     {
-        // Use saved settings
-        let dims = if settings.dimensions.width == 0 || settings.dimensions.height == 0 {
-             if let Some(rule) = identity.rule {
-                 Dimensions::new(rule.default_width, rule.default_height)
-             } else {
-                 let (w, h) = daemon_config
-                    .default_thumbnail_size(ctx.screen.width_in_pixels, ctx.screen.height_in_pixels);
-                Dimensions::new(w, h)
-             }
+        // Use saved settings, but let Custom Rule override dimensions if present
+        let dims = if let Some(rule) = &identity.rule {
+            Dimensions::new(rule.default_width, rule.default_height)
+        } else if settings.dimensions.width == 0 || settings.dimensions.height == 0 {
+             // Auto-detect EVE default if saved dims are invalid
+             let (w, h) = daemon_config
+                .default_thumbnail_size(ctx.screen.width_in_pixels, ctx.screen.height_in_pixels);
+            Dimensions::new(w, h)
         } else {
             settings.dimensions
         };

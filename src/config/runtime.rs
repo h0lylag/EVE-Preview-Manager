@@ -36,6 +36,7 @@ pub struct DisplayConfig {
 
 /// Daemon runtime configuration - holds selected profile settings
 /// Built from the JSON config at runtime, not serialized directly
+
 pub struct DaemonConfig {
     pub profile: crate::config::profile::Profile,
     pub character_thumbnails: HashMap<String, CharacterSettings>,

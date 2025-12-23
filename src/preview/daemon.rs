@@ -301,6 +301,8 @@ async fn run_event_loop(
                 }
             }
 
+
+
             // 2. Handle Hotkey Commands
             Some(msg) = hotkey_rx.recv() => {
                  let TimestampedCommand { command, timestamp } = msg;
@@ -495,10 +497,11 @@ pub async fn run_preview_daemon() -> Result<()> {
     let (mut daemon_config, config, mut session_state, mut cycle_state) =
         load_configuration(screen).context("Failed to load configuration")?;
 
-    // 3. Setup Signal Handler
+    // 3. Setup Signal Handlers
     // We do this here as it requires async runtime context
     let sigusr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
         .context("Failed to register SIGUSR1 handler")?;
+
     info!("Registered SIGUSR1 handler for manual position save");
 
     // 4. Setup Hotkeys
