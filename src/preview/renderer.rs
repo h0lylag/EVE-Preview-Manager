@@ -275,6 +275,7 @@ impl<'a> ThumbnailRenderer<'a> {
     ///
     /// # Errors
     /// Returns an error if any X11 resource creation fails (window, pictures, pixmaps).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
         character_name: &str,
@@ -421,23 +422,28 @@ impl<'a> ThumbnailRenderer<'a> {
                 "Failed to get geometry for source window (character: '{}')",
                 character_name
             ))?;
-            
+
         // Debug logging for capture issues
         tracing::debug!(
-             character = character_name,
-             src_window = self.src,
-             width = geom.width,
-             height = geom.height,
-             depth = geom.depth,
-             x = geom.x,
-             y = geom.y,
-             "Capturing source window"
+            character = character_name,
+            src_window = self.src,
+            width = geom.width,
+            height = geom.height,
+            depth = geom.depth,
+            x = geom.x,
+            y = geom.y,
+            "Capturing source window"
         );
 
         // Safety Check: Skip capture if window is effectively empty/unmapped to avoid X server crashes
         // A 1x1 window (like seen with Firefox initially) can crash X11 drivers when used in Render operations
         if geom.width <= 1 || geom.height <= 1 {
-            tracing::warn!(character = character_name, width = geom.width, height = geom.height, "Skipping capture of 1x1/empty window (likely not mapped yet)");
+            tracing::warn!(
+                character = character_name,
+                width = geom.width,
+                height = geom.height,
+                "Skipping capture of 1x1/empty window (likely not mapped yet)"
+            );
             return Ok(());
         }
 

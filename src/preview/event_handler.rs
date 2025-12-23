@@ -76,15 +76,12 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
     // First, check if this is an EVE window or Custom Source and register it with cycle state
     // This happens regardless of whether thumbnails are enabled
     if let Some(identity) = identify_window(
-        ctx.app_ctx, 
-        event.window, 
+        ctx.app_ctx,
+        event.window,
         ctx.session_state,
-        &ctx.daemon_config.profile.custom_windows
+        &ctx.daemon_config.profile.custom_windows,
     )
-        .context(format!(
-            "Failed to identify window {}",
-            event.window
-        ))?
+    .context(format!("Failed to identify window {}", event.window))?
     {
         info!(window = event.window, character = %identity.name, is_custom = !identity.is_eve, "Detected relevant window");
 
@@ -110,10 +107,10 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
                         .get_geometry(thumbnail.window())
                         .map_err(anyhow::Error::from)
                         .and_then(|cookie| cookie.reply().map_err(anyhow::Error::from));
-                    
+
                     match geom_result {
                         Ok(geom) => {
-                             // NOTE: Update character_thumbnails in memory (for manual saves)
+                            // NOTE: Update character_thumbnails in memory (for manual saves)
                             // Skip logged-out clients with empty character name
                             if !thumbnail.character_name.is_empty() {
                                 let settings = crate::types::CharacterSettings::new(
@@ -131,7 +128,11 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
                             // NOTE: If auto-save is DISABLED, we still perform a "safe save" of ONLY the new character's entry
                             if ctx.daemon_config.profile.thumbnail_auto_save_position {
                                 if let Err(e) = ctx.daemon_config.save() {
-                                    tracing::warn!("Failed to save initial position for new character '{}': {}", thumbnail.character_name, e);
+                                    tracing::warn!(
+                                        "Failed to save initial position for new character '{}': {}",
+                                        thumbnail.character_name,
+                                        e
+                                    );
                                 }
                             } else {
                                 let settings = ctx
@@ -148,14 +149,24 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
                                         )
                                     });
 
-                                if let Err(e) = ctx.daemon_config
-                                    .save_new_character(&thumbnail.character_name, settings) {
-                                        tracing::warn!("Failed to safe-save initial position for new character '{}': {}", thumbnail.character_name, e);
+                                if let Err(e) = ctx
+                                    .daemon_config
+                                    .save_new_character(&thumbnail.character_name, settings)
+                                {
+                                    tracing::warn!(
+                                        "Failed to safe-save initial position for new character '{}': {}",
+                                        thumbnail.character_name,
+                                        e
+                                    );
                                 }
                             }
                         }
                         Err(e) => {
-                             tracing::warn!("Failed to query geometry for new thumbnail window {}: {}", thumbnail.window(), e);
+                            tracing::warn!(
+                                "Failed to query geometry for new thumbnail window {}: {}",
+                                thumbnail.window(),
+                                e
+                            );
                         }
                     }
 
@@ -173,7 +184,11 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
                     // Window ignored / not matched (or limit reached)
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to create thumbnail for window {}: {}", event.window, e);
+                    tracing::warn!(
+                        "Failed to create thumbnail for window {}: {}",
+                        event.window,
+                        e
+                    );
                 }
             }
         }
@@ -791,19 +806,16 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
                 // Check if this is a new EVE window being detected (title change from generic to character name)
                 use crate::preview::window_detection::{check_and_create_window, identify_window};
 
-                if let Some(identity) =
-                    identify_window(
-                        ctx.app_ctx, 
-                        event.window, 
-                        ctx.session_state, 
-                        &ctx.daemon_config.profile.custom_windows
-                    ).context(
-                        format!(
-                            "Failed to identify window {} during property change",
-                            event.window
-                        ),
-                    )?
-                {
+                if let Some(identity) = identify_window(
+                    ctx.app_ctx,
+                    event.window,
+                    ctx.session_state,
+                    &ctx.daemon_config.profile.custom_windows,
+                )
+                .context(format!(
+                    "Failed to identify window {} during property change",
+                    event.window
+                ))? {
                     // Register with cycle state (always, regardless of thumbnail setting)
                     ctx.cycle_state
                         .add_window(identity.name.clone(), event.window);

@@ -33,10 +33,9 @@ pub struct DisplayConfig {
     pub inactive_border_size: u16,
     pub minimized_overlay_enabled: bool,
 }
-
 /// Daemon runtime configuration - holds selected profile settings
 /// Built from the JSON config at runtime, not serialized directly
-
+#[derive(Clone)]
 pub struct DaemonConfig {
     pub profile: crate::config::profile::Profile,
     pub character_thumbnails: HashMap<String, CharacterSettings>,

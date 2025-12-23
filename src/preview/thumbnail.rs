@@ -107,8 +107,16 @@ impl<'a> Thumbnail<'a> {
             "Creating thumbnail"
         );
 
-        let renderer =
-            ThumbnailRenderer::new(ctx, &character_name, src, src_geom.depth, font_renderer, x, y, dimensions)?;
+        let renderer = ThumbnailRenderer::new(
+            ctx,
+            &character_name,
+            src,
+            src_geom.depth,
+            font_renderer,
+            x,
+            y,
+            dimensions,
+        )?;
 
         Ok(Self {
             character_name,

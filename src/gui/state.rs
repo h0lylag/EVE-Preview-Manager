@@ -108,7 +108,7 @@ impl SharedState {
     pub fn stop_daemon(&mut self) -> Result<()> {
         if let Some(mut child) = self.daemon.take() {
             info!(pid = child.id(), "Stopping preview daemon");
-            
+
             // Allow some time for the daemon to process signals? No, kill() is immediate.
             // But verify if kill succeeds.
             if let Err(e) = child.kill() {

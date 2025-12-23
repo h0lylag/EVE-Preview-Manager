@@ -5,11 +5,11 @@ use tracing::{debug, info};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
-use crate::config::profile::CustomWindowRule;
 use crate::config::DaemonConfig;
+use crate::config::profile::CustomWindowRule;
 use crate::constants;
 use crate::types::Dimensions;
-use crate::x11::{get_window_class, is_window_eve, is_window_minimized, AppContext};
+use crate::x11::{AppContext, get_window_class, is_window_eve, is_window_minimized};
 use std::collections::HashMap;
 
 use super::session_state::SessionState;
@@ -44,15 +44,10 @@ pub fn identify_window(
 
     // 2. Check Custom Rules
     // Get window properties once to avoid repeated round-trips
-    let wm_name_cookie = ctx.conn.get_property(
-        false,
-        window,
-        ctx.atoms.wm_name,
-        AtomEnum::STRING,
-        0,
-        1024,
-    )?;
-    
+    let wm_name_cookie =
+        ctx.conn
+            .get_property(false, window, ctx.atoms.wm_name, AtomEnum::STRING, 0, 1024)?;
+
     let wm_class = get_window_class(ctx.conn, window, ctx.atoms)
         .ok()
         .flatten()
@@ -65,11 +60,15 @@ pub fn identify_window(
     };
 
     for rule in custom_rules {
-        let matches_title = rule.title_pattern.as_ref()
+        let matches_title = rule
+            .title_pattern
+            .as_ref()
             .map(|p| wm_name.to_lowercase().contains(&p.to_lowercase()))
             .unwrap_or(false); // If rule has title pattern, it MUST match
-        
-        let matches_class = rule.class_pattern.as_ref()
+
+        let matches_class = rule
+            .class_pattern
+            .as_ref()
             .map(|p| wm_class.to_lowercase().contains(&p.to_lowercase()))
             .unwrap_or(false); // If rule has class pattern, it MUST match
 
@@ -77,14 +76,14 @@ pub fn identify_window(
         // - Title defined AND matches (AND Class is None OR matches)
         // - Class defined AND matches (AND Title is None OR matches)
         // Essentially, whatever criteria are defined must be satisfied.
-        
+
         let mut matched = true;
-        
-        if let Some(_) = rule.title_pattern {
-            if !matches_title { matched = false; }
+
+        if rule.title_pattern.is_some() && !matches_title {
+            matched = false;
         }
-        if let Some(_) = rule.class_pattern {
-            if !matches_class { matched = false; }
+        if rule.class_pattern.is_some() && !matches_class {
+            matched = false;
         }
         // If neither is defined, it's a catch-all? No, UI enforces at least one.
         if rule.title_pattern.is_none() && rule.class_pattern.is_none() {
@@ -125,18 +124,20 @@ fn check_eve_window_internal(
         .reply()
     {
         if !prop.value.is_empty() {
-             Some(u32::from_ne_bytes(
+            Some(u32::from_ne_bytes(
                 prop.value[0..constants::x11::PID_PROPERTY_SIZE]
                     .try_into()
                     .unwrap_or([0; 4]),
             ))
-        } else { None }
-    } else { None };
-
-    if let Some(pid) = pid {
-        if pid == std::process::id() {
-            return Ok(None);
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    if pid.is_some_and(|p| p == std::process::id()) {
+        return Ok(None);
     }
 
     // 2. Title Verification
@@ -147,18 +148,18 @@ fn check_eve_window_internal(
 
     if let Some(eve_window) = is_window_eve(ctx.conn, window, ctx.atoms)? {
         let character_name = eve_window.character_name().to_string();
-        
+
         info!(
             window = window,
             character = %character_name,
             "Confirmed EVE Client"
         );
         state.update_last_character(window, &character_name);
-        
+
         ctx.conn.change_window_attributes(
             window,
-             &ChangeWindowAttributesAux::new().event_mask(
-                EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE | EventMask::STRUCTURE_NOTIFY
+            &ChangeWindowAttributesAux::new().event_mask(
+                EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE | EventMask::STRUCTURE_NOTIFY,
             ),
         )?;
 
@@ -176,34 +177,36 @@ pub fn check_and_create_window<'a>(
     existing_thumbnails: &HashMap<Window, Thumbnail>,
 ) -> Result<Option<Thumbnail<'a>>> {
     // Check if window matches EVE or Custom Rule
-    let identity = match identify_window(ctx, window, state, &daemon_config.profile.custom_windows)? {
+    let identity = match identify_window(ctx, window, state, &daemon_config.profile.custom_windows)?
+    {
         Some(id) => id,
         None => return Ok(None),
     };
 
     // Apply Limit Logic for Custom Sources
-    if let Some(rule) = &identity.rule {
-        if rule.limit {
-            // Check if any EXISTING thumbnail has the same name
-            // Note: existing_thumbnails contains previously processed windows
-            if existing_thumbnails.values().any(|t| t.character_name == identity.name) {
-                debug!(
-                    window = window,
-                    alias = %identity.name,
-                    "Skipping duplicate custom source (limit enabled)"
-                );
-                return Ok(None);
-            }
+    if identity.rule.as_ref().is_some_and(|r| r.limit) {
+        // Check if any EXISTING thumbnail has the same name
+        // Note: existing_thumbnails contains previously processed windows
+        if existing_thumbnails
+            .values()
+            .any(|t| t.character_name == identity.name)
+        {
+            debug!(
+                window = window,
+                alias = %identity.name,
+                "Skipping duplicate custom source (limit enabled)"
+            );
+            return Ok(None);
         }
     }
 
     // Skip thumbnail creation if thumbnails are disabled (but window is still tracked via identity/cycle potentially?)
     // Actually, if we return None here, it might not get added to cycle state?
     // In original code, returning None means NO thumbnail.
-    // Cycle state registration is done in `scan_eve_windows` for initial list, 
+    // Cycle state registration is done in `scan_eve_windows` for initial list,
     // and `handle_create_notify` calls `identify_window` SEPARATELY before calling this.
     // So `check_and_create_window` is strictly for THUMBNAIL creation.
-    
+
     if !ctx.config.enabled {
         return Ok(None);
     }
@@ -226,8 +229,8 @@ pub fn check_and_create_window<'a>(
         let dims = if let Some(rule) = &identity.rule {
             Dimensions::new(rule.default_width, rule.default_height)
         } else if settings.dimensions.width == 0 || settings.dimensions.height == 0 {
-             // Auto-detect EVE default if saved dims are invalid
-             let (w, h) = daemon_config
+            // Auto-detect EVE default if saved dims are invalid
+            let (w, h) = daemon_config
                 .default_thumbnail_size(ctx.screen.width_in_pixels, ctx.screen.height_in_pixels);
             Dimensions::new(w, h)
         } else {
@@ -238,10 +241,13 @@ pub fn check_and_create_window<'a>(
         // No saved settings
         if let Some(rule) = identity.rule {
             // Use Custom Rule defaults
-            (Dimensions::new(rule.default_width, rule.default_height), crate::types::PreviewMode::default())
+            (
+                Dimensions::new(rule.default_width, rule.default_height),
+                crate::types::PreviewMode::default(),
+            )
         } else {
-             // Auto-detect EVE default
-             let (w, h) = daemon_config
+            // Auto-detect EVE default
+            let (w, h) = daemon_config
                 .default_thumbnail_size(ctx.screen.width_in_pixels, ctx.screen.height_in_pixels);
             (Dimensions::new(w, h), crate::types::PreviewMode::default())
         }
@@ -260,7 +266,7 @@ pub fn check_and_create_window<'a>(
         "Failed to create thumbnail for '{}' (window {})",
         character_name, window
     ))?;
-    
+
     // Check minimized state
     // Check minimized state
     let is_minimized = is_window_minimized(ctx.conn, window, ctx.atoms).unwrap_or(false);
@@ -271,7 +277,7 @@ pub fn check_and_create_window<'a>(
         // Removed forced update to prevent crashes with fleeting windows (e.g. Firefox popups).
         // Standard X11 Damage events will trigger the first update naturally.
     }
-    
+
     info!(
         window = window,
         character = %character_name,
@@ -323,7 +329,7 @@ pub fn scan_eve_windows<'a>(
 
                 match geom_result {
                     Ok(geom) => {
-                         // Update character_thumbnails in memory (skip logged-out clients with empty name)
+                        // Update character_thumbnails in memory (skip logged-out clients with empty name)
                         if !eve.character_name.is_empty() {
                             let settings = crate::types::CharacterSettings::new(
                                 geom.x,
@@ -337,8 +343,12 @@ pub fn scan_eve_windows<'a>(
                         }
                     }
                     Err(e) => {
-                         tracing::warn!("Failed to query geometry for new thumbnail window {}: {}", eve.window(), e);
-                         // Continue anyway, we just won't update the saved position
+                        tracing::warn!(
+                            "Failed to query geometry for new thumbnail window {}: {}",
+                            eve.window(),
+                            e
+                        );
+                        // Continue anyway, we just won't update the saved position
                     }
                 }
 
