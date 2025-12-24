@@ -932,5 +932,3 @@ mod tests {
         assert!(group.hotkey_backward.is_some());
     }
 }
-
-
