@@ -35,7 +35,7 @@ impl HotkeyBackend for X11Backend {
         require_eve_focus: bool,
     ) -> Result<Vec<JoinHandle<()>>> {
         // Check if we have any hotkeys to register
-        let has_cycle = config.forward_key.is_some() && config.backward_key.is_some();
+        let has_cycle = !config.cycle_hotkeys.is_empty();
         let has_character = !config.character_hotkeys.is_empty();
         let has_profile = !config.profile_hotkeys.is_empty();
         let has_skip = config.toggle_skip_key.is_some();
@@ -100,33 +100,20 @@ fn run_x11_listener(
     let mut hotkey_map: HashMap<(Keycode, ModMask), CycleCommand> = HashMap::new();
 
     // Register cycle hotkeys
-    if let Some(ref fwd) = config.forward_key {
-        if let Some((keycode, modmask)) = evdev_to_x11_key(fwd) {
+    let cycle_hotkeys = Arc::new(config.cycle_hotkeys);
+    for (command, cycle_hotkey) in cycle_hotkeys.iter() {
+        if let Some((keycode, modmask)) = evdev_to_x11_key(cycle_hotkey) {
             register_hotkey(&conn, root, keycode, modmask)?;
-            hotkey_map.insert((keycode, modmask), CycleCommand::Forward);
-            info!(
-                binding = %fwd.display_name(),
+            hotkey_map.insert((keycode, modmask), command.clone());
+             info!(
+                binding = %cycle_hotkey.display_name(),
                 x11_keycode = keycode,
                 modmask = ?modmask,
-                "Registered forward cycle hotkey"
+                command = ?command,
+                "Registered cycle hotkey"
             );
         } else {
-            warn!(binding = %fwd.display_name(), "Failed to map forward key to X11");
-        }
-    }
-
-    if let Some(ref bwd) = config.backward_key {
-        if let Some((keycode, modmask)) = evdev_to_x11_key(bwd) {
-            register_hotkey(&conn, root, keycode, modmask)?;
-            hotkey_map.insert((keycode, modmask), CycleCommand::Backward);
-            info!(
-                binding = %bwd.display_name(),
-                x11_keycode = keycode,
-                modmask = ?modmask,
-                "Registered backward cycle hotkey"
-            );
-        } else {
-            warn!(binding = %bwd.display_name(), "Failed to map backward key to X11");
+             warn!(binding = %cycle_hotkey.display_name(), "Failed to map cycle hotkey to X11");
         }
     }
 

@@ -12,6 +12,12 @@ pub struct CharactersState {
     expanded_rows: std::collections::HashMap<String, bool>,
     // Cache for saving override values when they are temporarily disabled
     cached_overrides: std::collections::HashMap<String, CachedOverrides>,
+    // Index of the currently selected cycle group
+    selected_cycle_group_index: usize,
+    // If Some(idx), we are currently renaming the group at this index
+    renaming_group_idx: Option<usize>,
+    // Temporary string for renaming
+    rename_buffer: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -30,6 +36,9 @@ impl CharactersState {
             character_selections: std::collections::HashMap::new(),
             expanded_rows: std::collections::HashMap::new(),
             cached_overrides: std::collections::HashMap::new(),
+            selected_cycle_group_index: 0,
+            renaming_group_idx: None,
+            rename_buffer: String::new(),
         }
     }
 
@@ -54,6 +63,11 @@ pub fn ui(
     hotkey_state: &mut crate::gui::components::hotkey_settings::HotkeySettingsState,
 ) -> bool {
     let mut changed = false;
+
+    // Ensure selected index is valid
+    if state.selected_cycle_group_index >= profile.cycle_groups.len() {
+        state.selected_cycle_group_index = 0;
+    }
 
     render_two_column_layout(ui, profile, state, hotkey_state, &mut changed);
 
@@ -102,7 +116,7 @@ fn render_two_column_layout(
             egui::vec2(ui.available_width(), ui.available_height()),
             |ui| {
                 ui.vertical(|ui| {
-                    render_cycle_group_column(ui, profile, state, changed);
+                    render_cycle_group_column(ui, profile, state, hotkey_state, changed);
                 });
             },
         );
@@ -296,15 +310,193 @@ fn render_cycle_group_column(
     ui: &mut egui::Ui,
     profile: &mut Profile,
     state: &mut CharactersState,
+    hotkey_state: &mut crate::gui::components::hotkey_settings::HotkeySettingsState,
     changed: &mut bool,
 ) {
-    // Header Row with Add Button
+    // Header Row with Cycle Group Selector
     ui.horizontal(|ui| {
         ui.heading("Cycle Group");
+    });
+    ui.add_space(ITEM_SPACING);
+
+    // Group Selector & Management
+    ui.horizontal(|ui| {
+        // Validation: Ensure at least one group (done in profile.rs, but safe check)
+        if profile.cycle_groups.is_empty() {
+             profile.cycle_groups.push(crate::config::profile::CycleGroup::default_group());
+             *changed = true;
+        }
+
+        // Renaming Logic
+        if let Some(idx) = state.renaming_group_idx {
+            if idx < profile.cycle_groups.len() {
+                 let text_edit = egui::TextEdit::singleline(&mut state.rename_buffer)
+                    .desired_width(120.0);
+                let response = ui.add(text_edit);
+
+                if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                     profile.cycle_groups[idx].name = state.rename_buffer.clone();
+                     state.renaming_group_idx = None;
+                     *changed = true;
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    state.renaming_group_idx = None;
+                }
+                
+                // Keep focus
+                if response.changed() {
+                     // buffer updated
+                }
+                if !response.has_focus() && state.renaming_group_idx.is_some() {
+                     response.request_focus();
+                }
+            } else {
+                 state.renaming_group_idx = None;
+            }
+        } else {
+             // ComboBox Selector
+            egui::ComboBox::from_id_salt("cycle_group_selector")
+                .width(140.0)
+                .selected_text(&profile.cycle_groups[state.selected_cycle_group_index].name)
+                .show_ui(ui, |ui| {
+                    for (idx, group) in profile.cycle_groups.iter().enumerate() {
+                        if ui.selectable_value(
+                            &mut state.selected_cycle_group_index,
+                            idx,
+                            &group.name,
+                        ).clicked() {
+                             // Handle selection change if needed
+                        }
+                    }
+                });
+            
+            // Rename Button
+            if ui.small_button("✏").on_hover_text("Rename Group").clicked() {
+                state.renaming_group_idx = Some(state.selected_cycle_group_index);
+                state.rename_buffer = profile.cycle_groups[state.selected_cycle_group_index].name.clone();
+            }
+
+            ui.add_space(8.0);
+
+            // New Button
+            if ui.button("➕ New").on_hover_text("Create New Group").clicked() {
+                let mut new_group = crate::config::profile::CycleGroup::default_group();
+                // Generate unique name
+                let mut counter = 1;
+                let mut name = "New Group".to_string();
+                while profile.cycle_groups.iter().any(|g| g.name == name) {
+                    counter += 1;
+                    name = format!("New Group {}", counter);
+                }
+                new_group.name = name;
+                profile.cycle_groups.push(new_group);
+                state.selected_cycle_group_index = profile.cycle_groups.len() - 1;
+                *changed = true;
+            }
+
+            // Duplicate Button
+            if ui.button("📄 Copy").on_hover_text("Duplicate Group").clicked() {
+                let mut new_group = profile.cycle_groups[state.selected_cycle_group_index].clone();
+                new_group.name = format!("{} (Copy)", new_group.name);
+                profile.cycle_groups.push(new_group);
+                state.selected_cycle_group_index = profile.cycle_groups.len() - 1;
+                *changed = true;
+            }
+
+            // Delete Button
+            ui.add_enabled_ui(profile.cycle_groups.len() > 1, |ui| {
+                if ui.button("🗑 Delete").on_hover_text("Delete Group").clicked() {
+                    profile.cycle_groups.remove(state.selected_cycle_group_index);
+                    // Clamp index
+                    if state.selected_cycle_group_index >= profile.cycle_groups.len() {
+                        state.selected_cycle_group_index = profile.cycle_groups.len().saturating_sub(1);
+                    }
+                    *changed = true;
+                }
+            });
+        }
+    });
+    
+    ui.add_space(ITEM_SPACING);
+    ui.separator();
+    ui.add_space(ITEM_SPACING);
+
+    // Cycle Hotkeys for this Group
+    let current_group = &mut profile.cycle_groups[state.selected_cycle_group_index];
+    
+    ui.label(egui::RichText::new("Group Hotkeys").strong());
+    
+    ui.horizontal(|ui| {
+         // Forward
+         ui.label("Forward:");
+         
+         // Logic copied/adapted from hotkey_settings.rs
+         if let Some(binding) = &current_group.hotkey_forward {
+             ui.label(egui::RichText::new(binding.display_name()).strong());
+         } else {
+              ui.label(egui::RichText::new("Not set").weak());
+         }
+         
+         let id_str_fwd = format!("GROUP:{}:FWD", state.selected_cycle_group_index);
+         let bind_text_fwd = if hotkey_state.is_capturing_for(&id_str_fwd) {
+             "Capturing..."
+         } else {
+             "⌨ Bind"
+         };
+         
+         if ui.button(bind_text_fwd).clicked() {
+              hotkey_state.start_key_capture_for_character(
+                  id_str_fwd,
+                  profile.hotkey_backend
+              );
+         }
+         
+         if current_group.hotkey_forward.is_some() && ui.small_button("✖").clicked() {
+             current_group.hotkey_forward = None;
+             *changed = true;
+         }
+
+         ui.add_space(24.0);
+
+         // Backward
+         ui.label("Backward:");
+         
+         if let Some(binding) = &current_group.hotkey_backward {
+             ui.label(egui::RichText::new(binding.display_name()).strong());
+         } else {
+              ui.label(egui::RichText::new("Not set").weak());
+         }
+         
+         let id_str_bwd = format!("GROUP:{}:BWD", state.selected_cycle_group_index);
+         let bind_text_bwd = if hotkey_state.is_capturing_for(&id_str_bwd) {
+             "Capturing..."
+         } else {
+             "⌨ Bind"
+         };
+         
+         if ui.button(bind_text_bwd).clicked() {
+              hotkey_state.start_key_capture_for_character(
+                  id_str_bwd,
+                  profile.hotkey_backend
+              );
+         }
+         
+         if current_group.hotkey_backward.is_some() && ui.small_button("✖").clicked() {
+             current_group.hotkey_backward = None;
+             *changed = true;
+         }
+    });
+
+    ui.add_space(ITEM_SPACING);
+    ui.separator();
+    ui.add_space(ITEM_SPACING);
+    
+    // Character List Header
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Characters").strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("➕ Add").clicked() {
+            if ui.button("➕ Add Chars").clicked() {
                 state.show_add_characters_popup = true;
-                // Initialize selections for all available characters (unchecked by default)
+                // Initialize selections
                 state.character_selections.clear();
                 for char_name in profile.character_thumbnails.keys() {
                     state.character_selections.insert(char_name.clone(), false);
@@ -312,14 +504,10 @@ fn render_cycle_group_column(
             }
         });
     });
-    ui.label(
-        egui::RichText::new("Order of characters when cycling.")
-            .weak()
-            .small(),
-    );
-    ui.add_space(ITEM_SPACING);
 
-    // Draggable List
+    // Draggable List (modified to use selected group)
+    let current_group = &mut profile.cycle_groups[state.selected_cycle_group_index];
+    
     egui::ScrollArea::vertical()
         .id_salt("cycle_group_scroll")
         .show(ui, |ui| {
@@ -334,7 +522,7 @@ fn render_cycle_group_column(
             let (_, dropped_payload) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
                 ui.set_min_height(100.0);
 
-                for (row_idx, character) in profile.hotkey_cycle_group.iter().enumerate() {
+                for (row_idx, character) in current_group.characters.iter().enumerate() {
                     let item_id = egui::Id::new("cycle_group_item").with(row_idx);
 
                     let response = ui
@@ -396,12 +584,14 @@ fn render_cycle_group_column(
 
             if let Some(dragged_payload) = dropped_payload {
                 from_idx = Some(*dragged_payload);
-                to_idx = Some(profile.hotkey_cycle_group.len());
+                to_idx = Some(current_group.characters.len());
                 *changed = true;
             }
 
             if let Some(idx) = to_delete {
-                profile.hotkey_cycle_group.remove(idx);
+                 // Re-borrow to satisfy borrow checker if needed, but current_group is mutable borrow of profile
+                 // We need to access profile.cycle_groups again? No, current_group IS the reference.
+                 current_group.characters.remove(idx);
             }
 
             if let (Some(from), Some(mut to)) = (from_idx, to_idx) {
@@ -409,14 +599,14 @@ fn render_cycle_group_column(
                     to -= 1;
                 }
                 if from != to {
-                    let item = profile.hotkey_cycle_group.remove(from);
-                    let insert_idx = to.min(profile.hotkey_cycle_group.len());
-                    profile.hotkey_cycle_group.insert(insert_idx, item);
+                    let item = current_group.characters.remove(from);
+                    let insert_idx = to.min(current_group.characters.len());
+                    current_group.characters.insert(insert_idx, item);
                 }
             }
 
-            if profile.hotkey_cycle_group.is_empty() {
-                ui.label(egui::RichText::new("No characters in cycle group.").weak());
+            if current_group.characters.is_empty() {
+                ui.label(egui::RichText::new("No characters in this group.").weak());
             }
         });
 }
@@ -732,9 +922,10 @@ fn render_add_characters_modal(
                     for name in char_names {
                         if let Some(selected) = state.character_selections.get_mut(&name) {
                             // Show if already in cycle group
-                            let already_in_cycle = profile.hotkey_cycle_group.contains(&name);
+                            let current_group = &profile.cycle_groups[state.selected_cycle_group_index];
+                            let already_in_cycle = current_group.characters.contains(&name);
                             let label = if already_in_cycle {
-                                format!("{} (already in cycle)", name)
+                                format!("{} (already in this group)", name)
                             } else {
                                 name.clone()
                             };
@@ -750,9 +941,11 @@ fn render_add_characters_modal(
             ui.horizontal(|ui| {
                 if ui.button("Add Selected").clicked() {
                     let mut added_any = false;
+                    let current_group = &mut profile.cycle_groups[state.selected_cycle_group_index];
+                    
                     for (name, selected) in &state.character_selections {
-                        if *selected && !profile.hotkey_cycle_group.contains(name) {
-                            profile.hotkey_cycle_group.push(name.clone());
+                        if *selected && !current_group.characters.contains(name) {
+                            current_group.characters.push(name.clone());
                             added_any = true;
                         }
                     }

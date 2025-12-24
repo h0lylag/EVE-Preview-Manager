@@ -11,8 +11,10 @@ use crate::input::evdev_backend;
 /// Hotkey command sent from input listeners to the main daemon loop
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleCommand {
-    Forward,
-    Backward,
+    /// Cycle forward in the specified group
+    Forward(String),
+    /// Cycle backward in the specified group
+    Backward(String),
     /// Triggered when a character-specific hotkey is pressed, carrying its binding configuration for context
     CharacterHotkey(HotkeyBinding),
     /// Triggered when a profile switch hotkey is pressed

@@ -106,7 +106,7 @@ fn load_configuration(
     );
 
     // Initialize cycle state from config
-    let cycle_state = CycleState::new(daemon_config.profile.hotkey_cycle_group.clone());
+    let cycle_state = CycleState::new(daemon_config.profile.cycle_groups.clone());
 
     Ok((daemon_config, config, session_state, cycle_state))
 }
@@ -141,7 +141,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
 
     info!(
         unique_hotkeys = hotkey_groups.len(),
-        total_characters = daemon_config.profile.hotkey_cycle_group.len(),
+        cycle_groups = daemon_config.profile.cycle_groups.len(),
         "Built per-character hotkey groups"
     );
 
@@ -155,8 +155,23 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
     }
 
     // Spawn hotkey listener (start if any hotkeys configured: cycle or per-character)
-    let has_cycle_keys = daemon_config.profile.hotkey_cycle_forward.is_some()
-        && daemon_config.profile.hotkey_cycle_backward.is_some();
+    let cycle_hotkeys: Vec<(CycleCommand, crate::config::HotkeyBinding)> = daemon_config
+        .profile
+        .cycle_groups
+        .iter()
+        .flat_map(|g| {
+            let mut hotkeys = Vec::new();
+            if let Some(fwd) = &g.hotkey_forward {
+                hotkeys.push((CycleCommand::Forward(g.name.clone()), fwd.clone()));
+            }
+            if let Some(bwd) = &g.hotkey_backward {
+                hotkeys.push((CycleCommand::Backward(g.name.clone()), bwd.clone()));
+            }
+            hotkeys
+        })
+        .collect();
+
+    let has_cycle_keys = !cycle_hotkeys.is_empty();
     let has_character_hotkeys = !character_hotkeys.is_empty();
     let has_profile_hotkeys = !profile_hotkeys.is_empty();
     let has_skip_key = daemon_config.profile.hotkey_toggle_skip.is_some();
@@ -171,8 +186,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
         use crate::input::backend::{HotkeyBackend, HotkeyConfiguration};
 
         let hotkey_config = HotkeyConfiguration {
-            forward_key: daemon_config.profile.hotkey_cycle_forward.clone(),
-            backward_key: daemon_config.profile.hotkey_cycle_backward.clone(),
+            cycle_hotkeys,
             character_hotkeys: character_hotkeys.clone(),
             profile_hotkeys: profile_hotkeys.clone(),
             toggle_skip_key: daemon_config.profile.hotkey_toggle_skip.clone(),
@@ -340,9 +354,9 @@ async fn run_event_loop(
                     };
 
                     let result = match command {
-                        CycleCommand::Forward => resources.cycle.cycle_forward(logged_out_map)
+                        CycleCommand::Forward(ref group) => resources.cycle.cycle_forward(group, logged_out_map)
                             .map(|(w, s)| (w, s.to_string())),
-                        CycleCommand::Backward => resources.cycle.cycle_backward(logged_out_map)
+                        CycleCommand::Backward(ref group) => resources.cycle.cycle_backward(group, logged_out_map)
                             .map(|(w, s)| (w, s.to_string())),
                         CycleCommand::CharacterHotkey(ref binding) => {
                             debug!(
@@ -457,7 +471,8 @@ async fn run_event_loop(
                             }
                         }
                     } else {
-                        warn!(active_windows = resources.cycle.config_order().len(), "No window to activate, cycle state is empty");
+                         // Simplify logging to avoid iterating all groups for a warn message
+                        warn!("No window to activate via hotkey");
                     }
                 } else {
                     info!(hotkey_require_eve_focus = resources.config.profile.hotkey_require_eve_focus, "Hotkey ignored, EVE window not focused (hotkey_require_eve_focus enabled)");

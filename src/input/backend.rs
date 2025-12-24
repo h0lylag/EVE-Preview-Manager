@@ -33,8 +33,7 @@ pub struct BackendCapabilities {
 /// Configuration for hotkey bindings
 #[derive(Debug, Clone)]
 pub struct HotkeyConfiguration {
-    pub forward_key: Option<HotkeyBinding>,
-    pub backward_key: Option<HotkeyBinding>,
+    pub cycle_hotkeys: Vec<(crate::input::listener::CycleCommand, HotkeyBinding)>,
     pub character_hotkeys: Vec<HotkeyBinding>,
     pub profile_hotkeys: Vec<HotkeyBinding>,
     pub toggle_skip_key: Option<HotkeyBinding>,

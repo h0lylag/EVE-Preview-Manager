@@ -12,6 +12,27 @@ use tracing::info;
 
 use crate::types::CharacterSettings;
 
+/// A named group of characters for cycling
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleGroup {
+    pub name: String,
+    #[serde(default)]
+    pub characters: Vec<String>,
+    pub hotkey_forward: Option<crate::config::HotkeyBinding>,
+    pub hotkey_backward: Option<crate::config::HotkeyBinding>,
+}
+
+impl CycleGroup {
+    pub fn default_group() -> Self {
+        Self {
+            name: "Default".to_string(),
+            characters: Vec::new(),
+            hotkey_forward: None,
+            hotkey_backward: None,
+        }
+    }
+}
+
 /// Rule for identifying and naming arbitrary application windows
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomWindowRule {
@@ -78,8 +99,150 @@ pub struct GlobalSettings {
     pub window_height: u16,
 }
 
+/// Helper struct for migration during deserialization
+#[derive(Deserialize)]
+struct ProfileHelper {
+    profile_name: String,
+    #[serde(default)]
+    profile_description: String,
+    #[serde(default = "default_thumbnail_width")]
+    thumbnail_default_width: u16,
+    #[serde(default = "default_thumbnail_height")]
+    thumbnail_default_height: u16,
+    #[serde(default = "default_thumbnail_enabled")]
+    thumbnail_enabled: bool,
+    thumbnail_opacity: u8,
+    #[serde(default = "default_border_enabled", alias = "thumbnail_border")]
+    thumbnail_active_border: bool,
+    #[serde(alias = "thumbnail_border_size")]
+    thumbnail_active_border_size: u16,
+    #[serde(alias = "thumbnail_border_color")]
+    thumbnail_active_border_color: String,
+    #[serde(default = "default_inactive_border_enabled")]
+    thumbnail_inactive_border: bool,
+    #[serde(
+        alias = "thumbnail_inactive_border_size",
+        default = "default_border_size"
+    )]
+    thumbnail_inactive_border_size: u16,
+    #[serde(default = "default_inactive_border_color")]
+    thumbnail_inactive_border_color: String,
+    thumbnail_text_size: u16,
+    thumbnail_text_x: i16,
+    thumbnail_text_y: i16,
+    #[serde(default = "default_text_font_family")]
+    thumbnail_text_font: String,
+    thumbnail_text_color: String,
+    #[serde(default = "default_auto_save_thumbnail_positions")]
+    thumbnail_auto_save_position: bool,
+    #[serde(default = "default_snap_threshold")]
+    thumbnail_snap_threshold: u16,
+    #[serde(default)]
+    thumbnail_hide_not_focused: bool,
+    #[serde(default = "default_preserve_thumbnail_position_on_swap")]
+    thumbnail_preserve_position_on_swap: bool,
+    #[serde(default)]
+    client_minimize_on_switch: bool,
+    #[serde(default)]
+    client_minimize_show_overlay: bool,
+    #[serde(default = "default_hotkey_backend")]
+    hotkey_backend: HotkeyBackendType,
+    #[serde(default)]
+    hotkey_input_device: Option<String>,
+    #[serde(default)]
+    hotkey_logged_out_cycle: bool,
+    #[serde(default)]
+    hotkey_require_eve_focus: bool,
+    #[serde(default)]
+    hotkey_profile_switch: Option<crate::config::HotkeyBinding>,
+    #[serde(default)]
+    hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
+    #[serde(default)]
+    character_hotkeys: HashMap<String, crate::config::HotkeyBinding>,
+    #[serde(default)]
+    character_thumbnails: HashMap<String, CharacterSettings>,
+    #[serde(default)]
+    custom_windows: Vec<CustomWindowRule>,
+
+    // New field
+    #[serde(default)]
+    cycle_groups: Vec<CycleGroup>,
+
+    // Legacy fields for migration
+    #[serde(default)]
+    hotkey_cycle_forward: Option<crate::config::HotkeyBinding>,
+    #[serde(default)]
+    hotkey_cycle_backward: Option<crate::config::HotkeyBinding>,
+    #[serde(default)]
+    hotkey_cycle_group: Vec<String>,
+}
+
+impl From<ProfileHelper> for Profile {
+    fn from(helper: ProfileHelper) -> Self {
+        let mut cycle_groups = helper.cycle_groups;
+
+        // Migration logic:
+        // If we have legacy fields but no cycle groups, create a "Default" group from them
+        if cycle_groups.is_empty()
+            && (!helper.hotkey_cycle_group.is_empty()
+                || helper.hotkey_cycle_forward.is_some()
+                || helper.hotkey_cycle_backward.is_some())
+        {
+            cycle_groups.push(CycleGroup {
+                name: "Default".to_string(),
+                characters: helper.hotkey_cycle_group,
+                hotkey_forward: helper.hotkey_cycle_forward,
+                hotkey_backward: helper.hotkey_cycle_backward,
+            });
+        }
+
+        // Ensure at least one group exists
+        if cycle_groups.is_empty() {
+            cycle_groups.push(CycleGroup::default_group());
+        }
+
+        Profile {
+            profile_name: helper.profile_name,
+            profile_description: helper.profile_description,
+            thumbnail_default_width: helper.thumbnail_default_width,
+            thumbnail_default_height: helper.thumbnail_default_height,
+            thumbnail_enabled: helper.thumbnail_enabled,
+            thumbnail_opacity: helper.thumbnail_opacity,
+            thumbnail_active_border: helper.thumbnail_active_border,
+            thumbnail_active_border_size: helper.thumbnail_active_border_size,
+            thumbnail_active_border_color: helper.thumbnail_active_border_color,
+            thumbnail_inactive_border: helper.thumbnail_inactive_border,
+            thumbnail_inactive_border_size: helper.thumbnail_inactive_border_size,
+            thumbnail_inactive_border_color: helper.thumbnail_inactive_border_color,
+            thumbnail_text_size: helper.thumbnail_text_size,
+            thumbnail_text_x: helper.thumbnail_text_x,
+            thumbnail_text_y: helper.thumbnail_text_y,
+            thumbnail_text_font: helper.thumbnail_text_font,
+            thumbnail_text_color: helper.thumbnail_text_color,
+            thumbnail_auto_save_position: helper.thumbnail_auto_save_position,
+            thumbnail_snap_threshold: helper.thumbnail_snap_threshold,
+            thumbnail_hide_not_focused: helper.thumbnail_hide_not_focused,
+            thumbnail_preserve_position_on_swap: helper.thumbnail_preserve_position_on_swap,
+            client_minimize_on_switch: helper.client_minimize_on_switch,
+            client_minimize_show_overlay: helper.client_minimize_show_overlay,
+            hotkey_backend: helper.hotkey_backend,
+            hotkey_input_device: helper.hotkey_input_device,
+            hotkey_logged_out_cycle: helper.hotkey_logged_out_cycle,
+            hotkey_require_eve_focus: helper.hotkey_require_eve_focus,
+            hotkey_profile_switch: helper.hotkey_profile_switch,
+            hotkey_toggle_skip: helper.hotkey_toggle_skip,
+            cycle_groups, // Use the migrated or valid groups
+            character_hotkeys: helper.character_hotkeys,
+            character_thumbnails: helper.character_thumbnails,
+            custom_windows: helper.custom_windows,
+        }
+    }
+}
+
+/// Profile - A complete set of visual and behavioral settings
 /// Profile - A complete set of visual and behavioral settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "ProfileHelper")]
 pub struct Profile {
     pub profile_name: String,
     #[serde(default)]
@@ -151,11 +314,13 @@ pub struct Profile {
     #[serde(default)]
     pub hotkey_input_device: Option<String>,
 
-    /// Forward cycle hotkey binding (user must configure)
-    pub hotkey_cycle_forward: Option<crate::config::HotkeyBinding>,
+    // REMOVED LEGACY FIELDS in favor of cycle_groups
+    // hotkey_cycle_forward, hotkey_cycle_backward, hotkey_cycle_group are now inside CycleGroup
 
-    /// Backward cycle hotkey binding (user must configure)
-    pub hotkey_cycle_backward: Option<crate::config::HotkeyBinding>,
+    /// Multiple cycle groups, each with its own character list and hotkeys
+    /// Multiple cycle groups, each with its own character list and hotkeys
+    #[serde(default)]
+    pub cycle_groups: Vec<CycleGroup>,
 
     /// Include logged-out characters in hotkey cycle if they were previously logged in during this session
     #[serde(default)]
@@ -172,10 +337,6 @@ pub struct Profile {
     /// Hotkey to temporarily skip the current character in the cycle
     #[serde(default)]
     pub hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
-
-    /// Character cycle order (list of character names)
-    #[serde(default)]
-    pub hotkey_cycle_group: Vec<String>,
 
     /// Per-character hotkey assignments (character_name -> optional binding)
     /// Allows direct switching to specific characters with dedicated hotkeys
@@ -291,13 +452,11 @@ fn default_profiles() -> Vec<Profile> {
         client_minimize_show_overlay: false, // Default: off (clean minimized look)
         hotkey_backend: default_hotkey_backend(), // Default: X11 (secure, no permissions)
         hotkey_input_device: None, // Default: no device selected (only used by evdev backend)
-        hotkey_cycle_forward: None, // User must configure
-        hotkey_cycle_backward: None, // User must configure
         hotkey_logged_out_cycle: false, // Default: off
         hotkey_require_eve_focus: crate::constants::defaults::behavior::HOTKEY_REQUIRE_EVE_FOCUS,
         hotkey_profile_switch: None,
         hotkey_toggle_skip: None, // User must configure
-        hotkey_cycle_group: Vec::new(),
+        cycle_groups: vec![CycleGroup::default_group()],
         character_hotkeys: HashMap::new(),
         character_thumbnails: HashMap::new(),
         custom_windows: Vec::new(),
@@ -612,39 +771,76 @@ mod tests {
     #[test]
     fn test_profile_with_hotkeys() {
         let mut profile = Profile::default_with_name("Hotkey Test".to_string(), String::new());
-        profile.hotkey_cycle_forward = Some(crate::config::HotkeyBinding::new(
+        profile.cycle_groups[0].hotkey_forward = Some(crate::config::HotkeyBinding::new(
             15, false, false, false, false,
         ));
-        profile.hotkey_cycle_backward = Some(crate::config::HotkeyBinding::new(
+        profile.cycle_groups[0].hotkey_backward = Some(crate::config::HotkeyBinding::new(
             15, false, true, false, false,
         ));
 
-        assert!(profile.hotkey_cycle_forward.is_some());
-        assert!(profile.hotkey_cycle_backward.is_some());
+        assert!(profile.cycle_groups[0].hotkey_forward.is_some());
+        assert!(profile.cycle_groups[0].hotkey_backward.is_some());
 
         let json = serde_json::to_string(&profile).unwrap();
         let deserialized: Profile = serde_json::from_str(&json).unwrap();
 
         assert_eq!(
-            deserialized.hotkey_cycle_forward,
-            profile.hotkey_cycle_forward
+            deserialized.cycle_groups[0].hotkey_forward,
+            profile.cycle_groups[0].hotkey_forward
         );
         assert_eq!(
-            deserialized.hotkey_cycle_backward,
-            profile.hotkey_cycle_backward
+            deserialized.cycle_groups[0].hotkey_backward,
+            profile.cycle_groups[0].hotkey_backward
         );
     }
 
     #[test]
     fn test_profile_cycle_group() {
         let mut profile = Profile::default_with_name("Cycle Test".to_string(), String::new());
-        profile.hotkey_cycle_group = vec![
+        // Populate the default group
+        profile.cycle_groups[0].characters = vec![
             "Character1".to_string(),
             "Character2".to_string(),
             "Character3".to_string(),
         ];
 
-        assert_eq!(profile.hotkey_cycle_group.len(), 3);
-        assert_eq!(profile.hotkey_cycle_group[0], "Character1");
+        assert_eq!(profile.cycle_groups[0].characters.len(), 3);
+        assert_eq!(profile.cycle_groups[0].characters[0], "Character1");
+    }
+
+    #[test]
+    fn test_migration_legacy_hotkeys() {
+        // Start with a valid default profile to ensure all required fields are present
+        let default_profile = Profile::default_with_name("Legacy Test".to_string(), String::new());
+        let mut json_value = serde_json::to_value(&default_profile).unwrap();
+
+        // 1. Remove the new `cycle_groups` field to simulate an old config
+        if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("cycle_groups");
+
+            // 2. Inject legacy fields
+            obj.insert("hotkey_cycle_group".to_string(), serde_json::json!(["A", "B"]));
+            // We need to match the actual serialization format of HotkeyBinding, or mostly likely just "keys" if that's how it's defined
+            // Based on HotkeyBinding usage elsewhere, it likely serializes to a struct.
+            // Let's create a binding object.
+            // Assuming HotkeyBinding deserialization is robust or standard.
+            // If HotkeyBinding is complex, we can use serde_json::to_value on a real binding.
+            let dummy_binding = crate::config::HotkeyBinding::new(15, false, false, false, false); // Tab key?
+            
+            obj.insert("hotkey_cycle_forward".to_string(), serde_json::to_value(&dummy_binding).unwrap());
+            obj.insert("hotkey_cycle_backward".to_string(), serde_json::to_value(&dummy_binding).unwrap());
+        }
+
+        let legacy_json = serde_json::to_string(&json_value).unwrap();
+
+        let profile: Profile = serde_json::from_str(&legacy_json).expect("Failed to deserialize legacy profile");
+
+        // Verify migration
+        assert_eq!(profile.cycle_groups.len(), 1);
+        let group = &profile.cycle_groups[0];
+        assert_eq!(group.name, "Default");
+        assert_eq!(group.characters, vec!["A", "B"]);
+        assert!(group.hotkey_forward.is_some());
+        assert!(group.hotkey_backward.is_some());
     }
 }

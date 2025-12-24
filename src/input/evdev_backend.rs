@@ -92,11 +92,8 @@ fn spawn_listener_impl(
             info!("Auto-detect mode: using devices from hotkey bindings");
 
             let mut required_devices = std::collections::HashSet::new();
-            if let Some(ref fwd) = config.forward_key {
-                required_devices.extend(fwd.source_devices.iter().cloned());
-            }
-            if let Some(ref bwd) = config.backward_key {
-                required_devices.extend(bwd.source_devices.iter().cloned());
+            for (_, binding) in &config.cycle_hotkeys {
+                 required_devices.extend(binding.source_devices.iter().cloned());
             }
             for binding in &config.character_hotkeys {
                 required_devices.extend(binding.source_devices.iter().cloned());
@@ -165,15 +162,14 @@ fn spawn_listener_impl(
     // Share all device paths so each listener can query modifier state from all devices
     let all_device_paths = Arc::new(all_device_paths);
 
-    let cycle_configured = config.forward_key.is_some() && config.backward_key.is_some();
+    let cycle_configured = !config.cycle_hotkeys.is_empty();
     let has_character_hotkeys = !config.character_hotkeys.is_empty();
     let has_profile_hotkeys = !config.profile_hotkeys.is_empty();
     let has_skip_key = config.toggle_skip_key.is_some();
 
     if cycle_configured || has_character_hotkeys || has_profile_hotkeys || has_skip_key {
         info!(
-            forward = %config.forward_key.as_ref().map_or("None".to_string(), |k| k.display_name()),
-            backward = %config.backward_key.as_ref().map_or("None".to_string(), |k| k.display_name()),
+            cycle_hotkey_count = config.cycle_hotkeys.len(),
             character_hotkey_count = config.character_hotkeys.len(),
             profile_hotkey_count = config.profile_hotkeys.len(),
             has_skip_key = has_skip_key,
@@ -228,13 +224,9 @@ fn listen_for_hotkeys(
             // Collect non-modifier key presses that might be hotkeys
             if pressed {
                 let is_cycle_key = config
-                    .forward_key
-                    .as_ref()
-                    .is_some_and(|fwd| fwd.key_code == key_code)
-                    || config
-                        .backward_key
-                        .as_ref()
-                        .is_some_and(|bwd| bwd.key_code == key_code);
+                    .cycle_hotkeys
+                    .iter()
+                    .any(|(_, hk)| hk.key_code == key_code);
                 let is_character_key = config
                     .character_hotkeys
                     .iter()
@@ -284,43 +276,27 @@ fn listen_for_hotkeys(
                 }
             }
 
-            // Check cycle hotkeys first (Forward/Backward take priority)
+            // Check cycle hotkeys first
             let mut handled = false;
             let mut command_to_send = None;
 
-            if let Some(ref fwd) = config.forward_key
-                && fwd.matches(
+            for (cmd, binding) in &config.cycle_hotkeys {
+                 if binding.matches(
                     key_code,
                     ctrl_pressed,
                     shift_pressed,
                     alt_pressed,
                     super_pressed,
-                )
-            {
-                info!(
-                    binding = %fwd.display_name(),
-                    "Forward hotkey pressed, sending command"
-                );
-                command_to_send = Some(CycleCommand::Forward);
-                handled = true;
-            }
-
-            if !handled
-                && let Some(ref bwd) = config.backward_key
-                && bwd.matches(
-                    key_code,
-                    ctrl_pressed,
-                    shift_pressed,
-                    alt_pressed,
-                    super_pressed,
-                )
-            {
-                info!(
-                    binding = %bwd.display_name(),
-                    "Backward hotkey pressed, sending command"
-                );
-                command_to_send = Some(CycleCommand::Backward);
-                handled = true;
+                ) {
+                    info!(
+                        binding = %binding.display_name(),
+                        command = ?cmd,
+                        "Cycle hotkey pressed, sending command"
+                    );
+                    command_to_send = Some(cmd.clone());
+                    handled = true;
+                    break;
+                 }
             }
 
             if !handled

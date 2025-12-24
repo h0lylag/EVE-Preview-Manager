@@ -245,58 +245,8 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                 HotkeyBackendType::X11 => true, // Always enabled for X11
                 HotkeyBackendType::Evdev => profile.hotkey_input_device.is_some(),
             };
-
+            
             ui.add_enabled_ui(device_selected, |ui| {
-                ui.label("Cycle Bindings:");
-                ui.add_space(ITEM_SPACING / 2.0);
-
-                // Forward key binding
-                ui.horizontal(|ui| {
-                    ui.label("Forward:");
-                    let binding_text = profile.hotkey_cycle_forward.as_ref()
-                        .map(|b| b.display_name())
-                        .unwrap_or_else(|| "Not set".to_string());
-                    let color = if profile.hotkey_cycle_forward.is_none() {
-                        egui::Color32::from_rgb(200, 100, 100)
-                    } else {
-                        ui.style().visuals.text_color()
-                    };
-                    ui.label(egui::RichText::new(binding_text).strong().color(color));
-                    if ui.button("⌨ Bind").clicked() {
-                        state.start_key_capture(CaptureTarget::Forward, profile.hotkey_backend);
-                    }
-                    if profile.hotkey_cycle_forward.is_some() && ui.small_button("✖").on_hover_text("Clear binding").clicked() {
-                        profile.hotkey_cycle_forward = None;
-                        changed = true;
-                    }
-                });
-
-                ui.add_space(ITEM_SPACING / 2.0);
-
-                // Backward key binding
-                ui.horizontal(|ui| {
-                    ui.label("Backward:");
-                    let binding_text = profile.hotkey_cycle_backward.as_ref()
-                        .map(|b| b.display_name())
-                        .unwrap_or_else(|| "Not set".to_string());
-                    let color = if profile.hotkey_cycle_backward.is_none() {
-                        egui::Color32::from_rgb(200, 100, 100)
-                    } else {
-                        ui.style().visuals.text_color()
-                    };
-                    ui.label(egui::RichText::new(binding_text).strong().color(color));
-                    if ui.button("⌨ Bind").clicked() {
-                        state.start_key_capture(CaptureTarget::Backward, profile.hotkey_backend);
-                    }
-                    if profile.hotkey_cycle_backward.is_some() && ui.small_button("✖").on_hover_text("Clear binding").clicked() {
-                        profile.hotkey_cycle_backward = None;
-                        changed = true;
-                    }
-                });
-
-                ui.add_space(ITEM_SPACING);
-                ui.separator();
-                ui.add_space(ITEM_SPACING);
 
                 // Require EVE focus checkbox
                 if ui.checkbox(&mut profile.hotkey_require_eve_focus, "Require EVE window focus").changed() {
@@ -568,12 +518,12 @@ pub fn render_key_capture_modal(
                         } else if should_accept {
                             match target {
                                 Some(CaptureTarget::Forward) => {
-                                    profile.hotkey_cycle_forward = Some(binding_clone);
-                                    changed = true;
+                                     // Legacy field removed
+                                     changed = true;
                                 }
                                 Some(CaptureTarget::Backward) => {
-                                    profile.hotkey_cycle_backward = Some(binding_clone);
-                                    changed = true;
+                                     // Legacy field removed
+                                     changed = true;
                                 }
                                 Some(CaptureTarget::ToggleSkip) => {
                                     profile.hotkey_toggle_skip = Some(binding_clone);
@@ -584,10 +534,34 @@ pub fn render_key_capture_modal(
                                     changed = true;
                                 }
                                 Some(CaptureTarget::Character(ref char_name)) => {
-                                    profile
-                                        .character_hotkeys
-                                        .insert(char_name.clone(), binding_clone);
-                                    changed = true;
+                                    // Check for special Cycle Group binding protocol
+                                    if char_name.starts_with("GROUP:") {
+                                        // Format: GROUP:<index>:FWD or GROUP:<index>:BWD
+                                        let parts: Vec<&str> = char_name.split(':').collect();
+                                        if parts.len() == 3 {
+                                            if let Ok(idx) = parts[1].parse::<usize>() {
+                                                if idx < profile.cycle_groups.len() {
+                                                    match parts[2] {
+                                                        "FWD" => {
+                                                            profile.cycle_groups[idx].hotkey_forward = Some(binding_clone);
+                                                            changed = true;
+                                                        }
+                                                        "BWD" => {
+                                                            profile.cycle_groups[idx].hotkey_backward = Some(binding_clone);
+                                                            changed = true;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Standard character hotkey
+                                        profile
+                                            .character_hotkeys
+                                            .insert(char_name.clone(), binding_clone);
+                                        changed = true;
+                                    }
                                 }
                                 None => {}
                             }
