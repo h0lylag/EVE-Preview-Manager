@@ -41,6 +41,8 @@ pub struct DaemonConfig {
     pub character_thumbnails: HashMap<String, CharacterSettings>,
     // Map of HotkeyBinding -> Profile Name
     pub profile_hotkeys: HashMap<crate::config::HotkeyBinding, String>,
+    // Ephemeral state: used to temporarily hide previews via hotkey
+    pub runtime_hidden: bool,
 }
 
 impl DaemonConfig {
@@ -159,6 +161,7 @@ impl DaemonConfig {
             profile: profile.clone(),
             character_thumbnails: profile.character_thumbnails.clone(),
             profile_hotkeys,
+            runtime_hidden: false,
         }
     }
 
@@ -378,10 +381,12 @@ mod tests {
                 character_thumbnails: HashMap::new(),
                 hotkey_profile_switch: None,
                 hotkey_toggle_skip: None,
+                hotkey_toggle_previews: None,
                 client_minimize_show_overlay: false,
             },
             character_thumbnails: HashMap::new(),
             profile_hotkeys: HashMap::new(),
+            runtime_hidden: false,
         }
     }
 

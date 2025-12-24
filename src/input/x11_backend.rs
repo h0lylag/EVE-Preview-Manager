@@ -39,8 +39,9 @@ impl HotkeyBackend for X11Backend {
         let has_character = !config.character_hotkeys.is_empty();
         let has_profile = !config.profile_hotkeys.is_empty();
         let has_skip = config.toggle_skip_key.is_some();
+        let has_toggle_previews = config.toggle_previews_key.is_some();
 
-        if !has_cycle && !has_character && !has_profile && !has_skip {
+        if !has_cycle && !has_character && !has_profile && !has_skip && !has_toggle_previews {
             info!("No hotkeys configured - X11 listener will not be started");
             return Ok(Vec::new());
         }
@@ -48,6 +49,7 @@ impl HotkeyBackend for X11Backend {
         info!(
             has_cycle_keys = has_cycle,
             has_skip_key = has_skip,
+            has_toggle_previews_key = has_toggle_previews,
             character_hotkey_count = config.character_hotkeys.len(),
             "Starting X11 hotkey listener"
         );
@@ -130,6 +132,22 @@ fn run_x11_listener(
             );
         } else {
             warn!(binding = %skip_key.display_name(), "Failed to map toggle skip key to X11");
+        }
+    }
+
+    // Register toggle previews hotkey
+    if let Some(ref toggle_previews_key) = config.toggle_previews_key {
+        if let Some((keycode, modmask)) = evdev_to_x11_key(toggle_previews_key) {
+            register_hotkey(&conn, root, keycode, modmask)?;
+            hotkey_map.insert((keycode, modmask), CycleCommand::TogglePreviews);
+            info!(
+                binding = %toggle_previews_key.display_name(),
+                x11_keycode = keycode,
+                modmask = ?modmask,
+                "Registered toggle previews hotkey"
+            );
+        } else {
+            warn!(binding = %toggle_previews_key.display_name(), "Failed to map toggle previews key to X11");
         }
     }
 

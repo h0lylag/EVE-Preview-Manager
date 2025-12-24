@@ -21,6 +21,8 @@ pub enum CycleCommand {
     ProfileHotkey(HotkeyBinding),
     /// Triggered when the toggle skip hotkey is pressed
     ToggleSkip,
+    /// Triggered when the toggle previews hotkey is pressed (ephemeral)
+    TogglePreviews,
 }
 
 /// A wrapper around CycleCommand that includes the timestamp of the input event

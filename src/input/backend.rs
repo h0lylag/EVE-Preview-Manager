@@ -37,6 +37,7 @@ pub struct HotkeyConfiguration {
     pub character_hotkeys: Vec<HotkeyBinding>,
     pub profile_hotkeys: Vec<HotkeyBinding>,
     pub toggle_skip_key: Option<HotkeyBinding>,
+    pub toggle_previews_key: Option<HotkeyBinding>,
 }
 
 /// Hotkey backend trait

@@ -104,6 +104,9 @@ fn spawn_listener_impl(
             if let Some(ref skip) = config.toggle_skip_key {
                 required_devices.extend(skip.source_devices.iter().cloned());
             }
+            if let Some(ref toggle_previews) = config.toggle_previews_key {
+                required_devices.extend(toggle_previews.source_devices.iter().cloned());
+            }
 
             if required_devices.is_empty() {
                 warn!(
@@ -166,13 +169,20 @@ fn spawn_listener_impl(
     let has_character_hotkeys = !config.character_hotkeys.is_empty();
     let has_profile_hotkeys = !config.profile_hotkeys.is_empty();
     let has_skip_key = config.toggle_skip_key.is_some();
+    let has_toggle_previews_key = config.toggle_previews_key.is_some();
 
-    if cycle_configured || has_character_hotkeys || has_profile_hotkeys || has_skip_key {
+    if cycle_configured
+        || has_character_hotkeys
+        || has_profile_hotkeys
+        || has_skip_key
+        || has_toggle_previews_key
+    {
         info!(
             cycle_hotkey_count = config.cycle_hotkeys.len(),
             character_hotkey_count = config.character_hotkeys.len(),
             profile_hotkey_count = config.profile_hotkeys.len(),
             has_skip_key = has_skip_key,
+            has_toggle_previews_key = has_toggle_previews_key,
             device_count = devices.len(),
             "Starting hotkey listeners"
         );
@@ -239,8 +249,17 @@ fn listen_for_hotkeys(
                     .toggle_skip_key
                     .as_ref()
                     .is_some_and(|k| k.key_code == key_code);
+                let is_toggle_previews_key = config
+                    .toggle_previews_key
+                    .as_ref()
+                    .is_some_and(|k| k.key_code == key_code);
 
-                if is_cycle_key || is_character_key || is_profile_key || is_skip_key {
+                if is_cycle_key
+                    || is_character_key
+                    || is_profile_key
+                    || is_skip_key
+                    || is_toggle_previews_key
+                {
                     // Capture timestamp from the event
                     let timestamp = event.timestamp();
                     let millis = timestamp
@@ -314,6 +333,24 @@ fn listen_for_hotkeys(
                     "Toggle skip hotkey pressed, sending command"
                 );
                 command_to_send = Some(CycleCommand::ToggleSkip);
+                handled = true;
+            }
+
+            if !handled
+                && let Some(ref toggle_previews_key) = config.toggle_previews_key
+                && toggle_previews_key.matches(
+                    key_code,
+                    ctrl_pressed,
+                    shift_pressed,
+                    alt_pressed,
+                    super_pressed,
+                )
+            {
+                info!(
+                    binding = %toggle_previews_key.display_name(),
+                    "Toggle previews hotkey pressed, sending command"
+                );
+                command_to_send = Some(CycleCommand::TogglePreviews);
                 handled = true;
             }
 

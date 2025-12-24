@@ -158,6 +158,8 @@ struct ProfileHelper {
     #[serde(default)]
     hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
     #[serde(default)]
+    hotkey_toggle_previews: Option<crate::config::HotkeyBinding>,
+    #[serde(default)]
     character_hotkeys: HashMap<String, crate::config::HotkeyBinding>,
     #[serde(default)]
     character_thumbnails: HashMap<String, CharacterSettings>,
@@ -231,6 +233,7 @@ impl From<ProfileHelper> for Profile {
             hotkey_require_eve_focus: helper.hotkey_require_eve_focus,
             hotkey_profile_switch: helper.hotkey_profile_switch,
             hotkey_toggle_skip: helper.hotkey_toggle_skip,
+            hotkey_toggle_previews: helper.hotkey_toggle_previews,
             cycle_groups, // Use the migrated or valid groups
             character_hotkeys: helper.character_hotkeys,
             character_thumbnails: helper.character_thumbnails,
@@ -336,6 +339,10 @@ pub struct Profile {
     /// Hotkey to temporarily skip the current character in the cycle
     #[serde(default)]
     pub hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
+
+    /// Hotkey to toggle visibility of all thumbnails (ephemeral)
+    #[serde(default)]
+    pub hotkey_toggle_previews: Option<crate::config::HotkeyBinding>,
 
     /// Per-character hotkey assignments (character_name -> optional binding)
     /// Allows direct switching to specific characters with dedicated hotkeys
@@ -454,7 +461,8 @@ fn default_profiles() -> Vec<Profile> {
         hotkey_logged_out_cycle: false, // Default: off
         hotkey_require_eve_focus: crate::constants::defaults::behavior::HOTKEY_REQUIRE_EVE_FOCUS,
         hotkey_profile_switch: None,
-        hotkey_toggle_skip: None, // User must configure
+        hotkey_toggle_skip: None,     // User must configure
+        hotkey_toggle_previews: None, // User must configure
         cycle_groups: vec![CycleGroup::default_group()],
         character_hotkeys: HashMap::new(),
         character_thumbnails: HashMap::new(),

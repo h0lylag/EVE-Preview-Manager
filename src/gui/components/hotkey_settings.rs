@@ -10,6 +10,7 @@ use std::sync::mpsc::Receiver;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureTarget {
     ToggleSkip,        // Hotkey to temporarily skip current character
+    TogglePreviews,    // Hotkey to toggle thumbnail visibility
     Profile,           // Hotkey to switch to this profile
     Character(String), // Character name for per-character hotkey
 }
@@ -337,6 +338,39 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                  ui.add_space(ITEM_SPACING);
                  ui.label(egui::RichText::new("Temporarily skip the current character from cycling.").weak().small());
 
+                 ui.add_space(ITEM_SPACING);
+                 ui.separator();
+                 ui.add_space(ITEM_SPACING);
+
+                 // Toggle Previews Hotkey
+                 ui.label("Toggle Previews Hotkey:");
+                 ui.add_space(ITEM_SPACING / 2.0);
+
+                 ui.horizontal(|ui| {
+                    let binding_text = profile.hotkey_toggle_previews.as_ref()
+                        .map(|b| b.display_name())
+                        .unwrap_or_else(|| "Not set".to_string());
+
+                    let color = if profile.hotkey_toggle_previews.is_none() {
+                         ui.style().visuals.weak_text_color()
+                    } else {
+                        ui.style().visuals.text_color()
+                    };
+
+                    ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                    if ui.button("⌨ Bind").clicked() {
+                        state.start_key_capture(CaptureTarget::TogglePreviews, profile.hotkey_backend);
+                    }
+
+                    if profile.hotkey_toggle_previews.is_some() && ui.small_button("✖").on_hover_text("Clear binding").clicked() {
+                        profile.hotkey_toggle_previews = None;
+                        changed = true;
+                    }
+                 });
+                 ui.add_space(ITEM_SPACING);
+                 ui.label(egui::RichText::new("Show/Hide all thumbnails (resets to visible on restart).").weak().small());
+
 
                  if profile.hotkey_backend == HotkeyBackendType::Evdev {
                       ui.add_space(ITEM_SPACING);
@@ -405,6 +439,7 @@ pub fn render_key_capture_modal(
         .show(ui.ctx(), |ui| {
             let target_name = match state.capture_target {
                 Some(CaptureTarget::ToggleSkip) => "Toggle Skip".to_string(),
+                Some(CaptureTarget::TogglePreviews) => "Toggle Previews".to_string(),
                 Some(CaptureTarget::Profile) => "Switch to Profile".to_string(),
                 Some(CaptureTarget::Character(ref name)) => format!("Character: {}", name),
                 None => "Unknown".to_string(),
@@ -514,6 +549,10 @@ pub fn render_key_capture_modal(
                             match target {
                                 Some(CaptureTarget::ToggleSkip) => {
                                     profile.hotkey_toggle_skip = Some(binding_clone);
+                                    changed = true;
+                                }
+                                Some(CaptureTarget::TogglePreviews) => {
+                                    profile.hotkey_toggle_previews = Some(binding_clone);
                                     changed = true;
                                 }
                                 Some(CaptureTarget::Profile) => {

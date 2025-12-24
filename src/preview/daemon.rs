@@ -173,15 +173,18 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
 
     let has_cycle_keys = !cycle_hotkeys.is_empty();
     let has_character_hotkeys = !character_hotkeys.is_empty();
+    let _has_profile_hotkeys = !profile_hotkeys.is_empty();
     let has_profile_hotkeys = !profile_hotkeys.is_empty();
     let has_skip_key = daemon_config.profile.hotkey_toggle_skip.is_some();
+    let has_toggle_previews_key = daemon_config.profile.hotkey_toggle_previews.is_some();
 
     let hotkey_handle = if has_cycle_keys
         || has_character_hotkeys
         || has_profile_hotkeys
         || has_skip_key
+        || has_toggle_previews_key
     {
-        // Select backend based on configuration
+        // Select backend based on functionality
         use crate::config::HotkeyBackendType;
         use crate::input::backend::{HotkeyBackend, HotkeyConfiguration};
 
@@ -190,6 +193,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
             character_hotkeys: character_hotkeys.clone(),
             profile_hotkeys: profile_hotkeys.clone(),
             toggle_skip_key: daemon_config.profile.hotkey_toggle_skip.clone(),
+            toggle_previews_key: daemon_config.profile.hotkey_toggle_previews.clone(),
         };
 
         match daemon_config.profile.hotkey_backend {
@@ -209,6 +213,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                             has_character_hotkeys = has_character_hotkeys,
                             has_profile_hotkeys = has_profile_hotkeys,
                             has_skip_key = has_skip_key,
+                            has_toggle_previews_key = has_toggle_previews_key,
                             "Hotkey support enabled"
                         );
                         Some(handle)
@@ -239,6 +244,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                                 has_character_hotkeys = has_character_hotkeys,
                                 has_profile_hotkeys = has_profile_hotkeys,
                                 has_skip_key = has_skip_key,
+                                has_toggle_previews_key = has_toggle_previews_key,
                                 "Hotkey support enabled"
                             );
                             Some(handle)
@@ -436,6 +442,32 @@ async fn run_event_loop(
                                 warn!("Cannot toggle skip: No EVE window focused");
                             }
                             None
+                        }
+                        CycleCommand::TogglePreviews => {
+                             resources.config.runtime_hidden = !resources.config.runtime_hidden;
+                             info!(hidden = resources.config.runtime_hidden, "Toggled previews visibility");
+
+                             // Force visibility update for all known thumbnails
+                             for thumbnail in resources.eve_clients.values_mut() {
+                                 // If hidden globally, hide. If visible globally, use 'visibility(true)' which reveals IF NOT hidden by other means
+                                 // Actually 'visibility(bool)' sets the 'hidden' state.
+                                 // Logic:
+                                 // if runtime_hidden is TRUE, we must hide.
+                                 // if runtime_hidden is FALSE, we reveal (but individual hides might still apply if we had per-thumbnail hiding, which we sort of do with 'hide_when_no_focus')
+
+                                 // Using !runtime_hidden ensures we hide when true, and show when false.
+                                 // However, handle_focus logic might fight this if not careful.
+                                 // We rely on visibility() doing the right X11 map/unmap.
+                                 if let Err(e) = thumbnail.visibility(!resources.config.runtime_hidden) {
+                                     warn!(character = %thumbnail.character_name, error = %e, "Failed to update visibility after toggle");
+                                 } else {
+                                     // Force update to ensure content is drawn if revealed
+                                     if !resources.config.runtime_hidden {
+                                         let _ = thumbnail.update();
+                                     }
+                                 }
+                             }
+                             None
                         }
                     };
 
