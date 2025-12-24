@@ -323,62 +323,73 @@ fn render_cycle_group_column(
     ui.horizontal(|ui| {
         // Validation: Ensure at least one group (done in profile.rs, but safe check)
         if profile.cycle_groups.is_empty() {
-             profile.cycle_groups.push(crate::config::profile::CycleGroup::default_group());
-             *changed = true;
+            profile
+                .cycle_groups
+                .push(crate::config::profile::CycleGroup::default_group());
+            *changed = true;
         }
 
         // Renaming Logic
         if let Some(idx) = state.renaming_group_idx {
             if idx < profile.cycle_groups.len() {
-                 let text_edit = egui::TextEdit::singleline(&mut state.rename_buffer)
-                    .desired_width(120.0);
+                let text_edit =
+                    egui::TextEdit::singleline(&mut state.rename_buffer).desired_width(120.0);
                 let response = ui.add(text_edit);
 
                 if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                     profile.cycle_groups[idx].name = state.rename_buffer.clone();
-                     state.renaming_group_idx = None;
-                     *changed = true;
+                    profile.cycle_groups[idx].name = state.rename_buffer.clone();
+                    state.renaming_group_idx = None;
+                    *changed = true;
                 } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     state.renaming_group_idx = None;
                 }
-                
+
                 // Keep focus
                 if response.changed() {
-                     // buffer updated
+                    // buffer updated
                 }
                 if !response.has_focus() && state.renaming_group_idx.is_some() {
-                     response.request_focus();
+                    response.request_focus();
                 }
             } else {
-                 state.renaming_group_idx = None;
+                state.renaming_group_idx = None;
             }
         } else {
-             // ComboBox Selector
+            // ComboBox Selector
             egui::ComboBox::from_id_salt("cycle_group_selector")
                 .width(140.0)
                 .selected_text(&profile.cycle_groups[state.selected_cycle_group_index].name)
                 .show_ui(ui, |ui| {
                     for (idx, group) in profile.cycle_groups.iter().enumerate() {
-                        if ui.selectable_value(
-                            &mut state.selected_cycle_group_index,
-                            idx,
-                            &group.name,
-                        ).clicked() {
-                             // Handle selection change if needed
+                        if ui
+                            .selectable_value(
+                                &mut state.selected_cycle_group_index,
+                                idx,
+                                &group.name,
+                            )
+                            .clicked()
+                        {
+                            // Handle selection change if needed
                         }
                     }
                 });
-            
+
             // Rename Button
             if ui.small_button("✏").on_hover_text("Rename Group").clicked() {
                 state.renaming_group_idx = Some(state.selected_cycle_group_index);
-                state.rename_buffer = profile.cycle_groups[state.selected_cycle_group_index].name.clone();
+                state.rename_buffer = profile.cycle_groups[state.selected_cycle_group_index]
+                    .name
+                    .clone();
             }
 
             ui.add_space(8.0);
 
             // New Button
-            if ui.button("➕ New").on_hover_text("Create New Group").clicked() {
+            if ui
+                .button("➕ New")
+                .on_hover_text("Create New Group")
+                .clicked()
+            {
                 let mut new_group = crate::config::profile::CycleGroup::default_group();
                 // Generate unique name
                 let mut counter = 1;
@@ -394,7 +405,11 @@ fn render_cycle_group_column(
             }
 
             // Duplicate Button
-            if ui.button("📄 Copy").on_hover_text("Duplicate Group").clicked() {
+            if ui
+                .button("📄 Copy")
+                .on_hover_text("Duplicate Group")
+                .clicked()
+            {
                 let mut new_group = profile.cycle_groups[state.selected_cycle_group_index].clone();
                 new_group.name = format!("{} (Copy)", new_group.name);
                 profile.cycle_groups.push(new_group);
@@ -404,92 +419,93 @@ fn render_cycle_group_column(
 
             // Delete Button
             ui.add_enabled_ui(profile.cycle_groups.len() > 1, |ui| {
-                if ui.button("🗑 Delete").on_hover_text("Delete Group").clicked() {
-                    profile.cycle_groups.remove(state.selected_cycle_group_index);
+                if ui
+                    .button("🗑 Delete")
+                    .on_hover_text("Delete Group")
+                    .clicked()
+                {
+                    profile
+                        .cycle_groups
+                        .remove(state.selected_cycle_group_index);
                     // Clamp index
                     if state.selected_cycle_group_index >= profile.cycle_groups.len() {
-                        state.selected_cycle_group_index = profile.cycle_groups.len().saturating_sub(1);
+                        state.selected_cycle_group_index =
+                            profile.cycle_groups.len().saturating_sub(1);
                     }
                     *changed = true;
                 }
             });
         }
     });
-    
+
     ui.add_space(ITEM_SPACING);
     ui.separator();
     ui.add_space(ITEM_SPACING);
 
     // Cycle Hotkeys for this Group
     let current_group = &mut profile.cycle_groups[state.selected_cycle_group_index];
-    
+
     ui.label(egui::RichText::new("Group Hotkeys").strong());
-    
+
     ui.horizontal(|ui| {
-         // Forward
-         ui.label("Forward:");
-         
-         // Logic copied/adapted from hotkey_settings.rs
-         if let Some(binding) = &current_group.hotkey_forward {
-             ui.label(egui::RichText::new(binding.display_name()).strong());
-         } else {
-              ui.label(egui::RichText::new("Not set").weak());
-         }
-         
-         let id_str_fwd = format!("GROUP:{}:FWD", state.selected_cycle_group_index);
-         let bind_text_fwd = if hotkey_state.is_capturing_for(&id_str_fwd) {
-             "Capturing..."
-         } else {
-             "⌨ Bind"
-         };
-         
-         if ui.button(bind_text_fwd).clicked() {
-              hotkey_state.start_key_capture_for_character(
-                  id_str_fwd,
-                  profile.hotkey_backend
-              );
-         }
-         
-         if current_group.hotkey_forward.is_some() && ui.small_button("✖").clicked() {
-             current_group.hotkey_forward = None;
-             *changed = true;
-         }
+        // Forward
+        ui.label("Forward:");
 
-         ui.add_space(24.0);
+        // Logic copied/adapted from hotkey_settings.rs
+        if let Some(binding) = &current_group.hotkey_forward {
+            ui.label(egui::RichText::new(binding.display_name()).strong());
+        } else {
+            ui.label(egui::RichText::new("Not set").weak());
+        }
 
-         // Backward
-         ui.label("Backward:");
-         
-         if let Some(binding) = &current_group.hotkey_backward {
-             ui.label(egui::RichText::new(binding.display_name()).strong());
-         } else {
-              ui.label(egui::RichText::new("Not set").weak());
-         }
-         
-         let id_str_bwd = format!("GROUP:{}:BWD", state.selected_cycle_group_index);
-         let bind_text_bwd = if hotkey_state.is_capturing_for(&id_str_bwd) {
-             "Capturing..."
-         } else {
-             "⌨ Bind"
-         };
-         
-         if ui.button(bind_text_bwd).clicked() {
-              hotkey_state.start_key_capture_for_character(
-                  id_str_bwd,
-                  profile.hotkey_backend
-              );
-         }
-         
-         if current_group.hotkey_backward.is_some() && ui.small_button("✖").clicked() {
-             current_group.hotkey_backward = None;
-             *changed = true;
-         }
+        let id_str_fwd = format!("GROUP:{}:FWD", state.selected_cycle_group_index);
+        let bind_text_fwd = if hotkey_state.is_capturing_for(&id_str_fwd) {
+            "Capturing..."
+        } else {
+            "⌨ Bind"
+        };
+
+        if ui.button(bind_text_fwd).clicked() {
+            hotkey_state.start_key_capture_for_character(id_str_fwd, profile.hotkey_backend);
+        }
+
+        if current_group.hotkey_forward.is_some() && ui.small_button("✖").clicked() {
+            current_group.hotkey_forward = None;
+            *changed = true;
+        }
+
+        ui.add_space(24.0);
+
+        // Backward
+        ui.label("Backward:");
+
+        if let Some(binding) = &current_group.hotkey_backward {
+            ui.label(egui::RichText::new(binding.display_name()).strong());
+        } else {
+            ui.label(egui::RichText::new("Not set").weak());
+        }
+
+        let id_str_bwd = format!("GROUP:{}:BWD", state.selected_cycle_group_index);
+        let bind_text_bwd = if hotkey_state.is_capturing_for(&id_str_bwd) {
+            "Capturing..."
+        } else {
+            "⌨ Bind"
+        };
+
+        if ui.button(bind_text_bwd).clicked() {
+            hotkey_state.start_key_capture_for_character(id_str_bwd, profile.hotkey_backend);
+        }
+
+        if current_group.hotkey_backward.is_some() && ui.small_button("✖").clicked() {
+            current_group.hotkey_backward = None;
+            *changed = true;
+        }
     });
 
     ui.add_space(ITEM_SPACING);
     ui.separator();
     ui.add_space(ITEM_SPACING);
-    
+
     // Character List Header
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Characters").strong());
@@ -507,7 +523,7 @@ fn render_cycle_group_column(
 
     // Draggable List (modified to use selected group)
     let current_group = &mut profile.cycle_groups[state.selected_cycle_group_index];
-    
+
     egui::ScrollArea::vertical()
         .id_salt("cycle_group_scroll")
         .show(ui, |ui| {
@@ -589,9 +605,9 @@ fn render_cycle_group_column(
             }
 
             if let Some(idx) = to_delete {
-                 // Re-borrow to satisfy borrow checker if needed, but current_group is mutable borrow of profile
-                 // We need to access profile.cycle_groups again? No, current_group IS the reference.
-                 current_group.characters.remove(idx);
+                // Re-borrow to satisfy borrow checker if needed, but current_group is mutable borrow of profile
+                // We need to access profile.cycle_groups again? No, current_group IS the reference.
+                current_group.characters.remove(idx);
             }
 
             if let (Some(from), Some(mut to)) = (from_idx, to_idx) {
@@ -922,7 +938,8 @@ fn render_add_characters_modal(
                     for name in char_names {
                         if let Some(selected) = state.character_selections.get_mut(&name) {
                             // Show if already in cycle group
-                            let current_group = &profile.cycle_groups[state.selected_cycle_group_index];
+                            let current_group =
+                                &profile.cycle_groups[state.selected_cycle_group_index];
                             let already_in_cycle = current_group.characters.contains(&name);
                             let label = if already_in_cycle {
                                 format!("{} (already in this group)", name)
@@ -942,7 +959,7 @@ fn render_add_characters_modal(
                 if ui.button("Add Selected").clicked() {
                     let mut added_any = false;
                     let current_group = &mut profile.cycle_groups[state.selected_cycle_group_index];
-                    
+
                     for (name, selected) in &state.character_selections {
                         if *selected && !current_group.characters.contains(name) {
                             current_group.characters.push(name.clone());

@@ -149,7 +149,8 @@ impl CycleState {
 
                 let start_index = group_state.current_index;
                 loop {
-                    group_state.current_index = (group_state.current_index + 1) % group_state.order.len();
+                    group_state.current_index =
+                        (group_state.current_index + 1) % group_state.order.len();
 
                     let character_name = &group_state.order[group_state.current_index];
 
@@ -172,7 +173,9 @@ impl CycleState {
 
                     // Check logged-out windows
                     if let Some(map) = logged_out_map
-                        && let Some((&window, _)) = map.iter().find(|(_, last_char)| *last_char == character_name)
+                        && let Some((&window, _)) = map
+                            .iter()
+                            .find(|(_, last_char)| *last_char == character_name)
                     {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, window = window, "Cycling forward to logged-out character");
                         self.current_window = Some(window);
@@ -181,7 +184,7 @@ impl CycleState {
 
                     // Wrapped around?
                     if group_state.current_index == start_index {
-                         return None;
+                        return None;
                     }
                 }
             }
@@ -205,7 +208,7 @@ impl CycleState {
                 }
 
                 if group_state.order.is_empty() {
-                     return None;
+                    return None;
                 }
 
                 let start_index = group_state.current_index;
@@ -216,7 +219,7 @@ impl CycleState {
                         group_state.current_index - 1
                     };
 
-                     let character_name = &group_state.order[group_state.current_index];
+                    let character_name = &group_state.order[group_state.current_index];
 
                     // Skip characters marked as skipped
                     if self.skipped_characters.contains(character_name) {
@@ -229,11 +232,13 @@ impl CycleState {
                     if let Some(&window) = self.active_windows.get(character_name) {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, "Cycling backward to logged-in character");
                         self.current_window = Some(window);
-                         return Some((window, character_name.clone()));
+                        return Some((window, character_name.clone()));
                     }
 
                     if let Some(map) = logged_out_map
-                        && let Some((&window, _)) = map.iter().find(|(_, last_char)| *last_char == character_name)
+                        && let Some((&window, _)) = map
+                            .iter()
+                            .find(|(_, last_char)| *last_char == character_name)
                     {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, window = window, "Cycling backward to logged-out character");
                         self.current_window = Some(window);
@@ -245,7 +250,7 @@ impl CycleState {
                     }
                 }
             }
-            None => None
+            None => None,
         }
     }
 
@@ -314,21 +319,21 @@ impl CycleState {
         }
 
         let mut found_in_any_group = false;
-        
+
         for group in self.groups.values_mut() {
-             if let Some(index) = group.order.iter().position(|c| c == character_name) {
+            if let Some(index) = group.order.iter().position(|c| c == character_name) {
                 group.current_index = index;
                 found_in_any_group = true;
-             }
+            }
         }
-        
+
         if found_in_any_group {
             debug!(character = %character_name, "Setting current character (updated group indices)");
             true
         } else {
             // Not in any group, but we still updated active_windows/current_window
-             // warn!(character = %character_name, "Character not in any cycle group");
-             false
+            // warn!(character = %character_name, "Character not in any cycle group");
+            false
         }
     }
 
@@ -352,20 +357,10 @@ impl CycleState {
     /// Clamp index to valid range in all groups after removing characters
     fn clamp_indices(&mut self) {
         for group in self.groups.values_mut() {
-             if !group.order.is_empty() && group.current_index >= group.order.len() {
+            if !group.order.is_empty() && group.current_index >= group.order.len() {
                 group.current_index = 0;
             }
         }
-    }
-
-    /// Get current config order for a group (helper)
-    pub fn config_order(&self, group_name: &str) -> Option<&Vec<String>> {
-        self.groups.get(group_name).map(|g| &g.order)
-    }
-
-    /// Check if character is in config order for a group
-    pub fn is_in_config_order(&self, group_name: &str, character_name: &str) -> bool {
-         self.groups.get(group_name).map(|g| g.order.contains(&character_name.to_string())).unwrap_or(false)
     }
 
     /// Cycles to the next available character within a specific subgroup of characters.
@@ -391,18 +386,20 @@ impl CycleState {
             // Complex if they are in different groups.
             // Let's simplified to Alphabetical sort for now as default robust behavior.
             // Or maybe sort by "Default" group if available?
-            
+
             // Current Simplification: Just dump everything to out_of_group (Alphabetical)
             // UNLESS we can find a dominant group order.
-            
+
             // Let's try to search the "Default" group specifically?
-            let in_default = self.groups.get("Default")
+            let in_default = self
+                .groups
+                .get("Default")
                 .and_then(|g| g.order.iter().position(|c| c == name));
 
             if let Some(idx) = in_default {
-                 in_group_indices.push((idx, name));
+                in_group_indices.push((idx, name));
             } else {
-                 out_of_group.push(name);
+                out_of_group.push(name);
             }
         }
 
@@ -432,16 +429,21 @@ impl CycleState {
             && let Some(pos) = sorted_candidates.iter().position(|&c| c == curr_char)
         {
             pos
-        } else if let Some(default_group) = self.groups.get("Default") && !default_group.order.is_empty() {
-             // Fallback to "Default" group index logic if available
-             let current_char_name = &default_group.order[default_group.current_index];
-             if let Some(pos) = sorted_candidates.iter().position(|&c| c == current_char_name) {
-                 pos
-             } else {
-                  sorted_candidates.len().saturating_sub(1)
-             }
+        } else if let Some(default_group) = self.groups.get("Default")
+            && !default_group.order.is_empty()
+        {
+            // Fallback to "Default" group index logic if available
+            let current_char_name = &default_group.order[default_group.current_index];
+            if let Some(pos) = sorted_candidates
+                .iter()
+                .position(|&c| c == current_char_name)
+            {
+                pos
+            } else {
+                sorted_candidates.len().saturating_sub(1)
+            }
         } else {
-             sorted_candidates.len().saturating_sub(1)
+            sorted_candidates.len().saturating_sub(1)
         };
 
         // 6. Cycle through candidates starting after start_pos
@@ -477,11 +479,19 @@ mod tests {
     #[test]
     fn test_cycle_forward_multi_group() {
         use crate::config::profile::CycleGroup;
-        let group1 = CycleGroup { name: "G1".to_string(), characters: vec!["A".to_string(), "B".to_string()], hotkey_forward: None, hotkey_backward: None };
+        let group1 = CycleGroup {
+            name: "G1".to_string(),
+            characters: vec!["A".to_string(), "B".to_string()],
+            hotkey_forward: None,
+            hotkey_backward: None,
+        };
         let mut state = CycleState::new(vec![group1]);
         state.add_window("A".to_string(), 100);
         state.add_window("B".to_string(), 200);
 
-        assert_eq!(state.cycle_forward("G1", None), Some((200, "B".to_string())));
+        assert_eq!(
+            state.cycle_forward("G1", None),
+            Some((200, "B".to_string()))
+        );
     }
 }

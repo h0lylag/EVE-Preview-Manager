@@ -316,7 +316,6 @@ pub struct Profile {
 
     // REMOVED LEGACY FIELDS in favor of cycle_groups
     // hotkey_cycle_forward, hotkey_cycle_backward, hotkey_cycle_group are now inside CycleGroup
-
     /// Multiple cycle groups, each with its own character list and hotkeys
     /// Multiple cycle groups, each with its own character list and hotkeys
     #[serde(default)]
@@ -819,21 +818,31 @@ mod tests {
             obj.remove("cycle_groups");
 
             // 2. Inject legacy fields
-            obj.insert("hotkey_cycle_group".to_string(), serde_json::json!(["A", "B"]));
+            obj.insert(
+                "hotkey_cycle_group".to_string(),
+                serde_json::json!(["A", "B"]),
+            );
             // We need to match the actual serialization format of HotkeyBinding, or mostly likely just "keys" if that's how it's defined
             // Based on HotkeyBinding usage elsewhere, it likely serializes to a struct.
             // Let's create a binding object.
             // Assuming HotkeyBinding deserialization is robust or standard.
             // If HotkeyBinding is complex, we can use serde_json::to_value on a real binding.
             let dummy_binding = crate::config::HotkeyBinding::new(15, false, false, false, false); // Tab key?
-            
-            obj.insert("hotkey_cycle_forward".to_string(), serde_json::to_value(&dummy_binding).unwrap());
-            obj.insert("hotkey_cycle_backward".to_string(), serde_json::to_value(&dummy_binding).unwrap());
+
+            obj.insert(
+                "hotkey_cycle_forward".to_string(),
+                serde_json::to_value(&dummy_binding).unwrap(),
+            );
+            obj.insert(
+                "hotkey_cycle_backward".to_string(),
+                serde_json::to_value(&dummy_binding).unwrap(),
+            );
         }
 
         let legacy_json = serde_json::to_string(&json_value).unwrap();
 
-        let profile: Profile = serde_json::from_str(&legacy_json).expect("Failed to deserialize legacy profile");
+        let profile: Profile =
+            serde_json::from_str(&legacy_json).expect("Failed to deserialize legacy profile");
 
         // Verify migration
         assert_eq!(profile.cycle_groups.len(), 1);

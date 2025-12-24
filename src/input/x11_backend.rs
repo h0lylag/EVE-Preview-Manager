@@ -105,7 +105,7 @@ fn run_x11_listener(
         if let Some((keycode, modmask)) = evdev_to_x11_key(cycle_hotkey) {
             register_hotkey(&conn, root, keycode, modmask)?;
             hotkey_map.insert((keycode, modmask), command.clone());
-             info!(
+            info!(
                 binding = %cycle_hotkey.display_name(),
                 x11_keycode = keycode,
                 modmask = ?modmask,
@@ -113,7 +113,7 @@ fn run_x11_listener(
                 "Registered cycle hotkey"
             );
         } else {
-             warn!(binding = %cycle_hotkey.display_name(), "Failed to map cycle hotkey to X11");
+            warn!(binding = %cycle_hotkey.display_name(), "Failed to map cycle hotkey to X11");
         }
     }
 

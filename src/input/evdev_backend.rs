@@ -93,7 +93,7 @@ fn spawn_listener_impl(
 
             let mut required_devices = std::collections::HashSet::new();
             for (_, binding) in &config.cycle_hotkeys {
-                 required_devices.extend(binding.source_devices.iter().cloned());
+                required_devices.extend(binding.source_devices.iter().cloned());
             }
             for binding in &config.character_hotkeys {
                 required_devices.extend(binding.source_devices.iter().cloned());
@@ -281,7 +281,7 @@ fn listen_for_hotkeys(
             let mut command_to_send = None;
 
             for (cmd, binding) in &config.cycle_hotkeys {
-                 if binding.matches(
+                if binding.matches(
                     key_code,
                     ctrl_pressed,
                     shift_pressed,
@@ -296,7 +296,7 @@ fn listen_for_hotkeys(
                     command_to_send = Some(cmd.clone());
                     handled = true;
                     break;
-                 }
+                }
             }
 
             if !handled

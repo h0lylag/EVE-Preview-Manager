@@ -9,8 +9,6 @@ use std::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureTarget {
-    Forward,
-    Backward,
     ToggleSkip,        // Hotkey to temporarily skip current character
     Profile,           // Hotkey to switch to this profile
     Character(String), // Character name for per-character hotkey
@@ -245,9 +243,8 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                 HotkeyBackendType::X11 => true, // Always enabled for X11
                 HotkeyBackendType::Evdev => profile.hotkey_input_device.is_some(),
             };
-            
-            ui.add_enabled_ui(device_selected, |ui| {
 
+            ui.add_enabled_ui(device_selected, |ui| {
                 // Require EVE focus checkbox
                 if ui.checkbox(&mut profile.hotkey_require_eve_focus, "Require EVE window focus").changed() {
                     changed = true;
@@ -407,8 +404,6 @@ pub fn render_key_capture_modal(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ui.ctx(), |ui| {
             let target_name = match state.capture_target {
-                Some(CaptureTarget::Forward) => "Forward Cycle".to_string(),
-                Some(CaptureTarget::Backward) => "Backward Cycle".to_string(),
                 Some(CaptureTarget::ToggleSkip) => "Toggle Skip".to_string(),
                 Some(CaptureTarget::Profile) => "Switch to Profile".to_string(),
                 Some(CaptureTarget::Character(ref name)) => format!("Character: {}", name),
@@ -517,14 +512,6 @@ pub fn render_key_capture_modal(
                             state.cancel_capture();
                         } else if should_accept {
                             match target {
-                                Some(CaptureTarget::Forward) => {
-                                     // Legacy field removed
-                                     changed = true;
-                                }
-                                Some(CaptureTarget::Backward) => {
-                                     // Legacy field removed
-                                     changed = true;
-                                }
                                 Some(CaptureTarget::ToggleSkip) => {
                                     profile.hotkey_toggle_skip = Some(binding_clone);
                                     changed = true;
@@ -538,20 +525,23 @@ pub fn render_key_capture_modal(
                                     if char_name.starts_with("GROUP:") {
                                         // Format: GROUP:<index>:FWD or GROUP:<index>:BWD
                                         let parts: Vec<&str> = char_name.split(':').collect();
+                                        #[allow(clippy::collapsible_if)]
                                         if parts.len() == 3 {
-                                            if let Ok(idx) = parts[1].parse::<usize>() {
-                                                if idx < profile.cycle_groups.len() {
-                                                    match parts[2] {
-                                                        "FWD" => {
-                                                            profile.cycle_groups[idx].hotkey_forward = Some(binding_clone);
-                                                            changed = true;
-                                                        }
-                                                        "BWD" => {
-                                                            profile.cycle_groups[idx].hotkey_backward = Some(binding_clone);
-                                                            changed = true;
-                                                        }
-                                                        _ => {}
+                                            if let Ok(idx) = parts[1].parse::<usize>()
+                                                && idx < profile.cycle_groups.len()
+                                            {
+                                                match parts[2] {
+                                                    "FWD" => {
+                                                        profile.cycle_groups[idx].hotkey_forward =
+                                                            Some(binding_clone);
+                                                        changed = true;
                                                     }
+                                                    "BWD" => {
+                                                        profile.cycle_groups[idx].hotkey_backward =
+                                                            Some(binding_clone);
+                                                        changed = true;
+                                                    }
+                                                    _ => {}
                                                 }
                                             }
                                         }
