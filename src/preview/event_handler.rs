@@ -119,9 +119,16 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
                                     thumbnail.dimensions.width,
                                     thumbnail.dimensions.height,
                                 );
-                                ctx.daemon_config
-                                    .character_thumbnails
-                                    .insert(thumbnail.character_name.clone(), settings);
+
+                                if identity.is_eve {
+                                    ctx.daemon_config
+                                        .character_thumbnails
+                                        .insert(thumbnail.character_name.clone(), settings);
+                                } else {
+                                    ctx.daemon_config
+                                        .custom_source_thumbnails
+                                        .insert(thumbnail.character_name.clone(), settings);
+                                }
                             }
 
                             // Conditionally persist to disk based on auto-save setting
@@ -129,32 +136,20 @@ fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Res
                             if ctx.daemon_config.profile.thumbnail_auto_save_position {
                                 if let Err(e) = ctx.daemon_config.save() {
                                     tracing::warn!(
-                                        "Failed to save initial position for new character '{}': {}",
+                                        "Failed to save initial position for new item '{}': {}",
                                         thumbnail.character_name,
                                         e
                                     );
                                 }
                             } else {
-                                let settings = ctx
-                                    .daemon_config
-                                    .character_thumbnails
-                                    .get(&thumbnail.character_name)
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        crate::types::CharacterSettings::new(
-                                            geom.x,
-                                            geom.y,
-                                            thumbnail.dimensions.width,
-                                            thumbnail.dimensions.height,
-                                        )
-                                    });
-
-                                if let Err(e) = ctx
-                                    .daemon_config
-                                    .save_new_character(&thumbnail.character_name, settings)
-                                {
+                                // If auto-save is off, we still try to save to ensure persistence if the user exits gracefully later?
+                                // Actually, `save()` handles everything safely.
+                                // If we want to be absolutely sure we don't stomp other changes, we'd use Merge strategy only on this entry.
+                                // But `save()` uses Preserve strategy which is generally safe.
+                                // For simplicity and robustness, reuse the same save() call.
+                                if let Err(e) = ctx.daemon_config.save() {
                                     tracing::warn!(
-                                        "Failed to safe-save initial position for new character '{}': {}",
+                                        "Failed to safe-save initial position for new item '{}': {}",
                                         thumbnail.character_name,
                                         e
                                     );

@@ -214,17 +214,22 @@ pub fn check_and_create_window<'a>(
     let character_name = identity.name;
 
     // Get saved position and dimensions
+    // Determine which map to query based on identity type
+    let settings_map = if identity.is_eve {
+        &daemon_config.character_thumbnails
+    } else {
+        &daemon_config.custom_source_thumbnails
+    };
+
     let position = state.get_position(
         &character_name,
         window,
-        &daemon_config.character_thumbnails,
+        settings_map,
         daemon_config.profile.thumbnail_preserve_position_on_swap,
     );
 
     // Get dimensions: From settings, OR from Rule (if custom), OR default
-    let (dimensions, preview_mode) = if let Some(settings) =
-        daemon_config.character_thumbnails.get(&character_name)
-    {
+    let (dimensions, preview_mode) = if let Some(settings) = settings_map.get(&character_name) {
         // Use saved settings, but let Custom Rule override dimensions if present
         let dims = if let Some(rule) = &identity.rule {
             Dimensions::new(rule.default_width, rule.default_height)
@@ -337,9 +342,24 @@ pub fn scan_eve_windows<'a>(
                                 eve.dimensions.width,
                                 eve.dimensions.height,
                             );
-                            daemon_config
-                                .character_thumbnails
-                                .insert(eve.character_name.clone(), settings);
+
+                            // Fix: Removed invalid is_custom_source() call.
+                            // Logic is simplified: check if character name matches any custom rule alias.
+                            let is_custom_alias = daemon_config
+                                .profile
+                                .custom_windows
+                                .iter()
+                                .any(|r| r.alias == eve.character_name);
+
+                            if is_custom_alias {
+                                daemon_config
+                                    .custom_source_thumbnails
+                                    .insert(eve.character_name.clone(), settings);
+                            } else {
+                                daemon_config
+                                    .character_thumbnails
+                                    .insert(eve.character_name.clone(), settings);
+                            }
                         }
                     }
                     Err(e) => {

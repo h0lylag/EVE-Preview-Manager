@@ -163,6 +163,9 @@ struct ProfileHelper {
     character_hotkeys: HashMap<String, crate::config::HotkeyBinding>,
     #[serde(default)]
     character_thumbnails: HashMap<String, CharacterSettings>,
+    // New field for custom source storage
+    #[serde(default)]
+    custom_source_thumbnails: HashMap<String, CharacterSettings>,
     #[serde(default)]
     custom_windows: Vec<CustomWindowRule>,
 
@@ -203,6 +206,29 @@ impl From<ProfileHelper> for Profile {
             cycle_groups.push(CycleGroup::default_group());
         }
 
+        // Enforce separation: Ensure no custom sources remain in character_thumbnails
+        let mut character_thumbnails = helper.character_thumbnails;
+        let mut custom_source_thumbnails = helper.custom_source_thumbnails;
+
+        let custom_aliases: Vec<String> = helper
+            .custom_windows
+            .iter()
+            .map(|w| w.alias.clone())
+            .collect();
+
+        // Move any entry that matches a custom alias to the correct map
+        let keys_to_move: Vec<String> = character_thumbnails
+            .keys()
+            .filter(|k| custom_aliases.contains(k))
+            .cloned()
+            .collect();
+
+        for key in keys_to_move {
+            if let Some(val) = character_thumbnails.remove(&key) {
+                custom_source_thumbnails.insert(key, val);
+            }
+        }
+
         Profile {
             profile_name: helper.profile_name,
             profile_description: helper.profile_description,
@@ -236,7 +262,8 @@ impl From<ProfileHelper> for Profile {
             hotkey_toggle_previews: helper.hotkey_toggle_previews,
             cycle_groups, // Use the migrated or valid groups
             character_hotkeys: helper.character_hotkeys,
-            character_thumbnails: helper.character_thumbnails,
+            character_thumbnails,
+            custom_source_thumbnails,
             custom_windows: helper.custom_windows,
         }
     }
@@ -354,6 +381,10 @@ pub struct Profile {
     #[serde(default)]
     pub character_thumbnails: HashMap<String, CharacterSettings>,
 
+    /// Per-profile custom source positions and dimensions (separate from characters)
+    #[serde(default)]
+    pub custom_source_thumbnails: HashMap<String, CharacterSettings>,
+
     /// Custom window matching rules for external applications
     #[serde(default)]
     pub custom_windows: Vec<CustomWindowRule>,
@@ -466,6 +497,7 @@ fn default_profiles() -> Vec<Profile> {
         cycle_groups: vec![CycleGroup::default_group()],
         character_hotkeys: HashMap::new(),
         character_thumbnails: HashMap::new(),
+        custom_source_thumbnails: HashMap::new(),
         custom_windows: Vec::new(),
     }]
 }
@@ -565,10 +597,22 @@ impl Config {
                                     // Don't overwrite dimensions - GUI state is authoritative (it updates from disk via polling, but allows user overrides)
                                     // gui_settings.dimensions = disk_settings.dimensions;
                                 }
-                                // REMOVED: Do NOT re-add characters found on disk but missing from memory.
-                                // If they are missing from the GUI state, it means the user likely deleted them.
                                 // If they are valid new windows found by the daemon, the daemon will re-add them
                                 // to the config on its next pass/save cycle. This fixes the "zombie character" bug.
+                            }
+
+                            // Same merge logic for custom sources
+                            for (source_name, disk_settings) in
+                                &existing_profile.custom_source_thumbnails
+                            {
+                                if let Some(gui_settings) = profile_to_save
+                                    .custom_source_thumbnails
+                                    .get_mut(source_name)
+                                {
+                                    gui_settings.x = disk_settings.x;
+                                    gui_settings.y = disk_settings.y;
+                                    // Dimension updates logic mirrors characters
+                                }
                             }
                         }
                     }
@@ -610,6 +654,33 @@ impl Config {
                                 // Intentionally NOT updating overrides or other fields
                                 // disk_char_settings.override_* fields remain as they are on disk
                             }
+
+                            // Update positions for each custom source
+                            for (source_name, daemon_source_settings) in
+                                &daemon_profile.custom_source_thumbnails
+                            {
+                                let disk_source_settings = disk_profile
+                                    .custom_source_thumbnails
+                                    .entry(source_name.clone())
+                                    .or_insert_with(|| daemon_source_settings.clone());
+
+                                disk_source_settings.x = daemon_source_settings.x;
+                                disk_source_settings.y = daemon_source_settings.y;
+                                disk_source_settings.dimensions = daemon_source_settings.dimensions;
+                            }
+
+                            // CLEANUP: Ensure character_thumbnails does not contain any keys that match
+                            // custom_windows aliases. This fixes the persistence bug where legacy
+                            // entries in the file were being preserved by the merge strategy.
+                            let custom_aliases: Vec<String> = disk_profile
+                                .custom_windows
+                                .iter()
+                                .map(|w| w.alias.clone())
+                                .collect();
+
+                            disk_profile
+                                .character_thumbnails
+                                .retain(|k, _| !custom_aliases.contains(k));
                         }
                     }
                     existing_config
@@ -665,6 +736,7 @@ mod tests {
             crate::constants::defaults::border::SIZE
         );
         assert!(profile.character_thumbnails.is_empty());
+        assert!(profile.custom_source_thumbnails.is_empty());
     }
 
     #[test]
@@ -860,3 +932,5 @@ mod tests {
         assert!(group.hotkey_backward.is_some());
     }
 }
+
+

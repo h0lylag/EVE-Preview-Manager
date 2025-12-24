@@ -38,8 +38,11 @@ pub struct DisplayConfig {
 #[derive(Clone)]
 pub struct DaemonConfig {
     pub profile: crate::config::profile::Profile,
+    /// Active thumbnail settings (position, dimensions) - separate from Profile to allow runtime updates
     pub character_thumbnails: HashMap<String, CharacterSettings>,
-    // Map of HotkeyBinding -> Profile Name
+    /// Active custom source settings
+    pub custom_source_thumbnails: HashMap<String, CharacterSettings>,
+    /// Flattened map of hotkey bindings to profile names
     pub profile_hotkeys: HashMap<crate::config::HotkeyBinding, String>,
     // Ephemeral state: used to temporarily hide previews via hotkey
     pub runtime_hidden: bool,
@@ -160,6 +163,7 @@ impl DaemonConfig {
         DaemonConfig {
             profile: profile.clone(),
             character_thumbnails: profile.character_thumbnails.clone(),
+            custom_source_thumbnails: profile.custom_source_thumbnails.clone(),
             profile_hotkeys,
             runtime_hidden: false,
         }
@@ -379,12 +383,14 @@ mod tests {
                 hotkey_backend: crate::config::HotkeyBackendType::X11,
                 thumbnail_enabled: true,
                 character_thumbnails: HashMap::new(),
+                custom_source_thumbnails: HashMap::new(),
                 hotkey_profile_switch: None,
                 hotkey_toggle_skip: None,
                 hotkey_toggle_previews: None,
                 client_minimize_show_overlay: false,
             },
             character_thumbnails: HashMap::new(),
+            custom_source_thumbnails: HashMap::new(),
             profile_hotkeys: HashMap::new(),
             runtime_hidden: false,
         }

@@ -40,7 +40,14 @@ pub fn is_window_eve(
     let title = String::from_utf8_lossy(&name_prop.value).into_owned();
     Ok(
         if let Some(name) = title.strip_prefix(eve::WINDOW_TITLE_PREFIX) {
-            Some(EveWindowType::LoggedIn(name.to_string()))
+            // Fix: Filter out Steam Proton/Wine container windows that use the App ID as the "character name".
+            // These transient windows often have titles like "EVE - steam_app_8500".
+            if name.contains("steam_app_") {
+                 debug!(window=window, name=%name, "Ignored steam_app container title");
+                 None
+            } else {
+                Some(EveWindowType::LoggedIn(name.to_string()))
+            }
         } else if title == eve::LOGGED_OUT_TITLE {
             Some(EveWindowType::LoggedOut)
         } else {
