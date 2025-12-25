@@ -38,10 +38,8 @@ impl SourcesTab {
 
         ui.heading("Custom Sources");
         ui.label("Add external applications to preview.");
-        ui.colored_label(
-            egui::Color32::YELLOW,
-            "⚠ Applications must run in X11 or XWayland mode to be detected.",
-        );
+        ui.label("⚠ Applications must run in X11 or XWayland mode to be detected.");
+        ui.weak("(Feature is Work in Progress)");
         ui.add_space(10.0);
 
         // -- Rules List (Expandable) --
@@ -311,8 +309,15 @@ impl SourcesTab {
         ui.add_space(20.0);
 
         // -- Add New Rule Section --
-        // Collapsible header to save space?
-        ui.collapsing("Add New Source", |ui| {
+        ui.group(|ui| {
+            ui.heading("Add New Source");
+            ui.label(
+                egui::RichText::new("Configure a new application to preview.")
+                    .weak()
+                    .small(),
+            );
+            ui.add_space(5.0);
+
             // Window Picker
             ui.horizontal(|ui| {
                 let combo_label = if let Some(apps) = &self.running_apps
@@ -324,51 +329,60 @@ impl SourcesTab {
                     "Select from running applications...".to_string()
                 };
 
-                egui::ComboBox::from_id_salt("app_picker")
-                    .selected_text(combo_label)
-                    .show_ui(ui, |ui| {
-                        if ui.button("🔄 Refresh List").clicked() || self.running_apps.is_none() {
-                            match get_running_applications() {
-                                Ok(mut apps) => {
-                                    // Dedup logic based on class+title
-                                    apps.dedup_by(|a, b| a.class == b.class && a.title == b.title);
-                                    self.running_apps = Some(apps);
-                                    self.error_msg = None;
-                                }
-                                Err(e) => {
-                                    self.error_msg = Some(format!("Failed to list apps: {}", e));
+                let mut trigger_refresh = false;
+
+                ui.push_id("app_picker_combo", |ui| {
+                    egui::ComboBox::from_id_salt("app_picker")
+                        .selected_text(combo_label)
+                        .show_ui(ui, |ui| {
+                            if ui.button("🔄 Refresh List").clicked() || self.running_apps.is_none()
+                            {
+                                trigger_refresh = true;
+                            }
+
+                            if let Some(msg) = &self.error_msg {
+                                ui.colored_label(egui::Color32::RED, msg);
+                            }
+
+                            if let Some(apps) = &self.running_apps {
+                                for (idx, app) in apps.iter().enumerate() {
+                                    let text = format!("{} ({})", app.class, app.title);
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.selected_app_idx,
+                                            Some(idx),
+                                            &text,
+                                        )
+                                        .clicked()
+                                    {
+                                        // Auto-fill fields from selection
+                                        self.new_rule.alias = app.class.clone();
+                                        self.new_rule.class_pattern = Some(app.class.clone());
+                                        self.new_rule.title_pattern = None;
+                                    }
                                 }
                             }
-                        }
+                        });
+                });
 
-                        if let Some(msg) = &self.error_msg {
-                            ui.colored_label(egui::Color32::RED, msg);
-                        }
-
-                        if let Some(apps) = &self.running_apps {
-                            for (idx, app) in apps.iter().enumerate() {
-                                let text = format!("{} ({})", app.class, app.title);
-                                if ui
-                                    .selectable_value(&mut self.selected_app_idx, Some(idx), &text)
-                                    .clicked()
-                                {
-                                    // Auto-fill fields
-                                    self.new_rule.alias = app.class.clone();
-                                    self.new_rule.class_pattern = Some(app.class.clone());
-                                    self.new_rule.title_pattern = None;
-                                }
-                            }
-                        }
-                    });
-
-                // Refresh button outside combobox
+                // Refresh button outside combobox for easy access
                 if ui
                     .button("🔄")
                     .on_hover_text("Refresh application list")
                     .clicked()
                 {
+                    trigger_refresh = true;
+                }
+
+                if trigger_refresh {
                     match get_running_applications() {
                         Ok(mut apps) => {
+                            // Filter out EVE clients to prevent duplication/confusion
+                            apps.retain(|app| {
+                                !app.title.starts_with("EVE - ") && app.title != "EVE"
+                            });
+
+                            // Dedup logic based on class+title
                             apps.dedup_by(|a, b| a.class == b.class && a.title == b.title);
                             self.running_apps = Some(apps);
                             self.error_msg = None;
@@ -383,7 +397,7 @@ impl SourcesTab {
 
             egui::Grid::new("add_source_grid")
                 .num_columns(2)
-                .spacing([10.0, 4.0])
+                .spacing([10.0, 8.0]) // Increased vertical spacing for cleaner look
                 .show(ui, |ui| {
                     ui.label("Display Name:");
                     ui.text_edit_singleline(&mut self.new_rule.alias);
@@ -412,7 +426,9 @@ impl SourcesTab {
                     ui.end_row();
 
                     ui.label("");
-                    ui.weak("Leave Title Pattern empty to match any window of this application.");
+                    ui.weak(
+                        "A Display Name and at least one pattern (Class or Title) are required.",
+                    );
                     ui.end_row();
 
                     ui.label("Limit:");
@@ -428,26 +444,30 @@ impl SourcesTab {
             let is_valid = !self.new_rule.alias.is_empty()
                 && (self.new_rule.class_pattern.is_some() || self.new_rule.title_pattern.is_some());
 
-            ui.add_enabled_ui(is_valid, |ui| {
-                if ui.button("Add Source").clicked() {
-                    // Update defaults from global profile?
-                    // But we don't have access to global defaults here easily without borrowing profile again...
-                    // Wait, profile is available.
-                    self.new_rule.default_width = profile.thumbnail_default_width;
-                    self.new_rule.default_height = profile.thumbnail_default_height;
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(is_valid, |ui| {
+                    if ui.button("Add Source").clicked() {
+                        // Inherit global defaults for dimensions
+                        self.new_rule.default_width = profile.thumbnail_default_width;
+                        self.new_rule.default_height = profile.thumbnail_default_height;
 
-                    profile.custom_windows.push(self.new_rule.clone());
-                    changed = true;
-                    // Reset form
-                    self.new_rule.alias.clear();
-                    self.new_rule.class_pattern = None;
-                    self.new_rule.title_pattern = None;
-                    self.new_rule.limit = false;
+                        profile.custom_windows.push(self.new_rule.clone());
+                        changed = true;
+
+                        // Reset form state
+                        self.new_rule.alias.clear();
+                        self.new_rule.class_pattern = None;
+                        self.new_rule.title_pattern = None;
+                        self.new_rule.limit = false;
+                    }
+                });
+
+                if !is_valid {
+                    ui.weak(
+                        "Display Name and either Class or Title pattern (or both) are required.",
+                    );
                 }
             });
-            if !is_valid {
-                ui.weak(" Name and at least one pattern required.");
-            }
         });
 
         changed
