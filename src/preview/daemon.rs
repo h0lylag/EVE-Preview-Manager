@@ -97,7 +97,7 @@ fn load_configuration(
     let daemon_config =
         DaemonConfig::load_with_screen(screen.width_in_pixels, screen.height_in_pixels);
     let config = daemon_config.build_display_config();
-    info!(config = ?config, "Loaded display configuration");
+    info!("Loaded display configuration");
 
     let session_state = SessionState::new();
     info!(
