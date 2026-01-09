@@ -18,7 +18,7 @@ use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 
 use super::cycle_state::CycleState;
-use super::event_handler::{EventContext, handle_event};
+use super::dispatcher::{EventContext, handle_event};
 use super::font;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;

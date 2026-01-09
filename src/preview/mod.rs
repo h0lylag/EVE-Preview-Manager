@@ -2,9 +2,10 @@
 
 mod cycle_state;
 mod daemon;
-mod event_handler;
+mod dispatcher;
 pub mod font;
 
+pub mod handlers;
 mod overlay;
 mod renderer;
 mod session_state;
