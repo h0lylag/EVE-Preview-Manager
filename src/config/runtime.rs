@@ -14,8 +14,7 @@ use crate::color::{HexColor, Opacity};
 use crate::config::profile::SaveStrategy;
 use crate::types::{CharacterSettings, Position, TextOffset};
 
-/// Shared display configuration for all thumbnails
-/// Immutable after creation - can be borrowed without RefCell
+/// Snapshot of display settings for the renderer.
 #[derive(Debug, Clone)]
 pub struct DisplayConfig {
     pub enabled: bool,
@@ -38,7 +37,7 @@ pub struct DisplayConfig {
 #[derive(Clone)]
 pub struct DaemonConfig {
     pub profile: crate::config::profile::Profile,
-    /// Active thumbnail settings (position, dimensions) - separate from Profile to allow runtime updates
+    /// Runtime overrides (position/dimensions) distinct from persisting profile.
     pub character_thumbnails: HashMap<String, CharacterSettings>,
     /// Active custom source settings
     pub custom_source_thumbnails: HashMap<String, CharacterSettings>,
@@ -189,11 +188,13 @@ impl DaemonConfig {
     /// Prepare config for saving by merging current daemon state into a fresh disk config
     fn prepare_config_to_save(&self) -> Result<crate::config::profile::Config> {
         let config_path = Self::config_path();
-        let mut profile_config = if let Ok(contents) = fs::read_to_string(&config_path) {
-            serde_json::from_str::<crate::config::profile::Config>(&contents)
-                .context("Failed to parse profile config for save")?
-        } else {
-            crate::config::profile::Config::default()
+        let mut profile_config = match fs::read_to_string(&config_path) {
+            Ok(contents) => serde_json::from_str::<crate::config::profile::Config>(&contents)
+                .context("Failed to parse profile config for save")?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                crate::config::profile::Config::default()
+            }
+            Err(e) => return Err(anyhow::Error::new(e).context("Failed to read config file")),
         };
 
         let selected_name = profile_config.global.selected_profile.clone();
@@ -209,8 +210,7 @@ impl DaemonConfig {
                 profile_positions
                     .entry(char_name.clone())
                     .and_modify(|e| {
-                        // Update ONLY the position/dimensions from the daemon's state.
-                        // Essential to PRESERVE any override settings (colors, sizes) that were loaded from disk.
+                        // Merge runtime positions (Daemon authority) into disk settings (Style authority).
                         e.x = char_settings.x;
                         e.y = char_settings.y;
                         e.dimensions = char_settings.dimensions;
@@ -219,8 +219,7 @@ impl DaemonConfig {
             }
         }
 
-        // Explicitly remove any empty key that might have been loaded from a corrupt config
-        // Sanitize ALL profiles to ensure the config file is clean globally
+        // Sanitation: remove invalid empty keys potentially introduced by corrupt loads.
         for profile in &mut profile_config.profiles {
             profile.character_thumbnails.remove("");
         }
@@ -240,29 +239,59 @@ impl DaemonConfig {
     ) -> Result<Option<CharacterSettings>> {
         info!(old = %old_name, new = %new_name, "Character change");
 
-        if !old_name.is_empty() && self.profile.thumbnail_auto_save_position {
-            let settings = CharacterSettings::new(
-                current_position.x,
-                current_position.y,
-                current_width,
-                current_height,
-            );
+        if !old_name.is_empty() {
+            let mut settings = self
+                .character_thumbnails
+                .get(old_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    CharacterSettings::new(
+                        current_position.x,
+                        current_position.y,
+                        current_width,
+                        current_height,
+                    )
+                });
+
+            // Update session state (position) while preserving user customization (style/mode).
+            settings.x = current_position.x;
+            settings.y = current_position.y;
+            settings.dimensions = crate::types::Dimensions::new(current_width, current_height);
+
             self.character_thumbnails
                 .insert(old_name.to_string(), settings);
 
-            self.save().context(format!(
-                "Failed to save config after character change from '{}' to '{}'",
-                old_name, new_name
-            ))?;
-        } else if !old_name.is_empty() {
-            let settings = CharacterSettings::new(
-                current_position.x,
-                current_position.y,
-                current_width,
-                current_height,
-            );
-            self.character_thumbnails
-                .insert(old_name.to_string(), settings);
+            if self.profile.thumbnail_auto_save_position {
+                self.save().context(format!(
+                    "Failed to save config after character change from '{}' to '{}'",
+                    old_name, new_name
+                ))?;
+            }
+        }
+
+        // NOTE: Refresh overrides from disk to respect external GUI changes (e.g. static mode).
+        // Memory holds the authoritative window position, but disk holds the authoritative user config.
+        if !new_name.is_empty() {
+            if let Ok(disk_config) = crate::config::profile::Config::load() {
+                let pd_name = &self.profile.profile_name;
+                if let Some(disk_profile) = disk_config.profiles.iter().find(|p| &p.profile_name == pd_name) {
+                    if let Some(disk_settings) = disk_profile.character_thumbnails.get(new_name) {
+                        self.character_thumbnails
+                            .entry(new_name.to_string())
+                            .and_modify(|mem_settings| {
+                                mem_settings.preview_mode = disk_settings.preview_mode.clone();
+                                mem_settings.alias = disk_settings.alias.clone();
+                                mem_settings.notes = disk_settings.notes.clone();
+                                mem_settings.override_active_border_color = disk_settings.override_active_border_color.clone();
+                                mem_settings.override_inactive_border_color = disk_settings.override_inactive_border_color.clone();
+                                mem_settings.override_active_border_size = disk_settings.override_active_border_size;
+                                mem_settings.override_inactive_border_size = disk_settings.override_inactive_border_size;
+                                mem_settings.override_text_color = disk_settings.override_text_color.clone();
+                            })
+                            .or_insert_with(|| disk_settings.clone());
+                    }
+                }
+            }
         }
 
         if !new_name.is_empty()
@@ -287,50 +316,71 @@ impl DaemonConfig {
     /// This method is used when "Auto-save thumbnail positions" is DISABLED. It ensures that
     /// the new character is added to the config (so the GUI can see it), but any other
     /// pending in-memory position changes for other characters are NOT written to disk.
-    ///
-    /// # Logic
-    /// 1. Loads the current configuration from disk (source of truth).
-    /// 2. Inserts ONLY the new character's settings.
-    /// 3. Saves back to disk using the `PreserveCharacterPositions` strategy (redundant but safe).
     pub fn save_new_character(&self, char_name: &str, settings: CharacterSettings) -> Result<()> {
         info!(character = %char_name, "Safe-saving new character to config (preserving disk state)");
 
         let config_path = Self::config_path();
 
         // 1. Load current on-disk config to ensure we don't clobber unrelated changes
-        let mut disk_config = if let Ok(contents) = fs::read_to_string(&config_path) {
-            serde_json::from_str::<crate::config::profile::Config>(&contents)
-                .context("Failed to parse existing config for safe update")?
-        } else {
-            // Should theoretically not happen if app is running, but handle gracefully
-            crate::config::profile::Config::default()
-        };
-
-        // 2. Find the active profile in the disk config
-        let selected_name = disk_config.global.selected_profile.clone();
-        if let Some(profile) = disk_config
-            .profiles
-            .iter_mut()
-            .find(|p| p.profile_name == selected_name)
-        {
-            // 3. Insert ONLY the new character
-            profile
-                .character_thumbnails
-                .insert(char_name.to_string(), settings);
-        } else {
-            // Fallback: modify the first profile if selected not found (unlikely)
-            if let Some(profile) = disk_config.profiles.first_mut() {
+        // Retry loop to handle transient file lock/contention with GUI
+        let mut retries = 3;
+        while retries > 0 {
+            // Load current on-disk config to ensure we don't clobber unrelated changes
+            let read_result = fs::read_to_string(&config_path);
+            
+            let mut disk_config = match read_result {
+                Ok(contents) => match serde_json::from_str::<crate::config::profile::Config>(&contents) {
+                    Ok(c) => c,
+                    Err(e) => {
+                         // Parse error is fatal, don't retry
+                        return Err(anyhow::Error::new(e).context("Failed to parse existing config for safe update"));
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // File missing -> Safe to start fresh
+                    crate::config::profile::Config::default()
+                }
+                Err(e) => {
+                    // IO Error (Busy/Locked?) -> Retry
+                    retries -= 1;
+                    if retries == 0 {
+                        return Err(anyhow::Error::new(e).context("Failed to read config file after retries"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+            };
+            
+            // Find the active profile in the disk config
+            let selected_name = disk_config.global.selected_profile.clone();
+            if let Some(profile) = disk_config
+                .profiles
+                .iter_mut()
+                .find(|p| p.profile_name == selected_name)
+            {
+                // Insert ONLY the new character
                 profile
                     .character_thumbnails
-                    .insert(char_name.to_string(), settings);
+                    .insert(char_name.to_string(), settings.clone());
+            } else {
+                // Fallback: modify the first profile if selected not found (unlikely)
+                if let Some(profile) = disk_config.profiles.first_mut() {
+                    profile
+                        .character_thumbnails
+                        .insert(char_name.to_string(), settings.clone());
+                }
             }
-        }
 
-        // 4. Save back to disk
-        // We can just save the modified disk_config directly
-        disk_config
-            .save_with_strategy(SaveStrategy::Overwrite)
-            .context("Failed to save config with new character")
+            // Save back to disk
+            // We can just save the modified disk_config directly
+            disk_config
+                .save_with_strategy(SaveStrategy::Overwrite)
+                .context("Failed to save config with new character")?;
+                
+            return Ok(());
+        }
+        
+        Ok(()) // Should be unreachable given the return in the loop but satisfies compiler
     }
 }
 
