@@ -7,6 +7,7 @@
 pub mod hotkey_binding;
 pub mod profile;
 pub mod runtime;
+pub mod serialization;
 
 pub use hotkey_binding::HotkeyBinding;
 pub use profile::HotkeyBackendType;
