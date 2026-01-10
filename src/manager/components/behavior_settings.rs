@@ -58,8 +58,9 @@ impl BehaviorSettingsState {
                     .as_ref()
                     .is_some_and(|selected| !self.backup_list.iter().any(|(f, _)| f == selected));
 
-                if selection_invalid {
-                    self.selected_backup = None;
+                if selection_invalid || self.selected_backup.is_none() {
+                    // Default to the first (newest) backup if available
+                    self.selected_backup = self.backup_list.first().map(|(f, _)| f.clone());
                 }
             }
             Err(e) => {
