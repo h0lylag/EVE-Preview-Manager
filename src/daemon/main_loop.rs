@@ -311,6 +311,11 @@ async fn run_event_loop(
     let x11_fd = AsyncFd::new(conn.stream().as_raw_fd())
         .context("Failed to create AsyncFd for X11 connection")?;
 
+    // Heartbeat timer (3s interval)
+    let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(3));
+    // Set the first tick to finish immediately? No, we can wait 3s for the first one.
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         // Scope ctx to allow mutable borrow of font_renderer later
         {
@@ -353,7 +358,16 @@ async fn run_event_loop(
         }
 
         tokio::select! {
-             // 1. Handle SIGUSR1 (Log status instead of save)
+             // 1. Send Heartbeat
+            _ = heartbeat_interval.tick() => {
+                if let Err(e) = status_tx.send(DaemonMessage::Heartbeat) {
+                    error!(error = %e, "Failed to send heartbeat to Manager");
+                    // If we can't send heartbeat, manager might be dead. 
+                    // We'll let the IPC config channel failure handle termination.
+                }
+            }
+
+             // 2. Handle SIGUSR1 (Log status instead of save)
             _ = sigusr1.recv() => {
                 info!("SIGUSR1 received - config is now managed by Manager via IPC");
                 // TODO: Maybe send a status update to Manager?

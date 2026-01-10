@@ -63,16 +63,7 @@ pub enum HotkeyBackendType {
     Evdev,
 }
 
-/// Strategy for saving configuration files
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SaveStrategy {
-    /// Load existing config from disk and preserve its character positions/dimensions
-    /// Used by Manager when saving general settings to avoid overwriting daemon's position updates
-    Preserve,
-    /// Overwrite disk config cleanly with current state
-    /// Used when we know we have the full authoritative state
-    Overwrite,
-}
+
 
 /// Top-level configuration with profile support
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,8 +365,11 @@ impl Config {
             .find(|p| p.profile_name == self.global.selected_profile)
     }
 
-    /// Save configuration to JSON file using chosen strategy
-    pub fn save_with_strategy(&self, strategy: SaveStrategy) -> Result<()> {
+    /// Save configuration to JSON file.
+    ///
+    /// Writes the current in-memory state directly to config.json.
+    /// The Manager maintains authoritative state via IPC synchronization.
+    pub fn save(&self) -> Result<()> {
         let config_path = Self::path();
 
         // Ensure config directory exists
@@ -384,61 +378,7 @@ impl Config {
                 .with_context(|| format!("Failed to create config directory {:?}", parent))?;
         }
 
-        let config_to_save = match strategy {
-            SaveStrategy::Preserve => {
-                let mut clone = self.clone();
-                if config_path.exists()
-                    && let Ok(contents) = fs::read_to_string(&config_path)
-                    && let Ok(existing_config) = serde_json::from_str::<Config>(&contents)
-                {
-                    for profile_to_save in clone.profiles.iter_mut() {
-                        if let Some(existing_profile) = existing_config
-                            .profiles
-                            .iter()
-                            .find(|p| p.profile_name == profile_to_save.profile_name)
-                        {
-                            // Profile exists on disk
-                            // Merge strategy:
-                            // 1. For characters in BOTH: keep Manager settings (overrides), update positions from Disk
-                            // 2. For characters ONLY in Disk: add to Manager (newly discovered by daemon)
-
-                            for (char_name, disk_settings) in &existing_profile.character_thumbnails
-                            {
-                                if let Some(manager_settings) =
-                                    profile_to_save.character_thumbnails.get_mut(char_name)
-                                {
-                                    // Found in both: update position/dim from disk, keep Manager overrides
-                                    manager_settings.x = disk_settings.x;
-                                    manager_settings.y = disk_settings.y;
-                                    // Don't overwrite dimensions - Manager state is authoritative (it updates from disk via polling, but allows user overrides)
-                                    // manager_settings.dimensions = disk_settings.dimensions;
-                                }
-                                // If they are valid new windows found by the daemon, the daemon will re-add them
-                                // to the config on its next pass/save cycle. This fixes the "zombie character" bug.
-                            }
-
-                            // Same merge logic for custom sources
-                            for (source_name, disk_settings) in
-                                &existing_profile.custom_source_thumbnails
-                            {
-                                if let Some(manager_settings) = profile_to_save
-                                    .custom_source_thumbnails
-                                    .get_mut(source_name)
-                                {
-                                    manager_settings.x = disk_settings.x;
-                                    manager_settings.y = disk_settings.y;
-                                    // Dimension updates logic mirrors characters
-                                }
-                            }
-                        }
-                    }
-                }
-                clone
-            }
-            SaveStrategy::Overwrite => self.clone(),
-        };
-
-        let json_string = serde_json::to_string_pretty(&config_to_save)
+        let json_string = serde_json::to_string_pretty(self)
             .context("Failed to serialize config to JSON")?;
 
         fs::write(&config_path, json_string)
@@ -448,10 +388,6 @@ impl Config {
         Ok(())
     }
 
-    /// Convenience helper: save preserving character positions (Manager default)
-    pub fn save(&self) -> Result<()> {
-        self.save_with_strategy(SaveStrategy::Preserve)
-    }
 }
 
 impl Default for Config {
@@ -586,12 +522,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_save_strategy_variants() {
-        let strategy = SaveStrategy::Preserve;
-        assert_eq!(strategy, SaveStrategy::Preserve);
-        assert_ne!(strategy, SaveStrategy::Overwrite);
-    }
+
 
     #[test]
     fn test_profile_with_hotkeys() {

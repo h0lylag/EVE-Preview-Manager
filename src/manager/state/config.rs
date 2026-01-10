@@ -11,42 +11,8 @@ use super::StatusMessage;
 
 impl SharedState {
     pub fn save_config(&mut self) -> Result<()> {
-        // Load fresh config from disk (has all characters including daemon's additions)
-        let disk_config = Config::load().unwrap_or_else(|_| self.config.clone());
-
-        // Merge strategy: Start with Manager's profile list (handles deletions), merge character positions from disk
-        let mut merged_profiles = Vec::new();
-
-        for profile in &self.config.profiles {
-            let mut merged_profile = profile.clone();
-
-            // Find matching profile in disk config to get daemon's character positions
-            if let Some(disk_profile) = disk_config
-                .profiles
-                .iter()
-                .find(|p| p.profile_name == profile.profile_name)
-            {
-                // Merge character positions: start with Manager's, add disk characters, preserve disk positions
-                for (char_name, disk_settings) in &disk_profile.character_thumbnails {
-                    if let Some(settings) = merged_profile.character_thumbnails.get_mut(char_name) {
-                        // Character exists in both: keep Manager dimensions, use disk position (x, y)
-                        settings.x = disk_settings.x;
-                        settings.y = disk_settings.y;
-                    }
-                }
-            }
-
-            merged_profiles.push(merged_profile);
-        }
-
-        // Build final config with merged profiles and Manager's global settings
-        let final_config = Config {
-            profiles: merged_profiles,
-            global: self.config.global.clone(),
-        };
-
-        // Update in-memory config immediately
-        self.config = final_config;
+        // Write current state to disk - Manager maintains authoritative state via IPC synchronization
+        self.config.save()?;
 
         // Sync with daemon via IPC
         if let Some(ref tx) = self.ipc_config_tx {

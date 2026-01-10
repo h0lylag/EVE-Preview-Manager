@@ -30,6 +30,11 @@ pub struct SharedState {
     pub ipc_status_rx: Option<IpcReceiver<DaemonMessage>>,
     pub bootstrap_rx: Option<Receiver<BootstrapMessage>>,
     pub daemon_status_rx: Option<Receiver<DaemonMessage>>,
+
+    // IPC health monitoring
+    pub ipc_healthy: bool,
+    pub last_heartbeat: Instant,
+    pub missed_heartbeats: u32,
 }
 
 impl SharedState {
@@ -56,6 +61,10 @@ impl SharedState {
             ipc_status_rx: None,
             bootstrap_rx: None,
             daemon_status_rx: None,
+
+            ipc_healthy: false,
+            last_heartbeat: Instant::now(),
+            missed_heartbeats: 0,
         }
     }
 }

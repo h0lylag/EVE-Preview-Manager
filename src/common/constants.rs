@@ -124,6 +124,9 @@ pub mod manager_ui {
 
     /// Daemon monitoring
     pub const DAEMON_CHECK_INTERVAL_MS: u64 = 500;
+
+    /// Debounce delay for config auto-saving, ie preview window position updates
+    pub const AUTO_SAVE_DELAY_MS: u64 = 1000;
 }
 
 /// Default configuration values

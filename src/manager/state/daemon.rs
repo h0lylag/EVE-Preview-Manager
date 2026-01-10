@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::common::constants::manager_ui::*;
 use crate::common::ipc::{BootstrapMessage, DaemonMessage};
-use crate::config::profile::SaveStrategy;
+
 use crate::manager::utils::spawn_daemon;
 
 use super::DaemonStatus;
@@ -123,6 +123,11 @@ impl SharedState {
 
             self.bootstrap_rx = None; // Done
             self.daemon_status = DaemonStatus::Running;
+            
+            // initialize heartbeats
+            self.ipc_healthy = true;
+            self.last_heartbeat = Instant::now();
+            self.missed_heartbeats = 0;
         }
 
         // 2. Poll Status Messages
@@ -168,8 +173,8 @@ impl SharedState {
 
                         if auto_save {
                             // Debounce save: only write to disk if it's been at least 1 second since last attempt
-                            if self.last_save_attempt.elapsed() > Duration::from_secs(1) {
-                                let _ = self.config.save_with_strategy(SaveStrategy::Overwrite);
+                            if self.last_save_attempt.elapsed() > Duration::from_millis(AUTO_SAVE_DELAY_MS) {
+                                let _ = self.config.save();
                                 self.last_save_attempt = Instant::now();
                                 debug!("Debounced auto-save triggered");
                             } else {
@@ -184,7 +189,12 @@ impl SharedState {
                         info!("Daemon requested profile switch: {}", name);
                         profile_switch_request = Some(name);
                     }
-                    _ => {}
+                    DaemonMessage::Heartbeat => {
+                        self.ipc_healthy = true;
+                        self.last_heartbeat = Instant::now();
+                        self.missed_heartbeats = 0;
+                    }
+
                 }
             }
         }
@@ -199,6 +209,25 @@ impl SharedState {
                 self.switch_profile(idx);
             } else {
                 warn!("Requested profile '{}' not found", name);
+            }
+        }
+
+        // IPC Health Check
+        // If connected but no heartbeat for 15s (5s grace * 3), assume hung process
+        if self.daemon.is_some() && self.ipc_healthy && self.last_heartbeat.elapsed() > Duration::from_secs(5) {
+            // Only count missed beats if we are expecting them
+            if self.daemon_status == DaemonStatus::Running {
+                self.missed_heartbeats += 1;
+                
+                // We poll roughly every DAEMON_CHECK_INTERVAL_MS (500ms).
+                // So wait 30 ticks (15s) or just use time elapsed.
+                // Actually, simpler to just check total elapsed time since last beat.
+                if self.last_heartbeat.elapsed() > Duration::from_secs(15) {
+                    warn!("IPC appears unhealthy (no heartbeat for 15s), restarting daemon");
+                    self.ipc_healthy = false;
+                    self.restart_daemon();
+                    return; // Restart will reset everything
+                }
             }
         }
 
