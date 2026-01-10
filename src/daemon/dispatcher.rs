@@ -1,4 +1,4 @@
-//! X11 event processing for the preview daemon
+//! X11 event processing for the daemon process
 //!
 //! Dispatcher that routes X11 events to specialized handlers.
 

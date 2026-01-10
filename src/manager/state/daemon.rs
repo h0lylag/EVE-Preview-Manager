@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 use crate::common::constants::gui::*;
 use crate::common::ipc::{BootstrapMessage, DaemonMessage};
 use crate::config::profile::SaveStrategy;
-use crate::manager::utils::spawn_preview_daemon;
+use crate::manager::utils::spawn_daemon;
 
 use super::DaemonStatus;
 use super::SharedState;
@@ -23,9 +23,9 @@ impl SharedState {
             IpcOneShotServer::<BootstrapMessage>::new().context("Failed to create IPC server")?;
 
         // 2. Spawn Daemon with server name
-        let child = spawn_preview_daemon(&server_name)?;
+        let child = spawn_daemon(&server_name)?;
         let pid = child.id();
-        info!(pid, server_name = %server_name, "Started preview daemon");
+        info!(pid, server_name = %server_name, "Started daemon process");
 
         // 3. Spawn thread to wait for connection (avoid blocking GUI)
         let (tx, rx) = mpsc::channel();
@@ -51,7 +51,7 @@ impl SharedState {
 
     pub fn stop_daemon(&mut self) -> Result<()> {
         if let Some(mut child) = self.daemon.take() {
-            info!(pid = child.id(), "Stopping preview daemon");
+            info!(pid = child.id(), "Stopping daemon process");
 
             if let Err(e) = child.kill() {
                 error!(pid = child.id(), error = %e, "Failed to send SIGKILL to daemon");
@@ -76,7 +76,7 @@ impl SharedState {
             // Clear IPC channels immediately to prevent "Broken pipe" errors if save_config is called (e.g. on exit)
             self.ipc_config_tx = None;
             self.ipc_status_rx = None;
-            self.gui_status_rx = None;
+            self.daemon_status_rx = None;
         }
         Ok(())
     }
@@ -106,14 +106,14 @@ impl SharedState {
             let (config_tx, status_rx) = msg;
             self.ipc_config_tx = Some(config_tx);
 
-            // Bridge status_rx to GUI thread
-            let (gui_tx, gui_rx) = mpsc::channel();
-            self.gui_status_rx = Some(gui_rx);
+            // Bridge status_rx to Manager thread
+            let (manager_tx, manager_rx) = mpsc::channel();
+            self.daemon_status_rx = Some(manager_rx);
 
             std::thread::spawn(move || {
                 while let Ok(msg) = status_rx.recv() {
-                    if gui_tx.send(msg).is_err() {
-                        break; // GUI dropped
+                    if manager_tx.send(msg).is_err() {
+                        break; // Manager dropped
                     }
                 }
             });
@@ -127,7 +127,7 @@ impl SharedState {
 
         // 2. Poll Status Messages
         let mut profile_switch_request = None;
-        if let Some(ref rx) = self.gui_status_rx {
+        if let Some(ref rx) = self.daemon_status_rx {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
                     DaemonMessage::Log { level, message } => {
@@ -210,7 +210,7 @@ impl SharedState {
         if let Some(child) = self.daemon.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    warn!(pid = child.id(), exit = ?status.code(), "Preview daemon exited");
+                    warn!(pid = child.id(), exit = ?status.code(), "Daemon exited unexpectedly");
                     self.daemon = None;
                     self.daemon_status = if status.success() {
                         DaemonStatus::Stopped
@@ -219,7 +219,7 @@ impl SharedState {
                     };
                     self.ipc_config_tx = None;
                     self.ipc_status_rx = None;
-                    self.gui_status_rx = None;
+                    self.daemon_status_rx = None;
                 }
                 Ok(None) => {}
                 Err(err) => {

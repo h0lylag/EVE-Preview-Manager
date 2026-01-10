@@ -51,7 +51,7 @@ fn main() -> Result<()> {
                 .expect("Failed to build Tokio runtime");
 
             rt.block_on(async {
-                if let Err(e) = daemon::run_preview_daemon(ipc_server).await {
+                if let Err(e) = daemon::run_daemon(ipc_server).await {
                     eprintln!("Daemon error: {e}");
                 }
             });

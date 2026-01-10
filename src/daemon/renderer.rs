@@ -1,4 +1,4 @@
-//! Thumbnail X11 Renderer
+//! Daemon Thumbnail Renderer
 //!
 //! Handles low-level X11 window creation, rendering, and resource management.
 
@@ -27,13 +27,13 @@ use crate::config::DisplayConfig;
 /// Handles low-level X11 window creation, rendering, and resource management.
 ///
 /// This struct is responsible for:
-/// - Creating and managing the X11 preview window.
+/// - Creating and managing the X11 thumbnail window.
 /// - Setting window properties (opacity, input masks, PID).
-/// - Compositing the source window and overlay onto the preview window.
+/// - Compositing the source window and overlay onto the thumbnail window.
 /// - Handling X11 resource cleanup via `Drop`.
 pub struct ThumbnailRenderer<'a> {
     // === X11 Window Handles ===
-    /// The X11 window ID for the clickable thumbnail preview.
+    /// The X11 window ID for the clickable thumbnail.
     pub window: Window,
     /// The source X11 window ID (the EVE client).
     pub src: Window,
@@ -269,7 +269,7 @@ impl<'a> ThumbnailRenderer<'a> {
     /// # Arguments
     /// * `ctx` - The application context containing X11 connection and config.
     /// * `character_name` - Name of the character (for logging and window titles).
-    /// * `src` - The source window ID to preview.
+    /// * `src` - The source window ID to render as a thumbnail.
     /// * `src_depth` - The depth of the source window (to select correct Render format).
     /// * `font_renderer` - Renderer for text overlays.
     /// * `x`, `y` - Initial screen coordinates.
@@ -606,7 +606,7 @@ impl<'a> ThumbnailRenderer<'a> {
         Ok(())
     }
 
-    /// logic for full update cycle: capture source -> apply overlay.
+    /// Logic for full update cycle: capture source -> apply overlay.
     pub fn update(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
         self.capture(character_name, dimensions).context(format!(
             "Failed to capture source window for '{}'",

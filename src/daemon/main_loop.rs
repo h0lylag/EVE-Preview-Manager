@@ -1,4 +1,4 @@
-//! Preview daemon main loop and initialization
+//! Daemon main loop and runtime initialization
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -46,8 +46,7 @@ fn initialize_x11() -> Result<(
     CachedAtoms,
     crate::x11::CachedFormats,
 )> {
-    // Establish connection to the X server to query screen dimensions and root window ID
-    // We need the screen dimensions early to set smart defaults for thumbnail sizes
+    // Initial screen metrics are required for auto-scaling thumbnails.
     let (conn, screen_num) = x11rb::connect(None)
         .context("Failed to connect to X11 server. Is DISPLAY set correctly?")?;
 
@@ -288,7 +287,7 @@ async fn run_event_loop(
     config_rx: IpcReceiver<ConfigMessage>,
     status_tx: IpcSender<DaemonMessage>,
 ) -> Result<()> {
-    info!("Preview daemon running (async)");
+    info!("Daemon running (async)");
 
     // Wrap IPC receiver in something async-friendly?
     // IpcReceiver is blocking. IPC-channel doesn't support async recv out of the box in a way that integrates with tokio::select! easily without a bridge.
@@ -298,12 +297,12 @@ async fn run_event_loop(
     std::thread::spawn(move || {
         while let Ok(msg) = config_rx.recv() {
             if ipc_config_tx.blocking_send(msg).is_err() {
-                break; // GUI dropped
+                break; // Manager connection lost
             }
         }
-        // If config_rx fails (GUI side closed), this thread ends.
+        // If config_rx fails (Manager side closed), this thread ends.
         // We should probably explicitly terminate the daemon here if we want absolute safety.
-        error!("IPC Config channel closed - GUI process likely terminated. Exiting daemon.");
+        error!("IPC Config channel closed - Manager process likely terminated. Exiting daemon.");
         std::process::exit(1);
     });
 
@@ -356,8 +355,8 @@ async fn run_event_loop(
         tokio::select! {
              // 1. Handle SIGUSR1 (Log status instead of save)
             _ = sigusr1.recv() => {
-                info!("SIGUSR1 received - config is now managed by GUI via IPC");
-                // TODO: Maybe send a status update to GUI?
+                info!("SIGUSR1 received - config is now managed by Manager via IPC");
+                // TODO: Maybe send a status update to Manager?
                 let _ = status_tx.send(DaemonMessage::Log {
                     level: "INFO".to_string(),
                     message: "SIGUSR1 received".to_string()
@@ -488,7 +487,7 @@ async fn run_event_loop(
                              if let Some(profile_name) = resources.config.profile_hotkeys.get(binding) {
                                  info!(target_profile = %profile_name, "Requesting profile switch via IPC");
                                  if let Err(e) = status_tx.send(DaemonMessage::RequestProfileSwitch(profile_name.clone())) {
-                                     error!(error = %e, "Failed to send profile switch request to GUI");
+                                     error!(error = %e, "Failed to send profile switch request to Manager");
                                  }
                              }
                              None
@@ -609,7 +608,7 @@ async fn run_event_loop(
     }
 }
 
-pub async fn run_preview_daemon(ipc_server_name: String) -> Result<()> {
+pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     // 1. Initialize X11 connection and resources
     let (conn, _screen_num, atoms, formats) =
         initialize_x11().context("Failed to initialize X11")?;
@@ -627,7 +626,7 @@ pub async fn run_preview_daemon(ipc_server_name: String) -> Result<()> {
     let (status_tx, status_rx) =
         ipc::channel::<DaemonMessage>().context("Failed to create status IPC channel")?;
 
-    // Send the channels to the GUI
+    // Send the channels to the Manager
     bootstrap_sender
         .send((config_tx, status_rx))
         .context("Failed to send bootstrap message")?;

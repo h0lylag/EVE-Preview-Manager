@@ -1,4 +1,4 @@
-//! GUI manager implemented with egui/eframe and ksni system tray support
+//! Application manager - primary interface for configuration and daemon control
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

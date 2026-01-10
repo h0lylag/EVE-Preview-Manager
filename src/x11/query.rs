@@ -1,16 +1,14 @@
-//! X11 window state queries and operations
+//! X11 window state queries
 
 use anyhow::{Context, Result};
 use tracing::debug;
-use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
+use super::CachedAtoms;
 use crate::common::constants::{eve, x11};
 use crate::common::types::EveWindowType;
-
-use super::CachedAtoms;
 
 /// Identifies if a window belongs to EVE Online by inspecting its properties and title
 pub fn is_window_eve(
@@ -40,8 +38,6 @@ pub fn is_window_eve(
     let title = String::from_utf8_lossy(&name_prop.value).into_owned();
     Ok(
         if let Some(name) = title.strip_prefix(eve::WINDOW_TITLE_PREFIX) {
-            // Fix: Filter out Steam Proton/Wine container windows that use the App ID as the "character name".
-            // These transient windows often have titles like "EVE - steam_app_8500".
             if name.contains("steam_app_") {
                 debug!(window=window, name=%name, "Ignored steam_app container title");
                 None
@@ -90,13 +86,9 @@ pub fn get_window_class(
         return Ok(None);
     }
 
-    // WM_CLASS contains two null-terminated strings: <instance_name>\0<class_name>\0
-    // We're usually interested in the second one (class name)
     let null_byte = 0;
     let parts: Vec<&[u8]> = prop.value.split(|&x| x == null_byte).collect();
 
-    // If we have at least 2 parts, use the second one (Class Name)
-    // If we only have 1 part (or the second is empty), use the first one
     let class_bytes = if parts.len() >= 2 && !parts[1].is_empty() {
         parts[1]
     } else {
@@ -141,7 +133,6 @@ pub fn is_window_minimized(
         }
     }
 
-    // Fallback to ICCCM WM_STATE / IconicState detection
     let wm_state_cookie = conn
         .get_property(false, window, atoms.wm_state, atoms.wm_state, 0, 2)
         .context(format!("Failed to query WM_STATE for window {}", window))?;
@@ -218,105 +209,4 @@ pub fn is_eve_window_focused(
     atoms: &CachedAtoms,
 ) -> Result<bool> {
     Ok(get_active_eve_window(conn, screen, atoms)?.is_some())
-}
-
-/// Requests the window manager to grant focus to the specified window using standard EWMH protocols
-///
-/// # Arguments
-/// * `timestamp` - The timestamp of the input event that triggered this request (required by EWMH)
-pub fn activate_window(
-    conn: &RustConnection,
-    screen: &Screen,
-    atoms: &CachedAtoms,
-    window: Window,
-    timestamp: u32,
-) -> Result<()> {
-    conn.configure_window(
-        window,
-        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-    )
-    .context(format!("Failed to raise window {} to top of stack", window))?;
-
-    let event = ClientMessageEvent {
-        response_type: CLIENT_MESSAGE_EVENT,
-        format: 32,
-        sequence: 0,
-        window,
-        type_: atoms.net_active_window,
-        data: ClientMessageData::from([x11::ACTIVE_WINDOW_SOURCE_PAGER, timestamp, 0, 0, 0]),
-    };
-
-    conn.send_event(
-        false,
-        screen.root,
-        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
-        event,
-    )
-    .context(format!(
-        "Failed to send _NET_ACTIVE_WINDOW event for window {}",
-        window
-    ))?;
-
-    conn.flush()
-        .context("Failed to flush X11 connection after window activation")?;
-    Ok(())
-}
-
-/// Requests the window manager to hide/minimize the window using EWMH status flags
-pub fn minimize_window(
-    conn: &RustConnection,
-    screen: &Screen,
-    atoms: &CachedAtoms,
-    window: Window,
-) -> Result<()> {
-    let event = ClientMessageEvent {
-        response_type: CLIENT_MESSAGE_EVENT,
-        format: 32,
-        sequence: 0,
-        window,
-        type_: atoms.net_wm_state,
-        data: ClientMessageData::from([
-            x11::NET_WM_STATE_ADD,
-            atoms.net_wm_state_hidden,
-            0,
-            x11::ACTIVE_WINDOW_SOURCE_PAGER,
-            0,
-        ]),
-    };
-
-    conn.send_event(
-        false,
-        screen.root,
-        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
-        event,
-    )
-    .context(format!(
-        "Failed to send _NET_WM_STATE minimize event for window {}",
-        window
-    ))?;
-
-    // Fallback for WMs that expect ICCCM-style iconify requests
-    let change_state_event = ClientMessageEvent {
-        response_type: CLIENT_MESSAGE_EVENT,
-        format: 32,
-        sequence: 0,
-        window,
-        type_: atoms.wm_change_state,
-        data: ClientMessageData::from([x11::ICONIC_STATE, 0, 0, 0, 0]),
-    };
-
-    conn.send_event(
-        false,
-        screen.root,
-        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
-        change_state_event,
-    )
-    .context(format!(
-        "Failed to send WM_CHANGE_STATE iconify event for window {}",
-        window
-    ))?;
-
-    conn.flush()
-        .context("Failed to flush X11 connection after window minimize")?;
-    Ok(())
 }

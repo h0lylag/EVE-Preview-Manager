@@ -1,4 +1,4 @@
-//! GUI module - egui-based management interface with system tray control
+//! Manager module - administrative interface for profile and daemon lifecycle
 
 mod app;
 pub mod components;

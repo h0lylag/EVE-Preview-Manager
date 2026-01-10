@@ -29,7 +29,7 @@ pub struct SharedState {
     pub ipc_config_tx: Option<IpcSender<ConfigMessage>>,
     pub ipc_status_rx: Option<IpcReceiver<DaemonMessage>>,
     pub bootstrap_rx: Option<Receiver<BootstrapMessage>>,
-    pub gui_status_rx: Option<Receiver<DaemonMessage>>,
+    pub daemon_status_rx: Option<Receiver<DaemonMessage>>,
 }
 
 impl SharedState {
@@ -55,7 +55,7 @@ impl SharedState {
             ipc_config_tx: None,
             ipc_status_rx: None,
             bootstrap_rx: None,
-            gui_status_rx: None,
+            daemon_status_rx: None,
         }
     }
 }

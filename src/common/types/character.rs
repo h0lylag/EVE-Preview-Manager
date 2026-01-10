@@ -1,4 +1,4 @@
-//! Domain-specific types for EVE Online windows and settings
+//! Character-specific types and settings for EVE Online windows
 
 use super::geometry::{Dimensions, Position};
 use serde::{Deserialize, Serialize};
