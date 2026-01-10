@@ -12,6 +12,7 @@ use ksni::TrayMethods;
 
 use super::components;
 use crate::common::constants::manager_ui::*;
+use crate::config::backup::BackupManager;
 use crate::config::profile::Config;
 use crate::manager::components::profile_selector::{ProfileAction, ProfileSelector};
 #[cfg(target_os = "linux")]
@@ -40,6 +41,29 @@ struct ManagerApp {
 impl ManagerApp {
     fn new(cc: &eframe::CreationContext<'_>, config: Config, debug_mode: bool) -> Self {
         info!("Initializing Manager (debug_mode={})", debug_mode);
+
+        // Run auto-backup if enabled
+        if config.global.backup_enabled {
+            if BackupManager::should_run_auto_backup(config.global.backup_interval_days) {
+                info!("Auto-backup triggered due to interval expiration");
+                match BackupManager::create_backup(false) {
+                    Ok(_) => {
+                        if let Err(e) =
+                            BackupManager::prune_backups(config.global.backup_retention_count)
+                        {
+                            error!("Failed to prune backups: {}", e);
+                        }
+                    }
+                    Err(e) => error!("Failed to create auto-backup: {}", e),
+                }
+            } else {
+                // Determine if we need to prune anyway (e.g. retention count changed)
+                // Just in case, run prune on startup to enforce policy
+                if let Err(e) = BackupManager::prune_backups(config.global.backup_retention_count) {
+                    error!("Failed to prune backups: {}", e);
+                }
+            }
+        }
 
         // Initialize SharedState
         let mut state = SharedState::new(config.clone(), debug_mode);
@@ -269,13 +293,29 @@ impl eframe::App for ManagerApp {
 
                 match self.active_tab {
                     ManagerTab::Behavior => {
-                        if components::behavior_settings::ui(
+                        use components::behavior_settings::BehaviorSettingsAction;
+                        match components::behavior_settings::ui(
                             ui,
                             current_profile,
+                            &mut state.config.global,
                             &mut self.behavior_settings_state,
                         ) {
-                            state.settings_changed = true;
-                            state.config_status_message = None;
+                            BehaviorSettingsAction::SettingsChanged => {
+                                state.settings_changed = true;
+                                state.config_status_message = None;
+                            }
+                            BehaviorSettingsAction::RestoreTriggered => {
+                                // Reload config from disk (disk was just updated by restore)
+                                state.discard_changes();
+                                // Sync new config to daemon
+                                state.reload_daemon_config();
+                                // Override the "Changes discarded" message from discard_changes
+                                state.config_status_message = Some(StatusMessage {
+                                    text: "Configuration restored and reloaded".to_string(),
+                                    color: COLOR_SUCCESS,
+                                });
+                            }
+                            BehaviorSettingsAction::None => {}
                         }
                     }
                     ManagerTab::Appearance => {

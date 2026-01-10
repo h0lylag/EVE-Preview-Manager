@@ -81,6 +81,12 @@ pub struct GlobalSettings {
     pub window_width: u16,
     #[serde(default = "default_window_height")]
     pub window_height: u16,
+    #[serde(default = "default_backup_enabled")]
+    pub backup_enabled: bool,
+    #[serde(default = "default_backup_interval_days")]
+    pub backup_interval_days: u32,
+    #[serde(default = "default_backup_retention_count")]
+    pub backup_retention_count: u32,
 }
 
 /// Profile - A complete set of visual and behavioral settings
@@ -183,6 +189,18 @@ pub(crate) fn default_profile_name() -> String {
 
 pub(crate) fn default_hotkey_backend() -> HotkeyBackendType {
     HotkeyBackendType::X11
+}
+
+pub(crate) fn default_backup_enabled() -> bool {
+    crate::common::constants::config::backup::ENABLED
+}
+
+pub(crate) fn default_backup_interval_days() -> u32 {
+    crate::common::constants::config::backup::INTERVAL_DAYS
+}
+
+pub(crate) fn default_backup_retention_count() -> u32 {
+    crate::common::constants::config::backup::RETENTION_COUNT
 }
 
 pub(crate) fn default_window_width() -> u16 {
@@ -295,6 +313,9 @@ impl Default for GlobalSettings {
             selected_profile: default_profile_name(),
             window_width: default_window_width(),
             window_height: default_window_height(),
+            backup_enabled: default_backup_enabled(),
+            backup_interval_days: default_backup_interval_days(),
+            backup_retention_count: default_backup_retention_count(),
         }
     }
 }
@@ -497,6 +518,18 @@ mod tests {
         assert_eq!(
             settings.window_height,
             crate::common::constants::defaults::manager::WINDOW_HEIGHT
+        );
+        assert_eq!(
+            settings.backup_enabled,
+            crate::common::constants::config::backup::ENABLED
+        );
+        assert_eq!(
+            settings.backup_interval_days,
+            crate::common::constants::config::backup::INTERVAL_DAYS
+        );
+        assert_eq!(
+            settings.backup_retention_count,
+            crate::common::constants::config::backup::RETENTION_COUNT
         );
     }
 

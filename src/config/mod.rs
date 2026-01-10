@@ -4,6 +4,7 @@
 //! Supports multiple profiles, each with visual settings, hotkey bindings,
 //! and per-character thumbnail positions.
 
+pub mod backup;
 pub mod hotkey_binding;
 pub mod profile;
 pub mod runtime;

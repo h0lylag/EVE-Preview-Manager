@@ -102,6 +102,21 @@ pub mod config {
 
     /// Configuration filename
     pub const FILENAME: &str = "config.json";
+
+    /// Backup constants
+    pub mod backup {
+        /// Directory name for backups (relative to app config dir)
+        pub const SUBDIR: &str = "backups";
+
+        /// Default enabled state
+        pub const ENABLED: bool = true;
+
+        /// Default interval in days
+        pub const INTERVAL_DAYS: u32 = 1;
+
+        /// Default retention count
+        pub const RETENTION_COUNT: u32 = 10;
+    }
 }
 
 /// Manager-specific constants (egui manager window)
