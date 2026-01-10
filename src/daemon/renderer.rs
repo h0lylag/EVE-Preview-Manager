@@ -422,7 +422,7 @@ impl<'a> ThumbnailRenderer<'a> {
         src_dimensions: Dimensions,
     ) -> Result<()> {
         // Debug logging for capture issues
-        tracing::debug!(
+        tracing::trace!(
             character = character_name,
             src_window = self.src,
             width = src_dimensions.width,

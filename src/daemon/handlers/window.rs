@@ -57,7 +57,13 @@ pub fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) ->
     )
     .context(format!("Failed to identify window {}", event.window))?
     {
-        info!(window = event.window, character = %identity.name, is_custom = !identity.is_eve, "Detected relevant window");
+        info!(
+            window = event.window,
+            character = %identity.name,
+            is_custom = !identity.is_eve,
+            "Identified window for preview"
+        );
+        debug!(?identity, "Identity details");
 
         ctx.cycle_state
             .add_window(identity.name.clone(), event.window);
@@ -137,9 +143,9 @@ pub fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) ->
                 Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to create thumbnail for window {}: {}",
-                        event.window,
-                        e
+                        window = event.window,
+                        error = %e,
+                        "Failed to create thumbnail"
                     );
                 }
             }

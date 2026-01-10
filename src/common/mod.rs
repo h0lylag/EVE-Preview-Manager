@@ -4,5 +4,6 @@
 
 pub mod color;
 pub mod constants;
+pub mod debug;
 pub mod ipc;
 pub mod types;

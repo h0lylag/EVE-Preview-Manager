@@ -16,6 +16,7 @@ use super::{DaemonStatus, StatusMessage};
 // Core application state shared between Manager and Tray
 pub struct SharedState {
     pub config: Config,
+    pub debug_mode: bool,
     pub daemon: Option<Child>,
     pub daemon_status: DaemonStatus,
     pub last_health_check: Instant,
@@ -39,7 +40,7 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, debug_mode: bool) -> Self {
         let selected_profile_idx = config
             .profiles
             .iter()
@@ -48,6 +49,7 @@ impl SharedState {
 
         Self {
             config,
+            debug_mode,
             daemon: None,
             daemon_status: DaemonStatus::Stopped,
             last_health_check: Instant::now(),
@@ -199,7 +201,7 @@ mod tests {
     fn test_shared_state_initialization() {
         // Use default config
         let config = Config::default();
-        let state = SharedState::new(config.clone());
+        let state = SharedState::new(config.clone(), false);
 
         // Verify default health state
         assert!(!state.ipc_healthy);
@@ -221,7 +223,7 @@ mod tests {
         // Select the second profile
         config.global.selected_profile = "Second".to_string();
 
-        let state = SharedState::new(config);
+        let state = SharedState::new(config, false);
 
         // Should find index 1
         assert_eq!(state.selected_profile_idx, 1);
@@ -234,7 +236,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let config = Config::default();
-        let mut state = SharedState::new(config);
+        let mut state = SharedState::new(config, false);
 
         // Simulate a state where we haven't heard from daemon in a while
         state.ipc_healthy = false;

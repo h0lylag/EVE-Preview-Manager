@@ -85,14 +85,19 @@ pub fn load_window_icon() -> Result<egui::IconData> {
     })
 }
 
-pub fn spawn_daemon(ipc_server_name: &str) -> Result<Child> {
+pub fn spawn_daemon(ipc_server_name: &str, debug: bool) -> Result<Child> {
     let exe_path = std::env::current_exe().context("Failed to resolve executable path")?;
-    Command::new(exe_path)
+    let mut command = Command::new(exe_path);
+    command
         .arg("daemon")
         .arg("--ipc-server")
-        .arg(ipc_server_name)
-        .spawn()
-        .context("Failed to spawn daemon process")
+        .arg(ipc_server_name);
+
+    if debug {
+        command.arg("--debug");
+    }
+
+    command.spawn().context("Failed to spawn daemon process")
 }
 
 /// Parse hex color string - supports both #RRGGBB and #AARRGGBB formats.

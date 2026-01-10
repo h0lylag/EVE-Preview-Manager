@@ -38,11 +38,11 @@ struct ManagerApp {
 }
 
 impl ManagerApp {
-    fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
-        info!("Initializing Manager");
+    fn new(cc: &eframe::CreationContext<'_>, config: Config, debug_mode: bool) -> Self {
+        info!("Initializing Manager (debug_mode={})", debug_mode);
 
         // Initialize SharedState
-        let mut state = SharedState::new(config.clone());
+        let mut state = SharedState::new(config.clone(), debug_mode);
         if let Err(err) = state.start_daemon() {
             error!(error = ?err, "Failed to start preview daemon");
             state.status_message = Some(StatusMessage {
@@ -347,7 +347,7 @@ impl eframe::App for ManagerApp {
     }
 }
 
-pub fn run_manager() -> Result<()> {
+pub fn run_manager(debug_mode: bool) -> Result<()> {
     // Load config to get window dimensions
     let config = Config::load().unwrap_or_default();
     let window_width = config.global.window_width as f32;
@@ -357,7 +357,7 @@ pub fn run_manager() -> Result<()> {
     let icon = match load_window_icon() {
         Ok(icon_data) => {
             info!(
-                "Loaded window icon ({} bytes, {}x{})",
+                "Loaded application icon ({} bytes, {}x{})",
                 icon_data.rgba.len(),
                 icon_data.width,
                 icon_data.height
@@ -389,7 +389,7 @@ pub fn run_manager() -> Result<()> {
     eframe::run_native(
         &format!("EVE Preview Manager - v{}", env!("CARGO_PKG_VERSION")),
         options,
-        Box::new(|cc| Ok(Box::new(ManagerApp::new(cc, config)))),
+        Box::new(move |cc| Ok(Box::new(ManagerApp::new(cc, config, debug_mode)))),
     )
     .map_err(|err| anyhow!("Failed to launch Manager: {err}"))
 }

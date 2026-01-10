@@ -23,7 +23,7 @@ impl SharedState {
             IpcOneShotServer::<BootstrapMessage>::new().context("Failed to create IPC server")?;
 
         // 2. Spawn Daemon with server name
-        let child = spawn_daemon(&server_name)?;
+        let child = spawn_daemon(&server_name, self.debug_mode)?;
         let pid = child.id();
         info!(pid, server_name = %server_name, "Started daemon process");
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::common::types::CharacterSettings;
 
@@ -357,7 +357,7 @@ impl Config {
         let config: Config = serde_json::from_str(&contents)
             .with_context(|| format!("Failed to parse JSON from {:?}", config_path))?;
 
-        info!("Loaded config with {} profile(s)", config.profiles.len());
+        info!(path = ?config_path, profile_count = config.profiles.len(), "Loaded config");
         Ok(config)
     }
 
@@ -395,7 +395,7 @@ impl Config {
         fs::write(config_path, json_string)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
 
-        info!("Saved config to {:?}", config_path);
+        info!(path = ?config_path, "Saved config");
         Ok(())
     }
 }

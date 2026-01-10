@@ -211,7 +211,6 @@ impl<'a> Thumbnail<'a> {
         self.renderer.focus(&self.character_name, timestamp)
     }
 
-
     /// Update the cached source dimensions (e.g. on ConfigureNotify)
     pub fn update_source_dimensions(&mut self, width: u16, height: u16) {
         self.src_dimensions = Dimensions { width, height };
