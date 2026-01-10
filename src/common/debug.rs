@@ -59,10 +59,13 @@ pub fn log_system_info() {
         }
 
         if let (Some(total), Some(avail)) = (total_gb, available_gb) {
-            info!("Memory: {:.2} GB (Total), {:.2} GB (Available)", total, avail);
+            info!(
+                "Memory: {:.2} GB (Total), {:.2} GB (Available)",
+                total, avail
+            );
         } else {
-             // Fallback for unexpected formats
-             // info!("Memory information found but could not be parsed");
+            // Fallback for unexpected formats
+            // info!("Memory information found but could not be parsed");
         }
     }
 
@@ -71,7 +74,10 @@ pub fn log_system_info() {
         let mut drivers = Vec::new();
         for line in modules.lines() {
             let module_name = line.split_whitespace().next().unwrap_or("");
-            if matches!(module_name, "nvidia" | "amdgpu" | "i915" | "nouveau" | "radeon") {
+            if matches!(
+                module_name,
+                "nvidia" | "amdgpu" | "i915" | "nouveau" | "radeon"
+            ) {
                 drivers.push(module_name);
             }
         }
