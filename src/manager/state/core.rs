@@ -1,15 +1,74 @@
+use std::process::Child;
+use std::sync::mpsc::Receiver;
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use tracing::{error, info};
 
 use crate::common::constants::manager_ui::*;
-use crate::common::ipc::ConfigMessage;
+use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
 use crate::config::DaemonConfig;
 use crate::config::profile::Config;
+use ipc_channel::ipc::{IpcReceiver, IpcSender};
 
-use super::SharedState;
-use super::StatusMessage;
+use super::{DaemonStatus, StatusMessage};
+
+// Core application state shared between Manager and Tray
+pub struct SharedState {
+    pub config: Config,
+    pub daemon: Option<Child>,
+    pub daemon_status: DaemonStatus,
+    pub last_health_check: Instant,
+    pub status_message: Option<StatusMessage>,
+    pub config_status_message: Option<StatusMessage>,
+    pub settings_changed: bool,
+    pub selected_profile_idx: usize,
+    pub should_quit: bool,
+    pub last_save_attempt: Instant,
+
+    // IPC
+    pub ipc_config_tx: Option<IpcSender<ConfigMessage>>,
+    pub ipc_status_rx: Option<IpcReceiver<DaemonMessage>>,
+    pub bootstrap_rx: Option<Receiver<BootstrapMessage>>,
+    pub daemon_status_rx: Option<Receiver<DaemonMessage>>,
+
+    // IPC health monitoring
+    pub ipc_healthy: bool,
+    pub last_heartbeat: Instant,
+    pub missed_heartbeats: u32,
+}
 
 impl SharedState {
+    pub fn new(config: Config) -> Self {
+        let selected_profile_idx = config
+            .profiles
+            .iter()
+            .position(|p| p.profile_name == config.global.selected_profile)
+            .unwrap_or(0);
+
+        Self {
+            config,
+            daemon: None,
+            daemon_status: DaemonStatus::Stopped,
+            last_health_check: Instant::now(),
+            status_message: None,
+            config_status_message: None,
+            settings_changed: false,
+            selected_profile_idx,
+            should_quit: false,
+            last_save_attempt: Instant::now(),
+
+            ipc_config_tx: None,
+            ipc_status_rx: None,
+            bootstrap_rx: None,
+            daemon_status_rx: None,
+
+            ipc_healthy: false,
+            last_heartbeat: Instant::now(),
+            missed_heartbeats: 0,
+        }
+    }
+
     pub fn save_config(&mut self) -> Result<()> {
         // Write current state to disk - Manager maintains authoritative state via IPC synchronization
         self.config.save()?;
@@ -128,5 +187,82 @@ impl SharedState {
             color: STATUS_RUNNING,
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedState;
+    use crate::config::profile::{Config, Profile};
+
+    #[test]
+    fn test_shared_state_initialization() {
+        // Use default config
+        let config = Config::default();
+        let state = SharedState::new(config.clone());
+
+        // Verify default health state
+        assert!(!state.ipc_healthy);
+        assert_eq!(state.missed_heartbeats, 0);
+        assert_eq!(state.selected_profile_idx, 0);
+        assert!(state.daemon.is_none());
+        assert!(!state.settings_changed);
+    }
+
+    #[test]
+    fn test_shared_state_profile_selection() {
+        let mut config = Config::default();
+        // Add a second profile
+        config.profiles.push(Profile::default_with_name(
+            "Second".to_string(),
+            "Desc".to_string(),
+        ));
+
+        // Select the second profile
+        config.global.selected_profile = "Second".to_string();
+
+        let state = SharedState::new(config);
+
+        // Should find index 1
+        assert_eq!(state.selected_profile_idx, 1);
+    }
+
+    #[test]
+    fn test_heartbeat_processing() {
+        use crate::common::ipc::DaemonMessage;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let config = Config::default();
+        let mut state = SharedState::new(config);
+
+        // Simulate a state where we haven't heard from daemon in a while
+        state.ipc_healthy = false;
+        state.missed_heartbeats = 5;
+        state.last_heartbeat = Instant::now() - Duration::from_secs(20);
+
+        // Inject a channel to simulate daemon messages
+        let (tx, rx) = mpsc::channel();
+        state.daemon_status_rx = Some(rx);
+
+        // Send a heartbeat
+        tx.send(DaemonMessage::Heartbeat).unwrap();
+
+        // Process messages
+        state.poll_daemon();
+
+        // Verify state reset
+        assert!(
+            state.ipc_healthy,
+            "Heartbeat should set ipc_healthy to true"
+        );
+        assert_eq!(
+            state.missed_heartbeats, 0,
+            "Heartbeat should reset missed count"
+        );
+        assert!(
+            state.last_heartbeat.elapsed() < Duration::from_secs(1),
+            "Heartbeat should update timestamp"
+        );
     }
 }

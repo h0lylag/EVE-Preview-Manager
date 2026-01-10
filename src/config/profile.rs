@@ -63,8 +63,6 @@ pub enum HotkeyBackendType {
     Evdev,
 }
 
-
-
 /// Top-level configuration with profile support
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -319,6 +317,13 @@ impl Default for Profile {
 
 impl Config {
     pub fn path() -> PathBuf {
+        // Allow overriding config directory via env var (for testing isolation)
+        if let Ok(dir) = std::env::var("EVE_PREVIEW_MANAGER_CONFIG_DIR") {
+            let mut path = PathBuf::from(dir);
+            path.push(crate::common::constants::config::FILENAME);
+            return path;
+        }
+
         #[cfg(not(test))]
         let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
         #[cfg(test)]
@@ -331,19 +336,22 @@ impl Config {
 
     /// Load configuration from JSON file or create default
     pub fn load() -> Result<Self> {
-        let config_path = Self::path();
+        Self::load_from(&Self::path())
+    }
 
+    /// Load configuration from a specific path
+    pub fn load_from(config_path: &std::path::Path) -> Result<Self> {
         if !config_path.exists() {
             info!(
                 "Config file not found, creating default config at {:?}",
                 config_path
             );
             let config = Config::default();
-            config.save()?;
+            config.save_to(config_path)?;
             return Ok(config);
         }
 
-        let contents = fs::read_to_string(&config_path)
+        let contents = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
 
         let config: Config = serde_json::from_str(&contents)
@@ -370,24 +378,26 @@ impl Config {
     /// Writes the current in-memory state directly to config.json.
     /// The Manager maintains authoritative state via IPC synchronization.
     pub fn save(&self) -> Result<()> {
-        let config_path = Self::path();
+        self.save_to(&Self::path())
+    }
 
+    /// Save configuration to a specific path
+    pub fn save_to(&self, config_path: &std::path::Path) -> Result<()> {
         // Ensure config directory exists
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create config directory {:?}", parent))?;
         }
 
-        let json_string = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config to JSON")?;
+        let json_string =
+            serde_json::to_string_pretty(self).context("Failed to serialize config to JSON")?;
 
-        fs::write(&config_path, json_string)
+        fs::write(config_path, json_string)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
 
         info!("Saved config to {:?}", config_path);
         Ok(())
     }
-
 }
 
 impl Default for Config {
@@ -522,8 +532,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn test_profile_with_hotkeys() {
         let mut profile = Profile::default_with_name("Hotkey Test".to_string(), String::new());
@@ -608,5 +616,41 @@ mod tests {
         assert_eq!(group.characters, vec!["A", "B"]);
         assert!(group.hotkey_forward.is_some());
         assert!(group.hotkey_backward.is_some());
+    }
+
+    #[test]
+    fn test_filesystem_roundtrip() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config_path = temp_dir.path().join("config.json");
+
+        let mut config = Config::default();
+        config.global.selected_profile = "filesystem_test".to_string();
+
+        // Save to isolated path
+        config
+            .save_to(&config_path)
+            .expect("Failed to save config to temp path");
+        assert!(config_path.exists());
+
+        // Load from isolated path
+        let loaded = Config::load_from(&config_path).expect("Failed to load config from temp path");
+        assert_eq!(loaded.global.selected_profile, "filesystem_test");
+    }
+
+    #[test]
+    fn test_default_config_creation() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config_path = temp_dir.path().join("non_existent_config.json");
+
+        assert!(!config_path.exists());
+
+        // Should create default file
+        let loaded = Config::load_from(&config_path).expect("Failed to load/create default config");
+
+        assert!(config_path.exists());
+        assert_eq!(
+            loaded.global.selected_profile,
+            crate::common::constants::defaults::behavior::PROFILE_NAME
+        );
     }
 }
