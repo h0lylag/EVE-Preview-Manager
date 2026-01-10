@@ -391,3 +391,20 @@ pub fn handle_wm_name_change(ctx: &mut EventContext, window: Window) -> Result<(
     }
     Ok(())
 }
+
+/// Handle ConfigureNotify events - update cached source dimensions
+#[tracing::instrument(skip(ctx), fields(window = event.window))]
+pub fn handle_configure_notify(ctx: &mut EventContext, event: ConfigureNotifyEvent) -> Result<()> {
+    if let Some(thumbnail) = ctx.eve_clients.get_mut(&event.window) {
+        // Update cached source dimensions so the next capture uses the correct size
+        thumbnail.update_source_dimensions(event.width, event.height);
+
+        tracing::debug!(
+            window = event.window,
+            width = event.width,
+            height = event.height,
+            "Updated source dimensions from ConfigureNotify"
+        );
+    }
+    Ok(())
+}

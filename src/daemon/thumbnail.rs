@@ -44,6 +44,7 @@ pub struct Thumbnail<'a> {
 
     // === Geometry (public, immutable after creation) ===
     pub dimensions: Dimensions,
+    pub src_dimensions: Dimensions,
     pub current_position: Position, // Cached position for hit testing
 
     // === Backend ===
@@ -122,6 +123,16 @@ impl<'a> Thumbnail<'a> {
             dimensions,
         )?;
 
+        // Initialize source dimensions
+        let geom = ctx
+            .conn
+            .get_geometry(src)
+            .context("Failed to get initial source geometry")?
+            .reply()
+            .context("Failed to receive initial source geometry reply")?;
+
+        let src_dimensions = Dimensions::new(geom.width, geom.height);
+
         Ok(Self {
             character_name,
             state: ThumbnailState::default(),
@@ -130,6 +141,7 @@ impl<'a> Thumbnail<'a> {
             preview_mode,
             dimensions,
             current_position: Position::new(x, y),
+            src_dimensions,
             renderer,
         })
     }
@@ -199,6 +211,12 @@ impl<'a> Thumbnail<'a> {
         self.renderer.focus(&self.character_name, timestamp)
     }
 
+
+    /// Update the cached source dimensions (e.g. on ConfigureNotify)
+    pub fn update_source_dimensions(&mut self, width: u16, height: u16) {
+        self.src_dimensions = Dimensions { width, height };
+    }
+
     /// Moves the thumbnail to a new position updates the cached state.
     pub fn reposition(&mut self, x: i16, y: i16) -> Result<()> {
         self.renderer.reposition(&self.character_name, x, y)?;
@@ -261,6 +279,7 @@ impl<'a> Thumbnail<'a> {
                 display_config,
                 &self.character_name,
                 self.dimensions,
+                self.src_dimensions,
                 font_renderer,
             )?;
         }
@@ -283,13 +302,17 @@ impl<'a> Thumbnail<'a> {
                     display_config,
                     &self.character_name,
                     self.dimensions,
+                    self.src_dimensions,
                     font_renderer,
                 )?;
             }
             _ => match &self.preview_mode {
                 crate::common::types::PreviewMode::Live => {
-                    self.renderer
-                        .update(&self.character_name, self.dimensions)?;
+                    self.renderer.update(
+                        &self.character_name,
+                        self.dimensions,
+                        self.src_dimensions,
+                    )?;
                 }
                 crate::common::types::PreviewMode::Static { color } => {
                     // ... color parsing ...

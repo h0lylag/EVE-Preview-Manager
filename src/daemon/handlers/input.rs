@@ -225,7 +225,10 @@ pub fn handle_motion_notify(ctx: &mut EventContext, event: MotionNotifyEvent) ->
 
     let snap_threshold = ctx.daemon_config.profile.thumbnail_snap_threshold;
 
-    let thumbnail = ctx.eve_clients.get_mut(&dragging_window).unwrap();
+    let thumbnail = ctx
+        .eve_clients
+        .get_mut(&dragging_window)
+        .context("Dragging window not found in clients map")?;
     let snap_targets = thumbnail.input_state.snap_targets.clone();
 
     handle_drag_motion(

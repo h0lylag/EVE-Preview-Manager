@@ -415,44 +415,36 @@ impl<'a> ThumbnailRenderer<'a> {
     ///
     /// # Errors
     /// Returns an error if X11 composite operations fail.
-    pub fn capture(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
-        let geom = self
-            .conn
-            .get_geometry(self.src)
-            .context("Failed to send geometry query for source window")?
-            .reply()
-            .context(format!(
-                "Failed to get geometry for source window (character: '{}')",
-                character_name
-            ))?;
-
+    pub fn capture(
+        &self,
+        character_name: &str,
+        dimensions: Dimensions,
+        src_dimensions: Dimensions,
+    ) -> Result<()> {
         // Debug logging for capture issues
         tracing::debug!(
             character = character_name,
             src_window = self.src,
-            width = geom.width,
-            height = geom.height,
-            depth = geom.depth,
-            x = geom.x,
-            y = geom.y,
+            width = src_dimensions.width,
+            height = src_dimensions.height,
             "Capturing source window"
         );
 
         // Safety Check: Skip capture if window is effectively empty/unmapped to avoid X server crashes
         // A 1x1 window (like seen with Firefox initially) can crash X11 drivers when used in Render operations
-        if geom.width <= 1 || geom.height <= 1 {
+        if src_dimensions.width <= 1 || src_dimensions.height <= 1 {
             tracing::warn!(
                 character = character_name,
-                width = geom.width,
-                height = geom.height,
+                width = src_dimensions.width,
+                height = src_dimensions.height,
                 "Skipping capture of 1x1/empty window (likely not mapped yet)"
             );
             return Ok(());
         }
 
         let transform = Transform {
-            matrix11: to_fixed(geom.width as f32 / dimensions.width as f32),
-            matrix22: to_fixed(geom.height as f32 / dimensions.height as f32),
+            matrix11: to_fixed(src_dimensions.width as f32 / dimensions.width as f32),
+            matrix22: to_fixed(src_dimensions.height as f32 / dimensions.height as f32),
             matrix33: to_fixed(1.0),
             ..Default::default()
         };
@@ -539,14 +531,16 @@ impl<'a> ThumbnailRenderer<'a> {
         display_config: &DisplayConfig,
         character_name: &str,
         dimensions: Dimensions,
+        src_dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.overlay
             .draw_minimized(display_config, character_name, dimensions, font_renderer)?;
-        self.update(character_name, dimensions).context(format!(
-            "Failed to update minimized display for '{}'",
-            character_name
-        ))?;
+        self.update(character_name, dimensions, src_dimensions)
+            .context(format!(
+                "Failed to update minimized display for '{}'",
+                character_name
+            ))?;
         Ok(())
     }
 
@@ -607,11 +601,17 @@ impl<'a> ThumbnailRenderer<'a> {
     }
 
     /// Logic for full update cycle: capture source -> apply overlay.
-    pub fn update(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
-        self.capture(character_name, dimensions).context(format!(
-            "Failed to capture source window for '{}'",
-            character_name
-        ))?;
+    pub fn update(
+        &self,
+        character_name: &str,
+        dimensions: Dimensions,
+        src_dimensions: Dimensions,
+    ) -> Result<()> {
+        self.capture(character_name, dimensions, src_dimensions)
+            .context(format!(
+                "Failed to capture source window for '{}'",
+                character_name
+            ))?;
         self.overlay(character_name, dimensions)
             .context(format!("Failed to apply overlay for '{}'", character_name))?;
         Ok(())

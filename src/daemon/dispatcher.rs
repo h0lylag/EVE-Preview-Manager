@@ -4,7 +4,9 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
-use x11rb::protocol::Event::{self, CreateNotify, DamageNotify, DestroyNotify, PropertyNotify};
+use x11rb::protocol::Event::{
+    self, ConfigureNotify, CreateNotify, DamageNotify, DestroyNotify, PropertyNotify,
+};
 use x11rb::protocol::xproto::*;
 
 use super::cycle_state::CycleState;
@@ -35,6 +37,7 @@ pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
         DamageNotify(event) => handlers::window::handle_damage_notify(ctx, event),
         CreateNotify(event) => handlers::window::handle_create_notify(ctx, event),
         DestroyNotify(event) => handlers::window::handle_destroy_notify(ctx, event),
+        ConfigureNotify(event) => handlers::window::handle_configure_notify(ctx, event),
         Event::FocusIn(event) => handlers::state::handle_focus_in(ctx, event),
         Event::FocusOut(event) => handlers::state::handle_focus_out(ctx, event),
         Event::ButtonPress(event) => handlers::input::handle_button_press(ctx, event),
