@@ -207,7 +207,7 @@ pub fn ui(
 
             // Manual Backup
             ui.horizontal(|ui| {
-                if ui.button("Create Manual Backup").clicked() {
+                if ui.button("📤 Create Backup").clicked() {
                     match BackupManager::create_backup(true) {
                         Ok(_) => {
                             state.status_message = Some("Manual backup created successfully".to_string());
@@ -227,13 +227,9 @@ pub fn ui(
             ui.add_space(ITEM_SPACING);
 
             // Restore / Management
-            ui.label("Restore Configuration");
+            ui.label("Configuration Backups");
 
             ui.horizontal(|ui| {
-                if ui.button("🔄").on_hover_text("Refresh backup list").clicked() {
-                    state.refresh_backups();
-                }
-
                 egui::ComboBox::from_id_salt("backup_selector")
                     .selected_text(
                         state.selected_backup.as_ref()
@@ -247,6 +243,10 @@ pub fn ui(
                             ui.selectable_value(&mut state.selected_backup, Some(filename.clone()), display);
                         }
                     });
+
+                if ui.button("🔄").on_hover_text("Refresh backup list").clicked() {
+                    state.refresh_backups();
+                }
             });
 
             // Clone selected backup to avoid holding a borrow on state
@@ -275,13 +275,15 @@ pub fn ui(
                                 }
                                 if ui.button("Cancel").clicked() {
                                     state.show_restore_confirm = false;
+                                    state.status_message = None;
                                 }
                             });
-                             ui.label(egui::RichText::new("WARNING: Overwrite current config?").color(COLOR_WARNING));
                         });
-                    } else if ui.button("Restore Selected").clicked() {
+                    } else if ui.button("📥 Restore").clicked() {
                         state.show_restore_confirm = true;
                         state.show_delete_confirm = false;
+                        state.status_message = Some("WARNING: Overwrite current config?".to_string());
+                        state.status_type = Some(COLOR_WARNING);
                     }
 
                     if !state.show_restore_confirm {
@@ -307,13 +309,15 @@ pub fn ui(
                                     }
                                     if ui.button("Cancel").clicked() {
                                         state.show_delete_confirm = false;
+                                        state.status_message = None;
                                     }
                                 });
-                                ui.label(egui::RichText::new("WARNING: Delete file?").color(COLOR_WARNING));
                             });
-                        } else if ui.button("Delete Selected").clicked() {
+                        } else if ui.button("🗑 Delete").clicked() {
                             state.show_delete_confirm = true;
                             state.show_restore_confirm = false;
+                            state.status_message = Some("WARNING: Delete file?".to_string());
+                            state.status_type = Some(COLOR_WARNING);
                         }
                     }
                  });
