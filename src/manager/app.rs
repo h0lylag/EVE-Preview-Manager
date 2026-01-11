@@ -44,12 +44,12 @@ impl ManagerApp {
 
         // Run auto-backup if enabled
         if config.global.backup_enabled {
-            if BackupManager::should_run_auto_backup(config.global.backup_interval_days) {
+            if BackupManager::should_run_auto_backup(config.global.backup_interval_days, None) {
                 info!("Auto-backup triggered due to interval expiration");
-                match BackupManager::create_backup(false) {
+                match BackupManager::create_backup(false, None) {
                     Ok(_) => {
                         if let Err(e) =
-                            BackupManager::prune_backups(config.global.backup_retention_count)
+                            BackupManager::prune_backups(config.global.backup_retention_count, None)
                         {
                             error!("Failed to prune backups: {}", e);
                         }
@@ -59,7 +59,9 @@ impl ManagerApp {
             } else {
                 // Determine if we need to prune anyway (e.g. retention count changed)
                 // Just in case, run prune on startup to enforce policy
-                if let Err(e) = BackupManager::prune_backups(config.global.backup_retention_count) {
+                if let Err(e) =
+                    BackupManager::prune_backups(config.global.backup_retention_count, None)
+                {
                     error!("Failed to prune backups: {}", e);
                 }
             }

@@ -28,19 +28,26 @@ pub struct BackupManager;
 
 impl BackupManager {
     /// Get the path to the backup directory
-    fn backup_dir() -> PathBuf {
-        let mut path = Config::path();
+    fn backup_dir(config_path: Option<&std::path::Path>) -> PathBuf {
+        let mut path = config_path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(Config::path);
         path.pop(); // Remove filename
         path.push(crate::common::constants::config::backup::SUBDIR);
         path
     }
 
     /// Create a new backup of the configuration directory
-    pub fn create_backup(is_manual: bool) -> Result<PathBuf> {
-        let config_file_path = Config::path();
+    pub fn create_backup(
+        is_manual: bool,
+        config_path_override: Option<&std::path::Path>,
+    ) -> Result<PathBuf> {
+        let config_file_path = config_path_override
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(Config::path);
 
         // Ensure backup directory exists
-        let backup_dir = Self::backup_dir();
+        let backup_dir = Self::backup_dir(config_path_override);
         if !backup_dir.exists() {
             fs::create_dir_all(&backup_dir).context("Failed to create backup directory")?;
         }
@@ -89,8 +96,10 @@ impl BackupManager {
     }
 
     /// List all available backups, sorted by date (newest first)
-    pub fn list_backups() -> Result<Vec<BackupEntry>> {
-        let backup_dir = Self::backup_dir();
+    pub fn list_backups(
+        config_path_override: Option<&std::path::Path>,
+    ) -> Result<Vec<BackupEntry>> {
+        let backup_dir = Self::backup_dir(config_path_override);
         if !backup_dir.exists() {
             return Ok(Vec::new());
         }
@@ -123,8 +132,11 @@ impl BackupManager {
     }
 
     /// Restore configuration from a specific backup
-    pub fn restore_backup(filename: &str) -> Result<()> {
-        let backup_path = Self::backup_dir().join(filename);
+    pub fn restore_backup(
+        filename: &str,
+        config_path_override: Option<&std::path::Path>,
+    ) -> Result<()> {
+        let backup_path = Self::backup_dir(config_path_override).join(filename);
         if !backup_path.exists() {
             return Err(anyhow::anyhow!("Backup file not found: {}", filename));
         }
@@ -133,7 +145,11 @@ impl BackupManager {
         let dec = GzDecoder::new(tar_gz);
         let mut archive = tar::Archive::new(dec);
 
-        let config_dir = Config::path()
+        // Determine destination directory
+        let config_file_path = config_path_override
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(Config::path);
+        let config_dir = config_file_path
             .parent()
             .context("Failed to get config directory")?
             .to_path_buf();
@@ -148,8 +164,11 @@ impl BackupManager {
     }
 
     /// Delete a specific backup file
-    pub fn delete_backup(filename: &str) -> Result<()> {
-        let backup_path = Self::backup_dir().join(filename);
+    pub fn delete_backup(
+        filename: &str,
+        config_path_override: Option<&std::path::Path>,
+    ) -> Result<()> {
+        let backup_path = Self::backup_dir(config_path_override).join(filename);
         if backup_path.exists() {
             fs::remove_file(&backup_path)
                 .context(format!("Failed to delete backup file: {}", filename))?;
@@ -160,8 +179,11 @@ impl BackupManager {
 
     /// Prune old backups based on retention count
     /// Only affects auto-backups (not manual ones)
-    pub fn prune_backups(retention_count: u32) -> Result<()> {
-        let backups = Self::list_backups()?;
+    pub fn prune_backups(
+        retention_count: u32,
+        config_path_override: Option<&std::path::Path>,
+    ) -> Result<()> {
+        let backups = Self::list_backups(config_path_override)?;
 
         // Filter for only auto backups
         let auto_backups: Vec<&BackupEntry> = backups.iter().filter(|b| !b.is_manual).collect();
@@ -180,12 +202,15 @@ impl BackupManager {
     }
 
     /// Check if an automatic backup should run
-    pub fn should_run_auto_backup(interval_days: u32) -> bool {
+    pub fn should_run_auto_backup(
+        interval_days: u32,
+        config_path_override: Option<&std::path::Path>,
+    ) -> bool {
         if interval_days == 0 {
             return false;
         }
 
-        let backups = match Self::list_backups() {
+        let backups = match Self::list_backups(config_path_override) {
             Ok(b) => b,
             Err(_) => return true, // If we can't list, assume we need one? Or fail safe.
         };
@@ -226,13 +251,8 @@ mod tests {
         let mut file = fs::File::create(&config_path).unwrap();
         file.write_all(b"{\"test\": true}").unwrap();
 
-        // Mock Config path by setting env var (Config::path() checks this)
-        unsafe {
-            std::env::set_var("EVE_PREVIEW_MANAGER_CONFIG_DIR", app_dir.to_str().unwrap());
-        }
-
         // 1. Test Creation
-        let backup_path = BackupManager::create_backup(false).unwrap();
+        let backup_path = BackupManager::create_backup(false, Some(&config_path)).unwrap();
         assert!(backup_path.exists());
         assert!(backup_path.to_string_lossy().contains("auto_backup_"));
         assert!(!backup_path.to_string_lossy().contains("manual"));
@@ -241,11 +261,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
 
         // Manual backup
-        let manual_backup = BackupManager::create_backup(true).unwrap();
+        let manual_backup = BackupManager::create_backup(true, Some(&config_path)).unwrap();
         assert!(manual_backup.to_string_lossy().contains("manual_backup_"));
 
         // 2. Test Listing
-        let list = BackupManager::list_backups().unwrap();
+        let list = BackupManager::list_backups(Some(&config_path)).unwrap();
         assert_eq!(list.len(), 2);
         assert!(list[0].timestamp >= list[1].timestamp); // Sorted newest first
 
@@ -259,7 +279,7 @@ mod tests {
         // Delete the modified file to ensure restore recreates it
         fs::remove_file(&config_path).unwrap();
 
-        BackupManager::restore_backup(&list[0].filename).unwrap();
+        BackupManager::restore_backup(&list[0].filename, Some(&config_path)).unwrap();
         let content = fs::read_to_string(&config_path).unwrap();
         assert_eq!(content, "{\"test\": true}");
 
@@ -269,19 +289,19 @@ mod tests {
         // To ensure they are treated as "old", we can just rely on the count since we just made them.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         for _ in 0..5 {
-            BackupManager::create_backup(false).unwrap();
+            BackupManager::create_backup(false, Some(&config_path)).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(1100));
         }
-        let list_before = BackupManager::list_backups().unwrap();
+        let list_before = BackupManager::list_backups(Some(&config_path)).unwrap();
         // Total: 2 initial (1 manual, 1 auto) + 5 new auto = 7 total. 6 auto.
 
         let auto_count = list_before.iter().filter(|b| !b.is_manual).count();
         assert_eq!(auto_count, 6);
 
         // Retention 3
-        BackupManager::prune_backups(3).unwrap();
+        BackupManager::prune_backups(3, Some(&config_path)).unwrap();
 
-        let list_after = BackupManager::list_backups().unwrap();
+        let list_after = BackupManager::list_backups(Some(&config_path)).unwrap();
         let auto_after = list_after.iter().filter(|b| !b.is_manual).count();
         assert_eq!(auto_after, 3);
 
@@ -290,13 +310,9 @@ mod tests {
 
         // 5. Test Deletion
         let target = &list_after[0].filename;
-        BackupManager::delete_backup(target).unwrap();
-        let list_final = BackupManager::list_backups().unwrap();
+        BackupManager::delete_backup(target, Some(&config_path)).unwrap();
+        let list_final = BackupManager::list_backups(Some(&config_path)).unwrap();
         assert!(!list_final.iter().any(|b| b.filename == *target));
-
-        unsafe {
-            std::env::remove_var("EVE_PREVIEW_MANAGER_CONFIG_DIR");
-        }
     }
 
     #[test]
@@ -309,26 +325,22 @@ mod tests {
         let mut file = fs::File::create(&config_path).unwrap();
         file.write_all(b"{}").unwrap();
 
-        unsafe {
-            std::env::set_var("EVE_PREVIEW_MANAGER_CONFIG_DIR", app_dir.to_str().unwrap());
-        }
-
         // 1. Create a Manual Backup (Oldest)
-        let manual = BackupManager::create_backup(true).unwrap();
+        let manual = BackupManager::create_backup(true, Some(&config_path)).unwrap();
         // Sleep to ensure timestamp diff
         std::thread::sleep(std::time::Duration::from_millis(1100));
 
         // 2. Create 5 Auto Backups (Newer)
         for _ in 0..5 {
-            BackupManager::create_backup(false).unwrap();
+            BackupManager::create_backup(false, Some(&config_path)).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(1100));
         }
 
         // 3. Prune with retention 2
         // Should keep 2 newest autos, plus the manual one. Total 3.
-        BackupManager::prune_backups(2).unwrap();
+        BackupManager::prune_backups(2, Some(&config_path)).unwrap();
 
-        let list = BackupManager::list_backups().unwrap();
+        let list = BackupManager::list_backups(Some(&config_path)).unwrap();
 
         // Check counts
         let auto_count = list.iter().filter(|b| !b.is_manual).count();
@@ -343,9 +355,5 @@ mod tests {
             list.iter().any(|b| b.filename == manual_filename),
             "Original manual backup should be preserved"
         );
-
-        unsafe {
-            std::env::remove_var("EVE_PREVIEW_MANAGER_CONFIG_DIR");
-        }
     }
 }

@@ -37,7 +37,7 @@ impl BehaviorSettingsState {
     }
 
     pub fn refresh_backups(&mut self) {
-        match BackupManager::list_backups() {
+        match BackupManager::list_backups(None) {
             Ok(backups) => {
                 self.backup_list = backups
                     .into_iter()
@@ -208,7 +208,7 @@ pub fn ui(
             // Manual Backup
             ui.horizontal(|ui| {
                 if ui.button("📤 Create Backup").clicked() {
-                    match BackupManager::create_backup(true) {
+                    match BackupManager::create_backup(true, None) {
                         Ok(_) => {
                             state.status_message = Some("Manual backup created successfully".to_string());
                             state.status_type = Some(COLOR_SUCCESS);
@@ -259,7 +259,7 @@ pub fn ui(
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 if ui.button(egui::RichText::new("YES, RESTORE").color(COLOR_ERROR)).clicked() {
-                                    match BackupManager::restore_backup(&selected) {
+                                    match BackupManager::restore_backup(&selected, None) {
                                         Ok(_) => {
                                             state.status_message = Some("Restored successfully. Configuration reloaded.".to_string());
                                             state.status_type = Some(COLOR_SUCCESS);
@@ -294,7 +294,7 @@ pub fn ui(
                             ui.vertical(|ui| {
                                  ui.horizontal(|ui| {
                                     if ui.button(egui::RichText::new("YES, DELETE").color(COLOR_ERROR)).clicked() {
-                                        match BackupManager::delete_backup(&selected) {
+                                        match BackupManager::delete_backup(&selected, None) {
                                             Ok(_) => {
                                                 state.status_message = Some("Backup deleted.".to_string());
                                                 state.status_type = Some(COLOR_SUCCESS);
