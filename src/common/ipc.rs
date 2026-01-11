@@ -19,7 +19,10 @@ pub enum DaemonMessage {
         message: String,
     },
     /// New character window detected
-    CharacterDetected { name: String, is_custom: bool },
+    CharacterDetected {
+        name: String,
+        is_custom: bool,
+    },
     /// Character thumbnail position changed (dragged)
     PositionChanged {
         name: String,
@@ -31,6 +34,8 @@ pub enum DaemonMessage {
     },
     /// Daemon encountered an error
     Error(String),
+    /// Generic status update for the Manager UI
+    Status(String),
     RequestProfileSwitch(String),
     /// Periodic heartbeat (optional)
     Heartbeat,

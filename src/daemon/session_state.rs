@@ -86,10 +86,10 @@ impl SessionState {
     /// Only tracks non-empty character names (ignores logged-out state)
     pub fn update_last_character(&mut self, window: Window, character_name: &str) {
         if !character_name.is_empty() {
-            if let Some(existing) = self.window_last_character.get(&window) {
-                if existing == character_name {
-                    return;
-                }
+            if let Some(existing) = self.window_last_character.get(&window)
+                && existing == character_name
+            {
+                return;
             }
             self.window_last_character
                 .insert(window, character_name.to_string());

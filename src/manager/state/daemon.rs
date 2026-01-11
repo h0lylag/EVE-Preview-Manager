@@ -141,6 +141,13 @@ impl SharedState {
                     DaemonMessage::Error(e) => {
                         error!("Daemon Error: {}", e);
                     }
+                    DaemonMessage::Status(msg) => {
+                        info!("Daemon Status: {}", msg);
+                        self.status_message = Some(crate::manager::state::StatusMessage {
+                            text: msg,
+                            color: crate::common::constants::manager_ui::STATUS_RUNNING,
+                        });
+                    }
                     DaemonMessage::PositionChanged {
                         name,
                         x,

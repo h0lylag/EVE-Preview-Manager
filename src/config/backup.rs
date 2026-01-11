@@ -237,6 +237,9 @@ mod tests {
         assert!(backup_path.to_string_lossy().contains("auto_backup_"));
         assert!(!backup_path.to_string_lossy().contains("manual"));
 
+        // Sleep to ensure unique timestamp
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
         // Manual backup
         let manual_backup = BackupManager::create_backup(true).unwrap();
         assert!(manual_backup.to_string_lossy().contains("manual_backup_"));
@@ -252,6 +255,9 @@ mod tests {
             let mut f = fs::File::create(&config_path).unwrap();
             f.write_all(b"{\"modified\": true}").unwrap();
         }
+
+        // Delete the modified file to ensure restore recreates it
+        fs::remove_file(&config_path).unwrap();
 
         BackupManager::restore_backup(&list[0].filename).unwrap();
         let content = fs::read_to_string(&config_path).unwrap();
@@ -287,6 +293,56 @@ mod tests {
         BackupManager::delete_backup(target).unwrap();
         let list_final = BackupManager::list_backups().unwrap();
         assert!(!list_final.iter().any(|b| b.filename == *target));
+
+        unsafe {
+            std::env::remove_var("EVE_PREVIEW_MANAGER_CONFIG_DIR");
+        }
+    }
+
+    #[test]
+    fn test_pruning_priority() {
+        // Setup temp environment
+        let temp_dir = tempfile::tempdir().unwrap();
+        let app_dir = temp_dir.path().join("eve-preview-manager");
+        fs::create_dir_all(&app_dir).unwrap();
+        let config_path = app_dir.join("config.json");
+        let mut file = fs::File::create(&config_path).unwrap();
+        file.write_all(b"{}").unwrap();
+
+        unsafe {
+            std::env::set_var("EVE_PREVIEW_MANAGER_CONFIG_DIR", app_dir.to_str().unwrap());
+        }
+
+        // 1. Create a Manual Backup (Oldest)
+        let manual = BackupManager::create_backup(true).unwrap();
+        // Sleep to ensure timestamp diff
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // 2. Create 5 Auto Backups (Newer)
+        for _ in 0..5 {
+            BackupManager::create_backup(false).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+
+        // 3. Prune with retention 2
+        // Should keep 2 newest autos, plus the manual one. Total 3.
+        BackupManager::prune_backups(2).unwrap();
+
+        let list = BackupManager::list_backups().unwrap();
+
+        // Check counts
+        let auto_count = list.iter().filter(|b| !b.is_manual).count();
+        let manual_count = list.iter().filter(|b| b.is_manual).count();
+
+        assert_eq!(auto_count, 2, "Should have 2 auto backups");
+        assert_eq!(manual_count, 1, "Should preserve manual backup");
+
+        // Verify the manual backup is the one we created
+        let manual_filename = manual.file_name().unwrap().to_str().unwrap();
+        assert!(
+            list.iter().any(|b| b.filename == manual_filename),
+            "Original manual backup should be preserved"
+        );
 
         unsafe {
             std::env::remove_var("EVE_PREVIEW_MANAGER_CONFIG_DIR");

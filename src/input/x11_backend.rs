@@ -439,8 +439,6 @@ fn ungrab_hotkey(
     Ok(())
 }
 
-
-
 /// Register a global hotkey with X11
 fn register_hotkey(
     conn: &RustConnection,

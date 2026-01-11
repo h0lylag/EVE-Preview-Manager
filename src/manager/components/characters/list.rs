@@ -238,8 +238,11 @@ pub fn render_cycle_group_column(
                             let drag_source = ui.dnd_drag_source(item_id, row_idx, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("::").weak());
-                                    
-                                    let is_custom = profile.custom_windows.iter().any(|r| r.alias == *character);
+
+                                    let is_custom = profile
+                                        .custom_windows
+                                        .iter()
+                                        .any(|r| r.alias == *character);
                                     if is_custom {
                                         ui.label(format!("[Source] {}", character));
                                     } else {

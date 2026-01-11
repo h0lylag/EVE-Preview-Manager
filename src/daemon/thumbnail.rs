@@ -4,7 +4,7 @@
 //! High-level logic that delegates rendering to `renderer::ThumbnailRenderer`.
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::debug;
 use x11rb::protocol::damage::Damage;
 use x11rb::protocol::xproto::{ConnectionExt, Window};
 

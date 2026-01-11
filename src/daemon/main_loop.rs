@@ -397,11 +397,7 @@ async fn run_event_loop(
              // 2. Handle SIGUSR1 (Log status instead of save)
             _ = sigusr1.recv() => {
                 info!("SIGUSR1 received - config is now managed by Manager via IPC");
-                // TODO: Maybe send a status update to Manager?
-                let _ = status_tx.send(DaemonMessage::Log {
-                    level: "INFO".to_string(),
-                    message: "SIGUSR1 received".to_string()
-                });
+                let _ = status_tx.send(DaemonMessage::Status("SIGUSR1 received: Syncing config...".to_string()));
             }
 
             // 2. Handle IPC Config Updates

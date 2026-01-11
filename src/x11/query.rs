@@ -214,8 +214,6 @@ pub fn get_active_window(
     }
 }
 
-
-
 /// Check if a window is a "normal" top-level application window
 /// (Filters out docks, popups, desktop, etc. based on _NET_WM_WINDOW_TYPE)
 pub fn is_normal_window(

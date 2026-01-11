@@ -255,8 +255,8 @@ impl SourcesTab {
                                         ui.horizontal(|ui| {
                                             ui.label("Height:");
                                             let is_custom = selected_mode == "Custom";
-                                            // TODO: Use add_enabled when it supports Slider properly or just wrap
-                                            if is_custom {
+
+                                            ui.add_enabled_ui(is_custom, |ui| {
                                                 if ui
                                                     .add(
                                                         egui::Slider::new(
@@ -269,16 +269,7 @@ impl SourcesTab {
                                                 {
                                                     changed = true;
                                                 }
-                                            } else {
-                                                ui.add_enabled(
-                                                    false,
-                                                    egui::Slider::new(
-                                                        &mut rule.default_height,
-                                                        100..=1200,
-                                                    )
-                                                    .suffix(" px"),
-                                                );
-                                            }
+                                            });
                                         });
 
                                         ui.weak(format!(

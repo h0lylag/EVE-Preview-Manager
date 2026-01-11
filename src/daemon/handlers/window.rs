@@ -114,14 +114,15 @@ pub fn process_detected_window(
                             });
 
                             // Force initial update for custom sources as they might not emit Damage events immediately
-                            if !identity.is_eve {
-                                if let Err(e) = thumbnail.update(ctx.display_config, ctx.font_renderer) {
-                                    tracing::warn!(
-                                        "Failed to perform initial update for custom source {}: {}",
-                                        thumbnail.character_name,
-                                        e
-                                    );
-                                }
+                            if !identity.is_eve
+                                && let Err(e) =
+                                    thumbnail.update(ctx.display_config, ctx.font_renderer)
+                            {
+                                tracing::warn!(
+                                    "Failed to perform initial update for custom source {}: {}",
+                                    thumbnail.character_name,
+                                    e
+                                );
                             }
                         }
                     }
@@ -236,7 +237,7 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
 /// Handle PropertyNotify for identity changes (WM_NAME or WM_CLASS) to detect late-identifying windows
 pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<()> {
     use crate::common::ipc::DaemonMessage;
-    use crate::daemon::window_detection::{check_and_create_window, identify_window};
+    use crate::daemon::window_detection::identify_window;
     use crate::x11::is_window_eve;
 
     // Check if the window is already tracked
@@ -250,7 +251,10 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
         {
             // It IS an EVE window.
             // Re-borrow thumbnail mutably
-            let thumbnail = ctx.eve_clients.get_mut(&window).expect("Checked contains_key");
+            let thumbnail = ctx
+                .eve_clients
+                .get_mut(&window)
+                .expect("Checked contains_key");
             let old_name = thumbnail.character_name.clone();
             let new_character_name = eve_window.character_name();
 

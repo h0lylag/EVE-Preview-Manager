@@ -1,7 +1,7 @@
 //! EVE window detection and thumbnail creation logic
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::debug;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
@@ -173,6 +173,7 @@ fn check_eve_window_internal(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn check_and_create_window<'a>(
     ctx: &AppContext<'a>,
     daemon_config: &DaemonConfig,
