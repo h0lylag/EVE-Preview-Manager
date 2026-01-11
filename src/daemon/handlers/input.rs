@@ -156,18 +156,34 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
                     thumbnail.dimensions.width,
                     thumbnail.dimensions.height,
                 );
-                ctx.daemon_config
-                    .character_thumbnails
-                    .insert(thumbnail.character_name.clone(), settings);
-            }
 
-            let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                name: thumbnail.character_name.clone(),
-                x: geom.x,
-                y: geom.y,
-                width: thumbnail.dimensions.width,
-                height: thumbnail.dimensions.height,
-            });
+                // Check if this is a Custom Source
+                let is_custom_source = ctx
+                    .daemon_config
+                    .profile
+                    .custom_windows
+                    .iter()
+                    .any(|rule| rule.alias == thumbnail.character_name);
+
+                if is_custom_source {
+                    ctx.daemon_config
+                        .custom_source_thumbnails
+                        .insert(thumbnail.character_name.clone(), settings);
+                } else {
+                    ctx.daemon_config
+                        .character_thumbnails
+                        .insert(thumbnail.character_name.clone(), settings);
+                }
+
+                let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
+                    name: thumbnail.character_name.clone(),
+                    x: geom.x,
+                    y: geom.y,
+                    width: thumbnail.dimensions.width,
+                    height: thumbnail.dimensions.height,
+                    is_custom: is_custom_source,
+                });
+            }
 
             debug!(
                 window = thumbnail.window(),

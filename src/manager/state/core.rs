@@ -80,7 +80,7 @@ impl SharedState {
                 .unwrap_or_default();
 
             let mut character_thumbnails = selected_profile.character_thumbnails.clone();
-            let mut custom_source_thumbnails = std::collections::HashMap::new();
+            let mut custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
 
             // Filter based on custom rules in profile.
             let rules = &selected_profile.custom_windows;

@@ -112,6 +112,7 @@ pub fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) ->
                                     y: settings.y,
                                     width: settings.dimensions.width,
                                     height: settings.dimensions.height,
+                                    is_custom: !identity.is_eve,
                                 });
                                 let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected(
                                     thumbnail.character_name.clone(),
@@ -282,6 +283,7 @@ pub fn handle_wm_name_change(ctx: &mut EventContext, window: Window) -> Result<(
                     y: settings.y,
                     width: settings.dimensions.width,
                     height: settings.dimensions.height,
+                    is_custom: false, // EVE chars are never custom sources
                 });
 
                 Some(settings)
@@ -374,6 +376,7 @@ pub fn handle_wm_name_change(ctx: &mut EventContext, window: Window) -> Result<(
                         y: settings.y,
                         width: settings.dimensions.width,
                         height: settings.dimensions.height,
+                        is_custom: !identity.is_eve,
                     });
                     let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected(
                         thumbnail.character_name.clone(),

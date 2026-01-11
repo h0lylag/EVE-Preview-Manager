@@ -27,6 +27,7 @@ pub enum DaemonMessage {
         y: i16,
         width: u16,
         height: u16,
+        is_custom: bool,
     },
     /// Daemon encountered an error
     Error(String),

@@ -147,11 +147,16 @@ impl SharedState {
                         y,
                         width,
                         height,
+                        is_custom,
                     } => {
                         if let Some(profile) = self.config.get_active_profile_mut() {
-                            profile
-                                .character_thumbnails
-                                .entry(name.clone())
+                            let map = if is_custom {
+                                &mut profile.custom_source_thumbnails
+                            } else {
+                                &mut profile.character_thumbnails
+                            };
+
+                            map.entry(name.clone())
                                 .and_modify(|s| {
                                     s.x = x;
                                     s.y = y;
