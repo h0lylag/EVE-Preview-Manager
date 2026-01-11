@@ -65,13 +65,18 @@ pub fn render_add_characters_modal(
                             let current_group =
                                 &profile.cycle_groups[state.selected_cycle_group_index];
                             let already_in_cycle = current_group.characters.contains(&name);
-                            let label = if already_in_cycle {
+                            let is_custom_source =
+                                profile.custom_windows.iter().any(|r| r.alias == name);
+
+                            let label_text = if already_in_cycle {
                                 format!("{} (already in this group)", name)
+                            } else if is_custom_source {
+                                format!("{} [Source]", name)
                             } else {
                                 name.clone()
                             };
 
-                            ui.checkbox(selected, label);
+                            ui.checkbox(selected, label_text);
                         }
                     }
                 });

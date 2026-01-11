@@ -23,8 +23,12 @@ use super::font;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
 
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use x11rb::rust_connection::RustConnection;
+
+use crate::input::backend::AllowedWindows;
 
 struct HotkeyResources {
     #[allow(dead_code)]
@@ -113,7 +117,7 @@ fn initialize_state(
     Ok((daemon_config, config, session_state, cycle_state))
 }
 
-fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
+fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) -> HotkeyResources {
     // Create channel for hotkey thread → main loop
     let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
 
@@ -206,6 +210,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                     hotkey_config,
                     daemon_config.profile.hotkey_input_device.clone(),
                     daemon_config.profile.hotkey_require_eve_focus,
+                    allowed_windows.clone(),
                 ) {
                     Ok(handle) => {
                         info!(
@@ -237,6 +242,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig) -> HotkeyResources {
                         hotkey_config,
                         daemon_config.profile.hotkey_input_device.clone(),
                         daemon_config.profile.hotkey_require_eve_focus,
+                        allowed_windows.clone(),
                     ) {
                         Ok(handle) => {
                             info!(
@@ -286,6 +292,7 @@ async fn run_event_loop(
     mut sigusr1: tokio::signal::unix::Signal,
     config_rx: IpcReceiver<ConfigMessage>,
     status_tx: IpcSender<DaemonMessage>,
+    allowed_windows: AllowedWindows,
 ) -> Result<()> {
     info!("Daemon running (async)");
 
@@ -355,6 +362,26 @@ async fn run_event_loop(
 
             // Flush any pending requests to X server
             let _ = ctx.conn.flush();
+        }
+
+        // Sync allowed windows with backend
+        {
+            let current_windows: HashSet<u32> = resources.eve_clients.keys().cloned().collect();
+            let need_update = {
+                if let Ok(guard) = allowed_windows.read() {
+                    *guard != current_windows
+                } else {
+                    true
+                }
+            };
+
+            #[allow(clippy::collapsible_if)]
+            if need_update {
+                if let Ok(mut guard) = allowed_windows.write() {
+                    *guard = current_windows;
+                    debug!("Allowed windows set updated");
+                }
+            }
         }
 
         tokio::select! {
@@ -433,11 +460,24 @@ async fn run_event_loop(
                     formats,
                 };
 
-                 // Check if we should only allow hotkeys when EVE window is focused
+                // Check if we should only allow hotkeys when EVE window is focused
+                // UPDATED: Now check if ANY tracked window (EVE or Custom Source) is focused
                 let should_process = if resources.config.profile.hotkey_require_eve_focus {
-                    crate::x11::is_eve_window_focused(ctx.conn, ctx.screen, ctx.atoms)
-                        .inspect_err(|e| error!(error = %e, "Failed to check focused window"))
-                        .unwrap_or(false)
+                    match crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms) {
+                        Ok(Some(active_window)) => {
+                             // Check if this window is one of our tracked clients
+                             let is_tracked = resources.eve_clients.contains_key(&active_window);
+                             if !is_tracked {
+                                 debug!(active_window = active_window, "Hotkey ignored: Focused window is not a tracked client");
+                             }
+                             is_tracked
+                        }
+                        Ok(None) => false,
+                        Err(e) => {
+                             error!(error = %e, "Failed to check focused window");
+                             false
+                        }
+                    }
                 } else {
                     true
                 };
@@ -563,7 +603,8 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     info!("Registered SIGUSR1 handler for manual position save");
 
     // 4. Setup Hotkeys
-    let hotkeys = setup_hotkeys(&daemon_config);
+    let allowed_windows = Arc::new(RwLock::new(HashSet::new()));
+    let hotkeys = setup_hotkeys(&daemon_config, allowed_windows.clone());
 
     // 5. Initialize Font Renderer
     // This depends on config so it runs after config load
@@ -663,6 +704,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         sigusr1,
         config_rx,
         status_tx,
+        allowed_windows,
     )
     .await
 }

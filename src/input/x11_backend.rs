@@ -22,7 +22,9 @@ use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
 use crate::config::HotkeyBinding;
-use crate::input::backend::{BackendCapabilities, HotkeyBackend, HotkeyConfiguration};
+use crate::input::backend::{
+    AllowedWindows, BackendCapabilities, HotkeyBackend, HotkeyConfiguration,
+};
 use crate::input::listener::{CycleCommand, TimestampedCommand};
 
 pub struct X11Backend;
@@ -33,6 +35,7 @@ impl HotkeyBackend for X11Backend {
         config: HotkeyConfiguration,
         _device_id: Option<String>, // Not used by X11 backend
         require_eve_focus: bool,
+        allowed_windows: AllowedWindows,
     ) -> Result<Vec<JoinHandle<()>>> {
         // Check if we have any hotkeys to register
         let has_cycle = !config.cycle_hotkeys.is_empty();
@@ -55,7 +58,7 @@ impl HotkeyBackend for X11Backend {
         );
 
         let handle = thread::spawn(move || {
-            if let Err(e) = run_x11_listener(sender, config, require_eve_focus) {
+            if let Err(e) = run_x11_listener(sender, config, require_eve_focus, allowed_windows) {
                 error!(error = %e, "X11 hotkey listener error");
             }
         });
@@ -88,6 +91,7 @@ fn run_x11_listener(
     sender: Sender<TimestampedCommand>,
     config: HotkeyConfiguration,
     require_eve_focus: bool,
+    allowed_windows: AllowedWindows,
 ) -> Result<()> {
     // Connect to X11
     let (conn, screen_num) =
@@ -242,21 +246,69 @@ fn run_x11_listener(
                         }
 
                         // Hotkeys are grabbed, process normally
-                        // Check if we need EVE focus
+                        // Check if we need EVE focus OR Custom Source focus
                         if require_eve_focus {
                             let focus_cookie = conn.get_input_focus()?;
-                            let focused_window = focus_cookie.reply()?.focus;
-                            let title =
-                                get_window_title_sync(&conn, focused_window).unwrap_or_default();
-                            let is_eve = title
-                                .starts_with(crate::common::constants::eve::WINDOW_TITLE_PREFIX)
-                                || title == crate::common::constants::eve::LOGGED_OUT_TITLE;
+                            match focus_cookie.reply() {
+                                Ok(focus_reply) => {
+                                    let mut current = focus_reply.focus;
+                                    let mut is_allowed = false;
 
-                            if !is_eve {
-                                debug!(title = %title, "EVE focus required but not focused, replaying");
-                                conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
-                                conn.flush()?;
-                                continue;
+                                    // Scope the lock to release it before potentially long X11 ops (though we do X11 ops inside logic)
+                                    // Actually we need to hold the lock while checking, or copy the set.
+                                    // Copying a hashset of u32s is cheap.
+                                    let allowed_set = {
+                                        if let Ok(guard) = allowed_windows.read() {
+                                            guard.clone()
+                                        } else {
+                                            // Lock poisoned?
+                                            std::collections::HashSet::new()
+                                        }
+                                    };
+
+                                    // Walk up the tree up to 5 levels to find if any ancestor is allowed
+                                    // (e.g. FocusProxy -> ... -> RuneLite -> Root)
+                                    // 5 levels is arbitrary but should cover most cases (Proxy -> Window -> Frame -> WM -> Root)
+                                    for _ in 0..5 {
+                                        if allowed_set.contains(&current) {
+                                            is_allowed = true;
+                                            break;
+                                        }
+
+                                        // Stop if we hit root or invalid
+                                        if current == root || current == 0 {
+                                            break;
+                                        }
+
+                                        // Get parent
+                                        if let Ok(tree_cookie) = conn.query_tree(current) {
+                                            if let Ok(tree_reply) = tree_cookie.reply() {
+                                                current = tree_reply.parent;
+                                            } else {
+                                                break;
+                                            }
+                                        } else {
+                                            break;
+                                        }
+                                    }
+
+                                    if !is_allowed {
+                                        debug!(
+                                            window = focus_reply.focus,
+                                            "Focus required but window (and ancestors) not in allowed set, replaying"
+                                        );
+                                        conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                                        conn.flush()?;
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "Failed to get input focus during hotkey check");
+                                    // If we fail to check focus, safe default is to Replay to avoid eating keys
+                                    conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                                    conn.flush()?;
+                                    continue;
+                                }
                             }
                         }
 
@@ -387,18 +439,7 @@ fn ungrab_hotkey(
     Ok(())
 }
 
-fn get_window_title_sync(conn: &RustConnection, window: Window) -> Result<String> {
-    let cookie = conn.get_property(false, window, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 1024)?;
-    let reply = cookie.reply()?;
 
-    if let Some(val) = reply.value8() {
-        // WM_NAME is typically a string, possibly Latin-1 but often ASCII/UTF-8 compatible for our prefix
-        let bytes: Vec<u8> = val.collect();
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
-    } else {
-        Ok(String::new())
-    }
-}
 
 /// Register a global hotkey with X11
 fn register_hotkey(

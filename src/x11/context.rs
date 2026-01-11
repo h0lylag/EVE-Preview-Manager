@@ -29,6 +29,19 @@ pub struct CachedAtoms {
     pub wm_change_state: Atom,
     pub wm_state: Atom,
     pub net_client_list: Atom,
+    pub net_wm_window_type: Atom,
+    pub net_wm_window_type_dock: Atom,
+    pub net_wm_window_type_desktop: Atom,
+    pub net_wm_window_type_toolbar: Atom,
+    pub net_wm_window_type_menu: Atom,
+    pub net_wm_window_type_utility: Atom,
+    pub net_wm_window_type_splash: Atom,
+    pub net_wm_window_type_dropdown_menu: Atom,
+    pub net_wm_window_type_popup_menu: Atom,
+    pub net_wm_window_type_tooltip: Atom,
+    pub net_wm_window_type_notification: Atom,
+    pub net_wm_window_type_combo: Atom,
+    pub net_wm_window_type_dnd: Atom,
 }
 
 impl CachedAtoms {
@@ -99,6 +112,84 @@ impl CachedAtoms {
                 .context("Failed to intern _NET_CLIENT_LIST atom")?
                 .reply()
                 .context("Failed to get reply for _NET_CLIENT_LIST atom")?
+                .atom,
+            net_wm_window_type: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE atom")?
+                .atom,
+            net_wm_window_type_dock: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DOCK")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_DOCK atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_DOCK atom")?
+                .atom,
+            net_wm_window_type_desktop: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DESKTOP")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_DESKTOP atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_DESKTOP atom")?
+                .atom,
+            net_wm_window_type_toolbar: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLBAR")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_TOOLBAR atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_TOOLBAR atom")?
+                .atom,
+            net_wm_window_type_menu: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_MENU")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_MENU atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_MENU atom")?
+                .atom,
+            net_wm_window_type_utility: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_UTILITY")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_UTILITY atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_UTILITY atom")?
+                .atom,
+            net_wm_window_type_splash: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_SPLASH")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_SPLASH atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_SPLASH atom")?
+                .atom,
+            net_wm_window_type_dropdown_menu: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_DROPDOWN_MENU atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_DROPDOWN_MENU atom")?
+                .atom,
+            net_wm_window_type_popup_menu: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_POPUP_MENU")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_POPUP_MENU atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_POPUP_MENU atom")?
+                .atom,
+            net_wm_window_type_tooltip: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLTIP")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_TOOLTIP atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_TOOLTIP atom")?
+                .atom,
+            net_wm_window_type_notification: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_NOTIFICATION atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_NOTIFICATION atom")?
+                .atom,
+            net_wm_window_type_combo: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_COMBO")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_COMBO atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_COMBO atom")?
+                .atom,
+            net_wm_window_type_dnd: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DND")
+                .context("Failed to intern _NET_WM_WINDOW_TYPE_DND atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_WINDOW_TYPE_DND atom")?
                 .atom,
         })
     }

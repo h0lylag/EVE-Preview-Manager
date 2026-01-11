@@ -160,8 +160,32 @@ pub fn is_window_minimized(
     Ok(false)
 }
 
-/// Get the currently focused EVE client window ID, if any
 pub fn get_active_eve_window(
+    conn: &RustConnection,
+    screen: &Screen,
+    atoms: &CachedAtoms,
+) -> Result<Option<Window>> {
+    let active_window = get_active_window(conn, screen, atoms)?;
+
+    if let Some(active_window) = active_window {
+        if is_window_eve(conn, active_window, atoms)
+            .context(format!(
+                "Failed to check if active window {} is EVE client",
+                active_window
+            ))?
+            .is_some()
+        {
+            Ok(Some(active_window))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Get the currently focused window ID, if any
+pub fn get_active_window(
     conn: &RustConnection,
     screen: &Screen,
     atoms: &CachedAtoms,
@@ -180,33 +204,89 @@ pub fn get_active_eve_window(
         .context("Failed to get reply for _NET_ACTIVE_WINDOW query")?;
 
     if active_window_prop.value.len() >= 4 {
-        let active_window = u32::from_ne_bytes(
+        Ok(Some(u32::from_ne_bytes(
             active_window_prop.value[0..4]
                 .try_into()
                 .context("Invalid _NET_ACTIVE_WINDOW property format")?,
-        );
-
-        if is_window_eve(conn, active_window, atoms)
-            .context(format!(
-                "Failed to check if active window {} is EVE client",
-                active_window
-            ))?
-            .is_some()
-        {
-            Ok(Some(active_window))
-        } else {
-            Ok(None)
-        }
+        )))
     } else {
         Ok(None)
     }
 }
 
-/// Check if the currently focused window is an EVE client
-pub fn is_eve_window_focused(
+
+
+/// Check if a window is a "normal" top-level application window
+/// (Filters out docks, popups, desktop, etc. based on _NET_WM_WINDOW_TYPE)
+pub fn is_normal_window(
     conn: &RustConnection,
-    screen: &Screen,
+    window: Window,
     atoms: &CachedAtoms,
 ) -> Result<bool> {
-    Ok(get_active_eve_window(conn, screen, atoms)?.is_some())
+    let type_cookie = conn
+        .get_property(
+            false,
+            window,
+            atoms.net_wm_window_type,
+            AtomEnum::ATOM,
+            0,
+            32,
+        )
+        .context(format!(
+            "Failed to query _NET_WM_WINDOW_TYPE for window {}",
+            window
+        ))?;
+
+    match type_cookie.reply() {
+        Ok(reply) => {
+            if let Some(atoms_iter) = reply.value32() {
+                // Check if any of the types match _NET_WM_WINDOW_TYPE_NORMAL
+                // If the property is missing/empty, EWMH says to treat as Normal.
+                // However, if it HAS types, we should check them.
+                // Common types: NORMAL, DIALOG, UTILITY, TOOLBAR, SPLASH, DOCK, DESKTOP
+                // We want NORMAL or DIALOG (maybe).
+                // For now, let's just check if it contains NORMAL, or if the list implies it.
+                // Actually, simpler logic: If it contains DOCK, DESKTOP, TOOLBAR, MENU, SPLASH -> False.
+                // If unmatched or contains NORMAL -> True.
+
+                // Collect to vec to iterate multiple times if needed, or just scan
+                let types: Vec<u32> = atoms_iter.collect();
+
+                if types.is_empty() {
+                    return Ok(true); // Default to Normal
+                }
+
+                let ignore_types = [
+                    atoms.net_wm_window_type_dock,
+                    atoms.net_wm_window_type_desktop,
+                    atoms.net_wm_window_type_toolbar,
+                    atoms.net_wm_window_type_menu,
+                    atoms.net_wm_window_type_utility,
+                    atoms.net_wm_window_type_splash,
+                    atoms.net_wm_window_type_dropdown_menu,
+                    atoms.net_wm_window_type_popup_menu,
+                    atoms.net_wm_window_type_tooltip,
+                    atoms.net_wm_window_type_notification,
+                    atoms.net_wm_window_type_combo,
+                    atoms.net_wm_window_type_dnd,
+                ];
+
+                for t in types {
+                    // If it is explicitly marked as one of the types we ignore, return false
+                    if ignore_types.contains(&t) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            } else {
+                // Property exists but empty value? Treat as normal.
+                Ok(true)
+            }
+        }
+        Err(ReplyError::X11Error(_)) => {
+            // Window gone
+            Ok(false)
+        }
+        Err(e) => Err(anyhow::anyhow!("Failed to get window type reply: {}", e)),
+    }
 }

@@ -199,8 +199,16 @@ pub fn render_cycle_group_column(
             if ui.button("➕ Add Chars").clicked() {
                 state.show_add_characters_popup = true;
                 state.character_selections.clear();
+                // Add EVE characters
                 for char_name in profile.character_thumbnails.keys() {
                     state.character_selections.insert(char_name.clone(), false);
+                }
+                // Add Custom Sources
+                for source in &profile.custom_windows {
+                    // Use alias as the identifier
+                    state
+                        .character_selections
+                        .insert(source.alias.clone(), false);
                 }
             }
         });

@@ -189,6 +189,41 @@ pub fn check_and_create_window<'a>(
     };
 
     // Apply Limit Logic for Custom Sources
+    if !identity.is_eve {
+        // FILTER 1: Must be mapped and viewable
+        // This prevents capturing hidden utility windows often spawned by applications
+        let attrs_cookie = ctx.conn.get_window_attributes(window)?;
+        #[allow(clippy::collapsible_if)]
+        if let Ok(attrs) = attrs_cookie.reply() {
+            if attrs.map_state != MapState::VIEWABLE {
+                debug!(
+                    window = window,
+                    alias = %identity.name,
+                    "Skipping unmapped custom source"
+                );
+                return Ok(None);
+            }
+        }
+
+        if !crate::x11::is_normal_window(ctx.conn, window, ctx.atoms).unwrap_or(true) {
+            debug!(window = window, alias = %identity.name, "Skipping non-normal custom source (utility/dock)");
+            return Ok(None);
+        }
+
+        // IMPORTANT: Register for events on this custom source window!
+        // This is done for EVE windows inside check_eve_window_internal, but we must do it here for custom sources.
+        // We need:
+        // - FOCUS_CHANGE: To detect when it gains/loses focus (for borders)
+        // - PROPERTY_CHANGE: To detect name/state changes
+        // - STRUCTURE_NOTIFY: To detect destruction/unmapping
+        ctx.conn.change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().event_mask(
+                EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE | EventMask::STRUCTURE_NOTIFY,
+            ),
+        )?;
+    }
+
     if identity.rule.as_ref().is_some_and(|r| r.limit) {
         // Check if any EXISTING thumbnail has the same name
         // Note: existing_thumbnails contains previously processed windows

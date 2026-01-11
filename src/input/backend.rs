@@ -40,6 +40,9 @@ pub struct HotkeyConfiguration {
     pub toggle_previews_key: Option<HotkeyBinding>,
 }
 
+/// Thread-safe set of allowed active window IDs (tracked clients)
+pub type AllowedWindows = std::sync::Arc<std::sync::RwLock<std::collections::HashSet<u32>>>;
+
 /// Hotkey backend trait
 ///
 /// Each backend must implement this trait to be used by the daemon
@@ -51,6 +54,7 @@ pub trait HotkeyBackend: Sized {
     /// * `config` - Hotkey binding configuration
     /// * `device_id` - Optional specific input device to listen on (backend specific)
     /// * `require_eve_focus` - If true, backend should only trigger when EVE is focused (optimization)
+    /// * `allowed_windows` - Shared set of allowed active window IDs (tracked clients)
     ///
     /// Returns handles to spawned threads for cleanup on shutdown
     fn spawn(
@@ -58,6 +62,7 @@ pub trait HotkeyBackend: Sized {
         config: HotkeyConfiguration,
         device_id: Option<String>,
         require_eve_focus: bool,
+        allowed_windows: AllowedWindows,
     ) -> Result<Vec<JoinHandle<()>>>;
 
     /// Check if this backend is available on the current system

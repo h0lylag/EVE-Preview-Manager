@@ -20,7 +20,9 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
 
 use crate::common::constants::{input, paths, permissions};
-use crate::input::backend::{BackendCapabilities, HotkeyBackend, HotkeyConfiguration};
+use crate::input::backend::{
+    AllowedWindows, BackendCapabilities, HotkeyBackend, HotkeyConfiguration,
+};
 use crate::input::device_detection;
 use crate::input::listener::{CycleCommand, TimestampedCommand};
 
@@ -32,6 +34,7 @@ impl HotkeyBackend for EvdevBackend {
         config: HotkeyConfiguration,
         selected_device_id: Option<String>,
         require_eve_focus: bool,
+        _allowed_windows: AllowedWindows,
     ) -> Result<Vec<JoinHandle<()>>> {
         spawn_listener_impl(sender, config, selected_device_id, require_eve_focus)
     }
