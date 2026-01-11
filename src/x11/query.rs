@@ -38,7 +38,7 @@ pub fn is_window_eve(
     let title = String::from_utf8_lossy(&name_prop.value).into_owned();
     Ok(
         if let Some(name) = title.strip_prefix(eve::WINDOW_TITLE_PREFIX) {
-            if name.contains("steam_app_") {
+            if name.to_lowercase().contains("steam_app_") {
                 debug!(window=window, name=%name, "Ignored steam_app container title");
                 None
             } else {

@@ -42,12 +42,122 @@ pub fn handle_damage_notify(
     Ok(())
 }
 
+/// Helper to process a window once it has been identified (used by Create, Map, and Property handlers)
+pub fn process_detected_window(
+    ctx: &mut EventContext,
+    window: Window,
+    identity: crate::daemon::window_detection::WindowIdentity,
+) -> Result<()> {
+    use crate::common::ipc::DaemonMessage;
+    use crate::daemon::window_detection::check_and_create_window;
+
+    info!(
+        window = window,
+        character = %identity.name,
+        is_custom = !identity.is_eve,
+        "Identified window for preview"
+    );
+    debug!(?identity, "Identity details");
+
+    ctx.cycle_state.add_window(identity.name.clone(), window);
+
+    if ctx.display_config.enabled {
+        match check_and_create_window(
+            ctx.app_ctx,
+            ctx.daemon_config,
+            ctx.display_config,
+            window,
+            ctx.font_renderer,
+            ctx.session_state,
+            ctx.eve_clients,
+        ) {
+            Ok(Some(thumbnail)) => {
+                let geom_result = ctx
+                    .app_ctx
+                    .conn
+                    .get_geometry(thumbnail.window())
+                    .map_err(anyhow::Error::from)
+                    .and_then(|cookie| cookie.reply().map_err(anyhow::Error::from));
+
+                match geom_result {
+                    Ok(geom) => {
+                        if !thumbnail.character_name.is_empty() {
+                            let settings = crate::common::types::CharacterSettings::new(
+                                geom.x,
+                                geom.y,
+                                thumbnail.dimensions.width,
+                                thumbnail.dimensions.height,
+                            );
+
+                            if identity.is_eve {
+                                ctx.daemon_config
+                                    .character_thumbnails
+                                    .insert(thumbnail.character_name.clone(), settings.clone());
+                            } else {
+                                ctx.daemon_config
+                                    .custom_source_thumbnails
+                                    .insert(thumbnail.character_name.clone(), settings.clone());
+                            }
+
+                            let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
+                                name: thumbnail.character_name.clone(),
+                                x: settings.x,
+                                y: settings.y,
+                                width: settings.dimensions.width,
+                                height: settings.dimensions.height,
+                                is_custom: !identity.is_eve,
+                            });
+                            let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected(
+                                thumbnail.character_name.clone(),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to query geometry for new thumbnail window {}: {}",
+                            thumbnail.window(),
+                            e
+                        );
+                    }
+                }
+
+                ctx.eve_clients.insert(window, thumbnail);
+
+                if let Some(thumb) = ctx.eve_clients.get_mut(&window)
+                    && let Err(e) = thumb.border(
+                        ctx.display_config,
+                        false,
+                        ctx.cycle_state.is_skipped(&thumb.character_name),
+                        ctx.font_renderer,
+                    )
+                {
+                    tracing::warn!(window = window, error = %e, "Failed to draw initial border for new window");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    window = window,
+                    error = %e,
+                    "Failed to create thumbnail"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Handle CreateNotify events - create thumbnail for new EVE window
 pub fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) -> Result<()> {
-    use crate::common::ipc::DaemonMessage;
-    use crate::daemon::window_detection::{check_and_create_window, identify_window};
+    use crate::daemon::window_detection::identify_window;
 
     debug!(window = event.window, "CreateNotify received");
+
+    // Subscribe to property changes so we can detect late-identifying windows (e.g. WM_CLASS set after creation)
+    let _ = ctx.app_ctx.conn.change_window_attributes(
+        event.window,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+    );
 
     if let Some(identity) = identify_window(
         ctx.app_ctx,
@@ -57,100 +167,26 @@ pub fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) ->
     )
     .context(format!("Failed to identify window {}", event.window))?
     {
-        info!(
-            window = event.window,
-            character = %identity.name,
-            is_custom = !identity.is_eve,
-            "Identified window for preview"
-        );
-        debug!(?identity, "Identity details");
+        process_detected_window(ctx, event.window, identity)?;
+    }
+    Ok(())
+}
 
-        ctx.cycle_state
-            .add_window(identity.name.clone(), event.window);
+/// Handle MapNotify events - catch windows becoming visible
+pub fn handle_map_notify(ctx: &mut EventContext, event: MapNotifyEvent) -> Result<()> {
+    use crate::daemon::window_detection::identify_window;
 
-        if ctx.display_config.enabled {
-            match check_and_create_window(
-                ctx.app_ctx,
-                ctx.daemon_config,
-                ctx.display_config,
-                event.window,
-                ctx.font_renderer,
-                ctx.session_state,
-                ctx.eve_clients,
-            ) {
-                Ok(Some(thumbnail)) => {
-                    let geom_result = ctx
-                        .app_ctx
-                        .conn
-                        .get_geometry(thumbnail.window())
-                        .map_err(anyhow::Error::from)
-                        .and_then(|cookie| cookie.reply().map_err(anyhow::Error::from));
+    debug!(window = event.window, "MapNotify received");
 
-                    match geom_result {
-                        Ok(geom) => {
-                            if !thumbnail.character_name.is_empty() {
-                                let settings = crate::common::types::CharacterSettings::new(
-                                    geom.x,
-                                    geom.y,
-                                    thumbnail.dimensions.width,
-                                    thumbnail.dimensions.height,
-                                );
-
-                                if identity.is_eve {
-                                    ctx.daemon_config
-                                        .character_thumbnails
-                                        .insert(thumbnail.character_name.clone(), settings.clone());
-                                } else {
-                                    ctx.daemon_config
-                                        .custom_source_thumbnails
-                                        .insert(thumbnail.character_name.clone(), settings.clone());
-                                }
-
-                                let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                                    name: thumbnail.character_name.clone(),
-                                    x: settings.x,
-                                    y: settings.y,
-                                    width: settings.dimensions.width,
-                                    height: settings.dimensions.height,
-                                    is_custom: !identity.is_eve,
-                                });
-                                let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected(
-                                    thumbnail.character_name.clone(),
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to query geometry for new thumbnail window {}: {}",
-                                thumbnail.window(),
-                                e
-                            );
-                        }
-                    }
-
-                    ctx.eve_clients.insert(event.window, thumbnail);
-
-                    if let Some(thumb) = ctx.eve_clients.get_mut(&event.window)
-                        && let Err(e) = thumb.border(
-                            ctx.display_config,
-                            false,
-                            ctx.cycle_state.is_skipped(&thumb.character_name),
-                            ctx.font_renderer,
-                        )
-                    {
-                        tracing::warn!(window = event.window, error = %e, "Failed to draw initial border for new window");
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        window = event.window,
-                        error = %e,
-                        "Failed to create thumbnail"
-                    );
-                }
-            }
-        }
+    if let Some(identity) = identify_window(
+        ctx.app_ctx,
+        event.window,
+        ctx.session_state,
+        &ctx.daemon_config.profile.custom_windows,
+    )
+    .context(format!("Failed to identify window {}", event.window))?
+    {
+        process_detected_window(ctx, event.window, identity)?;
     }
     Ok(())
 }
@@ -184,8 +220,8 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
     Ok(())
 }
 
-/// Handle PropertyNotify specifically for WM_NAME (Character detection)
-pub fn handle_wm_name_change(ctx: &mut EventContext, window: Window) -> Result<()> {
+/// Handle PropertyNotify for identity changes (WM_NAME or WM_CLASS) to detect late-identifying windows
+pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<()> {
     use crate::common::ipc::DaemonMessage;
     use crate::daemon::window_detection::{check_and_create_window, identify_window};
     use crate::x11::is_window_eve;
@@ -336,66 +372,7 @@ pub fn handle_wm_name_change(ctx: &mut EventContext, window: Window) -> Result<(
             "Failed to identify window {} during property change",
             window
         ))? {
-            ctx.cycle_state.add_window(identity.name.clone(), window);
-
-            if ctx.display_config.enabled
-                && let Some(thumbnail) = check_and_create_window(
-                    ctx.app_ctx,
-                    ctx.daemon_config,
-                    ctx.display_config,
-                    window,
-                    ctx.font_renderer,
-                    ctx.session_state,
-                    ctx.eve_clients,
-                )
-                .context(format!("Failed to create thumbnail for window {}", window))?
-            {
-                let geom = ctx
-                    .app_ctx
-                    .conn
-                    .get_geometry(thumbnail.window())
-                    .context("Failed to query geometry for newly detected thumbnail")?
-                    .reply()
-                    .context("Failed to get geometry reply for newly detected thumbnail")?;
-
-                if !thumbnail.character_name.is_empty() {
-                    let settings = crate::common::types::CharacterSettings::new(
-                        geom.x,
-                        geom.y,
-                        thumbnail.dimensions.width,
-                        thumbnail.dimensions.height,
-                    );
-
-                    ctx.daemon_config
-                        .character_thumbnails
-                        .insert(thumbnail.character_name.clone(), settings.clone());
-
-                    let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                        name: thumbnail.character_name.clone(),
-                        x: settings.x,
-                        y: settings.y,
-                        width: settings.dimensions.width,
-                        height: settings.dimensions.height,
-                        is_custom: !identity.is_eve,
-                    });
-                    let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected(
-                        thumbnail.character_name.clone(),
-                    ));
-                }
-
-                ctx.eve_clients.insert(window, thumbnail);
-
-                if let Some(thumb) = ctx.eve_clients.get_mut(&window)
-                    && let Err(e) = thumb.border(
-                        ctx.display_config,
-                        false,
-                        ctx.cycle_state.is_skipped(&thumb.character_name),
-                        ctx.font_renderer,
-                    )
-                {
-                    tracing::warn!(window = window, error = %e, "Failed to draw initial border for newly detected window");
-                }
-            }
+            process_detected_window(ctx, window, identity)?;
         }
     }
     Ok(())
