@@ -115,7 +115,7 @@ pub mod config {
         pub const INTERVAL_DAYS: u32 = 1;
 
         /// Default retention count
-        pub const RETENTION_COUNT: u32 = 10;
+        pub const RETENTION_COUNT: u32 = 30;
     }
 }
 
