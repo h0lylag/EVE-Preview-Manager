@@ -49,7 +49,7 @@ impl HotkeyBackend for X11Backend {
             return Ok(Vec::new());
         }
 
-        info!(
+        debug!(
             has_cycle_keys = has_cycle,
             has_skip_key = has_skip,
             has_toggle_previews_key = has_toggle_previews,
@@ -100,7 +100,7 @@ fn run_x11_listener(
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
 
-    info!("X11 hotkey listener connected to display");
+    debug!("X11 hotkey listener connected to display");
 
     // Build a map of (keycode, modifiers) -> CycleCommand
     let mut hotkey_map: HashMap<(Keycode, ModMask), CycleCommand> = HashMap::new();
@@ -111,7 +111,7 @@ fn run_x11_listener(
         if let Some((keycode, modmask)) = evdev_to_x11_key(cycle_hotkey) {
             register_hotkey(&conn, root, keycode, modmask)?;
             hotkey_map.insert((keycode, modmask), command.clone());
-            info!(
+            debug!(
                 binding = %cycle_hotkey.display_name(),
                 x11_keycode = keycode,
                 modmask = ?modmask,
@@ -128,7 +128,7 @@ fn run_x11_listener(
         if let Some((keycode, modmask)) = evdev_to_x11_key(skip_key) {
             register_hotkey(&conn, root, keycode, modmask)?;
             hotkey_map.insert((keycode, modmask), CycleCommand::ToggleSkip);
-            info!(
+            debug!(
                 binding = %skip_key.display_name(),
                 x11_keycode = keycode,
                 modmask = ?modmask,
@@ -144,7 +144,7 @@ fn run_x11_listener(
         if let Some((keycode, modmask)) = evdev_to_x11_key(toggle_previews_key) {
             register_hotkey(&conn, root, keycode, modmask)?;
             hotkey_map.insert((keycode, modmask), CycleCommand::TogglePreviews);
-            info!(
+            debug!(
                 binding = %toggle_previews_key.display_name(),
                 x11_keycode = keycode,
                 modmask = ?modmask,
@@ -164,7 +164,7 @@ fn run_x11_listener(
                 (keycode, modmask),
                 CycleCommand::CharacterHotkey(char_hotkey.clone()),
             );
-            info!(
+            debug!(
                 binding = %char_hotkey.display_name(),
                 x11_keycode = keycode,
                 modmask = ?modmask,
@@ -184,7 +184,7 @@ fn run_x11_listener(
                 (keycode, modmask),
                 CycleCommand::ProfileHotkey(profile_hotkey.clone()),
             );
-            info!(
+            debug!(
                 binding = %profile_hotkey.display_name(),
                 x11_keycode = keycode,
                 modmask = ?modmask,
@@ -197,7 +197,7 @@ fn run_x11_listener(
 
     conn.flush().context("Failed to flush X11 connection")?;
 
-    info!(
+    debug!(
         registered_hotkeys = hotkey_map.len(),
         "X11 hotkeys registered, entering event loop"
     );
@@ -313,7 +313,7 @@ fn run_x11_listener(
                         }
 
                         // If we got here, we consume the event.
-                        info!(keycode = key_event.detail, "Consuming hotkey event");
+                        debug!(keycode = key_event.detail, "Consuming hotkey event");
                         conn.allow_events(Allow::ASYNC_KEYBOARD, key_event.time)?;
                         conn.flush()?;
 
@@ -322,7 +322,7 @@ fn run_x11_listener(
 
                         // Look up the hotkey
                         if let Some(command) = hotkey_map.get(&(key_event.detail, modmask)) {
-                            info!(
+                            debug!(
                                 keycode = key_event.detail,
                                 modmask = ?modmask,
                                 command = ?command,
@@ -372,7 +372,7 @@ fn run_x11_listener(
 
             // If Manager gained focus, ungrab hotkeys
             if is_epm_focused && hotkeys_grabbed {
-                info!("Manager gained focus, ungrabbing hotkeys to allow normal input");
+                debug!("Manager gained focus, ungrabbing hotkeys to allow normal input");
                 for (keycode, modmask) in hotkey_map.keys() {
                     ungrab_hotkey(&conn, root, *keycode, *modmask)?;
                 }
@@ -381,7 +381,7 @@ fn run_x11_listener(
             }
             // If Manager lost focus, regrab hotkeys
             else if !is_epm_focused && !hotkeys_grabbed {
-                info!("Manager lost focus, re-grabbing hotkeys");
+                debug!("Manager lost focus, re-grabbing hotkeys");
                 for (keycode, modmask) in hotkey_map.keys() {
                     register_hotkey(&conn, root, *keycode, *modmask)?;
                 }

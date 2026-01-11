@@ -51,7 +51,7 @@ pub fn process_detected_window(
     use crate::common::ipc::DaemonMessage;
     use crate::daemon::window_detection::check_and_create_window;
 
-    info!(
+    debug!(
         window = window,
         character = %identity.name,
         is_custom = !identity.is_eve,
@@ -70,6 +70,7 @@ pub fn process_detected_window(
             ctx.font_renderer,
             ctx.session_state,
             ctx.eve_clients,
+            Some(identity.clone()),
         ) {
             Ok(Some(thumbnail)) => {
                 let geom_result = ctx
@@ -107,9 +108,21 @@ pub fn process_detected_window(
                                 height: settings.dimensions.height,
                                 is_custom: !identity.is_eve,
                             });
-                            let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected(
-                                thumbnail.character_name.clone(),
-                            ));
+                            let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected {
+                                name: thumbnail.character_name.clone(),
+                                is_custom: !identity.is_eve,
+                            });
+
+                            // Force initial update for custom sources as they might not emit Damage events immediately
+                            if !identity.is_eve {
+                                if let Err(e) = thumbnail.update(ctx.display_config, ctx.font_renderer) {
+                                    tracing::warn!(
+                                        "Failed to perform initial update for custom source {}: {}",
+                                        thumbnail.character_name,
+                                        e
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -226,142 +239,157 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
     use crate::daemon::window_detection::{check_and_create_window, identify_window};
     use crate::x11::is_window_eve;
 
-    if let Some(thumbnail) = ctx.eve_clients.get_mut(&window)
-        && let Some(eve_window) = is_window_eve(ctx.app_ctx.conn, window, ctx.app_ctx.atoms)
+    // Check if the window is already tracked
+    if ctx.eve_clients.contains_key(&window) {
+        // Window is tracked. Check if it's an EVE window to handle character swaps/renames.
+        if let Some(eve_window) = is_window_eve(ctx.app_ctx.conn, window, ctx.app_ctx.atoms)
             .context(format!(
                 "Failed to check if window {} is EVE client during property change",
                 window
             ))?
-    {
-        let old_name = thumbnail.character_name.clone();
-        let new_character_name = eve_window.character_name();
+        {
+            // It IS an EVE window.
+            // Re-borrow thumbnail mutably
+            let thumbnail = ctx.eve_clients.get_mut(&window).expect("Checked contains_key");
+            let old_name = thumbnail.character_name.clone();
+            let new_character_name = eve_window.character_name();
 
-        ctx.session_state
-            .update_last_character(window, new_character_name);
-
-        let geom = ctx
-            .app_ctx
-            .conn
-            .get_geometry(thumbnail.window())
-            .context("Failed to send geometry query during character change")?
-            .reply()
-            .context(format!(
-                "Failed to get geometry during character change for window {}",
-                thumbnail.window()
-            ))?;
-        let current_pos = Position::new(geom.x, geom.y);
-
-        ctx.cycle_state
-            .update_character(window, new_character_name.to_string());
-
-        let new_settings = ctx
-            .daemon_config
-            .handle_character_change(
-                &old_name,
-                new_character_name,
-                current_pos,
-                thumbnail.dimensions.width,
-                thumbnail.dimensions.height,
-            )
-            .context(format!(
-                "Failed to handle character change from '{}' to '{}'",
-                old_name, new_character_name
-            ))?;
-
-        if !new_character_name.is_empty() {
-            let final_settings = if let Some(settings) = new_settings {
-                Some(settings)
-            } else {
-                let settings = if ctx
-                    .daemon_config
-                    .profile
-                    .thumbnail_preserve_position_on_swap
-                {
-                    crate::common::types::CharacterSettings::new(
-                        current_pos.x,
-                        current_pos.y,
-                        thumbnail.dimensions.width,
-                        thumbnail.dimensions.height,
-                    )
-                } else {
-                    let src_geom = ctx
-                        .app_ctx
-                        .conn
-                        .get_geometry(thumbnail.src())
-                        .context("Failed to query source geometry for reset position")?
-                        .reply()
-                        .context("Failed to get source geometry reply for reset position")?;
-
-                    let default_x =
-                        src_geom.x + crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
-                    let default_y =
-                        src_geom.y + crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
-
-                    crate::common::types::CharacterSettings::new(
-                        default_x,
-                        default_y,
-                        thumbnail.dimensions.width,
-                        thumbnail.dimensions.height,
-                    )
-                };
-
-                ctx.daemon_config
-                    .character_thumbnails
-                    .insert(new_character_name.to_string(), settings.clone());
-
-                let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected(
-                    new_character_name.to_string(),
-                ));
-
-                let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                    name: new_character_name.to_string(),
-                    x: settings.x,
-                    y: settings.y,
-                    width: settings.dimensions.width,
-                    height: settings.dimensions.height,
-                    is_custom: false, // EVE chars are never custom sources
-                });
-
-                Some(settings)
-            };
-
-            if let Some(ref settings) = final_settings {
-                ctx.session_state
-                    .update_window_position(window, settings.x, settings.y);
+            // Optimization: If name hasn't changed, we can exit early.
+            if old_name == new_character_name {
+                return Ok(());
             }
 
-            thumbnail
-                .set_character_name(
-                    new_character_name.to_string(),
-                    final_settings,
-                    ctx.display_config,
-                    ctx.font_renderer,
+            ctx.session_state
+                .update_last_character(window, new_character_name);
+
+            let geom = ctx
+                .app_ctx
+                .conn
+                .get_geometry(thumbnail.window())
+                .context("Failed to send geometry query during character change")?
+                .reply()
+                .context(format!(
+                    "Failed to get geometry during character change for window {}",
+                    thumbnail.window()
+                ))?;
+            let current_pos = Position::new(geom.x, geom.y);
+
+            ctx.cycle_state
+                .update_character(window, new_character_name.to_string());
+
+            let new_settings = ctx
+                .daemon_config
+                .handle_character_change(
+                    &old_name,
+                    new_character_name,
+                    current_pos,
+                    thumbnail.dimensions.width,
+                    thumbnail.dimensions.height,
                 )
                 .context(format!(
-                    "Failed to update thumbnail after character change from '{}'",
-                    old_name
+                    "Failed to handle character change from '{}' to '{}'",
+                    old_name, new_character_name
                 ))?;
 
-            if !thumbnail.state.is_minimized() {
+            if !new_character_name.is_empty() {
+                let final_settings = if let Some(settings) = new_settings {
+                    Some(settings)
+                } else {
+                    let settings = if ctx
+                        .daemon_config
+                        .profile
+                        .thumbnail_preserve_position_on_swap
+                    {
+                        crate::common::types::CharacterSettings::new(
+                            current_pos.x,
+                            current_pos.y,
+                            thumbnail.dimensions.width,
+                            thumbnail.dimensions.height,
+                        )
+                    } else {
+                        let src_geom = ctx
+                            .app_ctx
+                            .conn
+                            .get_geometry(thumbnail.src())
+                            .context("Failed to query source geometry for reset position")?
+                            .reply()
+                            .context("Failed to get source geometry reply for reset position")?;
+
+                        let default_x = src_geom.x
+                            + crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                        let default_y = src_geom.y
+                            + crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
+
+                        crate::common::types::CharacterSettings::new(
+                            default_x,
+                            default_y,
+                            thumbnail.dimensions.width,
+                            thumbnail.dimensions.height,
+                        )
+                    };
+
+                    ctx.daemon_config
+                        .character_thumbnails
+                        .insert(new_character_name.to_string(), settings.clone());
+
+                    let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected {
+                        name: new_character_name.to_string(),
+                        is_custom: false,
+                    });
+
+                    let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
+                        name: new_character_name.to_string(),
+                        x: settings.x,
+                        y: settings.y,
+                        width: settings.dimensions.width,
+                        height: settings.dimensions.height,
+                        is_custom: false, // EVE chars are never custom sources
+                    });
+
+                    Some(settings)
+                };
+
+                if let Some(ref settings) = final_settings {
+                    ctx.session_state
+                        .update_window_position(window, settings.x, settings.y);
+                }
+
                 thumbnail
-                    .border(
+                    .set_character_name(
+                        new_character_name.to_string(),
+                        final_settings,
                         ctx.display_config,
-                        thumbnail.state.is_focused(),
-                        ctx.cycle_state.is_skipped(&thumbnail.character_name),
                         ctx.font_renderer,
                     )
-                    .context("Failed to restore border after character change")?;
+                    .context(format!(
+                        "Failed to update thumbnail after character change from '{}'",
+                        old_name
+                    ))?;
+
+                if !thumbnail.state.is_minimized() {
+                    thumbnail
+                        .border(
+                            ctx.display_config,
+                            thumbnail.state.is_focused(),
+                            ctx.cycle_state.is_skipped(&thumbnail.character_name),
+                            ctx.font_renderer,
+                        )
+                        .context("Failed to restore border after character change")?;
+                }
+            } else {
+                thumbnail
+                    .set_character_name(String::new(), None, ctx.display_config, ctx.font_renderer)
+                    .context(format!(
+                        "Failed to clear thumbnail name after logout from '{}'",
+                        old_name
+                    ))?;
             }
         } else {
-            thumbnail
-                .set_character_name(String::new(), None, ctx.display_config, ctx.font_renderer)
-                .context(format!(
-                    "Failed to clear thumbnail name after logout from '{}'",
-                    old_name
-                ))?;
+            // Tracked, but not valid EVE window (likely Custom Source)
+            // Implicitly ignore property updates for custom sources to prevent re-detection loops
         }
     } else {
-        // Potential new EVE window detection
+        // Window is NOT tracked. Verify and identify.
         if let Some(identity) = identify_window(
             ctx.app_ctx,
             window,

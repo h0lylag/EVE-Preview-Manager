@@ -25,14 +25,14 @@ impl SharedState {
         // 2. Spawn Daemon with server name
         let child = spawn_daemon(&server_name, self.debug_mode)?;
         let pid = child.id();
-        info!(pid, server_name = %server_name, "Started daemon process");
+        debug!(pid, server_name = %server_name, "Started daemon process");
 
         // 3. Spawn thread to wait for connection (avoid blocking Manager)
         let (tx, rx) = mpsc::channel();
         self.bootstrap_rx = Some(rx);
 
         std::thread::spawn(move || {
-            info!("Waiting for daemon IPC connection...");
+            debug!("Waiting for daemon IPC connection...");
             match server.accept() {
                 Ok((_, bootstrap_msg)) => {
                     info!("Daemon connected via IPC");
@@ -102,7 +102,7 @@ impl SharedState {
         if let Some(ref rx) = self.bootstrap_rx
             && let Ok(msg) = rx.try_recv()
         {
-            info!("Received IPC channels from daemon");
+            debug!("Received IPC channels from daemon");
             let (config_tx, status_rx) = msg;
             self.ipc_config_tx = Some(config_tx);
 
@@ -189,8 +189,12 @@ impl SharedState {
                             }
                         }
                     }
-                    DaemonMessage::CharacterDetected(name) => {
-                        info!("Daemon detected character: {}", name);
+                    DaemonMessage::CharacterDetected { name, is_custom } => {
+                        if is_custom {
+                            info!("Daemon detected custom source: {}", name);
+                        } else {
+                            info!("Daemon detected character: {}", name);
+                        }
                     }
                     DaemonMessage::RequestProfileSwitch(name) => {
                         info!("Daemon requested profile switch: {}", name);

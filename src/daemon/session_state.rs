@@ -4,7 +4,7 @@
 //! thumbnail positions when characters log out and for position inheritance.
 
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{debug, info};
 use x11rb::protocol::xproto::Window;
 
 use crate::common::types::{CharacterSettings, Position};
@@ -42,7 +42,7 @@ impl SessionState {
         // If character has a name (not just "EVE"), check character position from config
         if !character_name.is_empty() {
             if let Some(settings) = character_thumbnails.get(character_name) {
-                info!(character = %character_name, x = settings.x, y = settings.y, "Using saved position for character");
+                debug!(character = %character_name, x = settings.x, y = settings.y, "Using saved position for character");
                 return Some(settings.position());
             }
 
@@ -86,6 +86,11 @@ impl SessionState {
     /// Only tracks non-empty character names (ignores logged-out state)
     pub fn update_last_character(&mut self, window: Window, character_name: &str) {
         if !character_name.is_empty() {
+            if let Some(existing) = self.window_last_character.get(&window) {
+                if existing == character_name {
+                    return;
+                }
+            }
             self.window_last_character
                 .insert(window, character_name.to_string());
             info!(window = window, character = %character_name, "Tracked last known character for window");

@@ -93,13 +93,14 @@ pub fn identify_window(
         }
 
         if matched {
-            info!(
+            debug!(
                 window = window,
                 alias = %rule.alias,
                 title = %wm_name,
                 class = %wm_class,
                 "Identified Custom Source"
             );
+            state.update_last_character(window, &rule.alias);
             return Ok(Some(WindowIdentity {
                 name: rule.alias.clone(),
                 is_eve: false,
@@ -152,7 +153,7 @@ fn check_eve_window_internal(
     if let Some(eve_window) = is_window_eve(ctx.conn, window, ctx.atoms)? {
         let character_name = eve_window.character_name().to_string();
 
-        info!(
+        debug!(
             window = window,
             character = %character_name,
             "Confirmed EVE Client"
@@ -180,12 +181,16 @@ pub fn check_and_create_window<'a>(
     font_renderer: &crate::daemon::font::FontRenderer,
     state: &mut SessionState,
     existing_thumbnails: &HashMap<Window, Thumbnail>,
+    known_identity: Option<WindowIdentity>,
 ) -> Result<Option<Thumbnail<'a>>> {
     // Check if window matches EVE or Custom Rule
-    let identity = match identify_window(ctx, window, state, &daemon_config.profile.custom_windows)?
-    {
-        Some(id) => id,
-        None => return Ok(None),
+    let identity = if let Some(id) = known_identity {
+        id
+    } else {
+        match identify_window(ctx, window, state, &daemon_config.profile.custom_windows)? {
+            Some(id) => id,
+            None => return Ok(None),
+        }
     };
 
     // Apply Limit Logic for Custom Sources
@@ -324,7 +329,7 @@ pub fn check_and_create_window<'a>(
         // Forcing an update here caused issues with fleeting windows.
     }
 
-    info!(
+    debug!(
         window = window,
         character = %character_name,
         is_custom = !identity.is_eve,
@@ -372,6 +377,7 @@ pub fn scan_eve_windows<'a>(
             font_renderer,
             state,
             &eve_clients,
+            None,
         ) {
             Ok(Some(eve)) => {
                 // Save initial position and dimensions (important for first-time characters)

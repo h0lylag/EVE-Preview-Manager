@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         // Debug mode: detailed logs for our app, but keep noisy libraries (x11rb) at info
         "info,eve_preview_manager=debug"
     } else {
-        "info"
+        "info,winit=warn"
     };
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

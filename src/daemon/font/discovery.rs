@@ -68,7 +68,7 @@ fn parse_font_name(font_name: &str) -> (&str, Option<&str>) {
 
 /// Get list of all individual fonts with their full names
 pub fn list_fonts() -> Result<Vec<String>> {
-    info!("Loading available fonts from fontconfig...");
+    debug!("Loading available fonts from fontconfig...");
     let fc = Fontconfig::new().context("Failed to initialize fontconfig")?;
     let pattern = Pattern::new(&fc);
     let font_set = fontconfig::list_fonts(&pattern, None);
@@ -92,7 +92,7 @@ pub fn list_fonts() -> Result<Vec<String>> {
         fonts.insert(font_name);
     }
 
-    info!(
+    debug!(
         count = fonts.len(),
         "Discovered individual fonts via fontconfig"
     );

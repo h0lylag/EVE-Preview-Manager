@@ -19,7 +19,7 @@ pub enum DaemonMessage {
         message: String,
     },
     /// New character window detected
-    CharacterDetected(String),
+    CharacterDetected { name: String, is_custom: bool },
     /// Character thumbnail position changed (dragged)
     PositionChanged {
         name: String,

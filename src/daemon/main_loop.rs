@@ -55,7 +55,7 @@ fn initialize_x11() -> Result<(
         .context("Failed to connect to X11 server. Is DISPLAY set correctly?")?;
 
     let screen = &conn.setup().roots[screen_num];
-    info!(
+    debug!(
         screen = screen_num,
         width = screen.width_in_pixels,
         height = screen.height_in_pixels,
@@ -82,7 +82,7 @@ fn initialize_x11() -> Result<(
     // Pre-cache picture formats
     let formats = crate::x11::CachedFormats::new(&conn, screen)
         .context("Failed to cache picture formats at startup")?;
-    info!("Picture formats cached");
+    debug!("Picture formats cached");
 
     // Note: Font renderer initialization is deferred until after config load
     // as it depends on user-configured font settings.
@@ -103,10 +103,10 @@ fn initialize_state(
     // let daemon_config =
     //    DaemonConfig::load_with_screen(screen.width_in_pixels, screen.height_in_pixels);
     let config = daemon_config.build_display_config();
-    info!("Loaded display configuration");
+    debug!("Loaded display configuration");
 
     let session_state = SessionState::new();
-    info!(
+    debug!(
         count = daemon_config.character_thumbnails.len(),
         "Loaded character positions from config"
     );
@@ -145,7 +145,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
             .push(char_name.clone());
     }
 
-    info!(
+    debug!(
         unique_hotkeys = hotkey_groups.len(),
         cycle_groups = daemon_config.profile.cycle_groups.len(),
         "Built per-character hotkey groups"
@@ -204,7 +204,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
 
         match daemon_config.profile.hotkey_backend {
             HotkeyBackendType::X11 => {
-                info!("Using X11 hotkey backend (secure, no permissions required)");
+                debug!("Using X11 hotkey backend");
                 match crate::input::x11_backend::X11Backend::spawn(
                     hotkey_tx,
                     hotkey_config,
@@ -213,7 +213,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
                     allowed_windows.clone(),
                 ) {
                     Ok(handle) => {
-                        info!(
+                        debug!(
                             enabled = true,
                             backend = "x11",
                             has_cycle_keys = has_cycle_keys,
@@ -245,7 +245,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
                         allowed_windows.clone(),
                     ) {
                         Ok(handle) => {
-                            info!(
+                            debug!(
                                 enabled = true,
                                 backend = "evdev",
                                 has_cycle_keys = has_cycle_keys,
@@ -294,7 +294,7 @@ async fn run_event_loop(
     status_tx: IpcSender<DaemonMessage>,
     allowed_windows: AllowedWindows,
 ) -> Result<()> {
-    info!("Daemon running (async)");
+    debug!("Daemon running (async)");
 
     // Wrap IPC receiver in something async-friendly?
     // IpcReceiver is blocking. IPC-channel doesn't support async recv out of the box in a way that integrates with tokio::select! easily without a bridge.
@@ -483,7 +483,7 @@ async fn run_event_loop(
                 };
 
                 if should_process {
-                    info!(command = ?command, "Received hotkey command");
+                    debug!(command = ?command, "Received hotkey command");
 
                     // Debug: log the actual binding details for per-character hotkeys
                     if let CycleCommand::CharacterHotkey(ref binding) = command {
@@ -570,7 +570,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     let screen = &conn.setup().roots[_screen_num];
 
     // 2. Setup IPC and get initial config
-    info!("Connecting to IPC server: {}", ipc_server_name);
+    debug!("Connecting to IPC server: {}", ipc_server_name);
     let bootstrap_sender: IpcSender<BootstrapMessage> =
         IpcSender::connect(ipc_server_name).context("Failed to connect to IPC server")?;
 
@@ -584,12 +584,12 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         .send((config_tx, status_rx))
         .context("Failed to send bootstrap message")?;
 
-    info!("Waiting for initial configuration...");
+    debug!("Waiting for initial configuration...");
     let initial_config = match config_rx.recv() {
         Ok(ConfigMessage::Update(config)) => config,
         Err(e) => return Err(anyhow::anyhow!("Failed to receive initial config: {}", e)),
     };
-    info!("Received initial configuration");
+    debug!("Received initial configuration");
 
     // 3. Initialize State from Config
     let (mut daemon_config, config, mut session_state, mut cycle_state) =
@@ -600,7 +600,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     let sigusr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
         .context("Failed to register SIGUSR1 handler")?;
 
-    info!("Registered SIGUSR1 handler for manual position save");
+    debug!("Registered SIGUSR1 handler for manual position save");
 
     // 4. Setup Hotkeys
     let allowed_windows = Arc::new(RwLock::new(HashSet::new()));

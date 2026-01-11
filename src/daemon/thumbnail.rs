@@ -4,7 +4,7 @@
 //! High-level logic that delegates rendering to `renderer::ThumbnailRenderer`.
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{debug, info};
 use x11rb::protocol::damage::Damage;
 use x11rb::protocol::xproto::{ConnectionExt, Window};
 
@@ -102,7 +102,7 @@ impl<'a> Thumbnail<'a> {
                 src_geom.y + positioning::DEFAULT_SPAWN_OFFSET,
             )
         });
-        info!(
+        debug!(
             character = %character_name,
             x = x,
             y = y,

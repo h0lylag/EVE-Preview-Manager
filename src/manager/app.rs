@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use eframe::{NativeOptions, egui};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[cfg(target_os = "linux")]
 use ksni::TrayMethods;
@@ -40,7 +40,7 @@ struct ManagerApp {
 
 impl ManagerApp {
     fn new(cc: &eframe::CreationContext<'_>, config: Config, debug_mode: bool) -> Self {
-        info!("Initializing Manager (debug_mode={})", debug_mode);
+        debug!("Initializing Manager (debug_mode={})", debug_mode);
 
         // Run auto-backup if enabled
         if config.global.backup_enabled {
@@ -112,7 +112,7 @@ impl ManagerApp {
 
                 match result {
                     Ok(handle) => {
-                        info!("Tray icon created via ksni/D-Bus");
+                        debug!("Tray icon created via ksni/D-Bus");
                         // Event loop for tray management
                         // We use select! to handle both shutdown and update requests
                         loop {
@@ -396,7 +396,7 @@ pub fn run_manager(debug_mode: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     let icon = match load_window_icon() {
         Ok(icon_data) => {
-            info!(
+            debug!(
                 "Loaded application icon ({} bytes, {}x{})",
                 icon_data.rgba.len(),
                 icon_data.width,

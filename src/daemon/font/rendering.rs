@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use fontdue::{Font, FontSettings};
 use std::fs;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt as XprotoExt, Font as X11Font};
 
@@ -28,7 +28,7 @@ pub enum FontRenderer {
 impl FontRenderer {
     /// Load a TrueType font from a file path
     pub fn from_path(path: PathBuf, size: f32) -> Result<Self> {
-        info!(path = %path.display(), size = size, "Attempting to load font from path");
+        debug!(path = %path.display(), size = size, "Attempting to load font from path");
 
         let font_data = fs::read(&path).with_context(|| {
             format!(
@@ -44,13 +44,13 @@ impl FontRenderer {
                 e
             ))?;
 
-        info!(path = %path.display(), "Successfully loaded font from path");
+        debug!(path = %path.display(), "Successfully loaded font from path");
         Ok(Self::Fontdue { font, size })
     }
 
     /// Load font from a font name via fontconfig
     pub fn from_font_name(font_name: &str, size: f32) -> Result<Self> {
-        info!(font_name = %font_name, size = size, "Resolving font via fontconfig");
+        debug!(font_name = %font_name, size = size, "Resolving font via fontconfig");
 
         let font_path = find_font_path(font_name).with_context(|| {
             format!(
@@ -60,7 +60,7 @@ impl FontRenderer {
             )
         })?;
 
-        info!(font_name = %font_name, resolved_path = %font_path.display(), "Resolved font name to path via fontconfig");
+        debug!(font_name = %font_name, resolved_path = %font_path.display(), "Resolved font name to path via fontconfig");
 
         let path_display = font_path.display().to_string();
         Self::from_path(font_path, size).with_context(|| {
@@ -74,11 +74,11 @@ impl FontRenderer {
 
     /// Try to load best available system font with automatic X11 fallback
     pub fn from_system_font<C: Connection>(conn: &C, size: f32) -> Result<Self> {
-        info!(size = size, "Loading default system font");
+        debug!(size = size, "Loading default system font");
 
         match select_best_default_font() {
             Ok((name, path)) => {
-                info!(font = %name, "Using TrueType font via fontdue");
+                debug!(font = %name, "Using TrueType font via fontdue");
                 Self::from_path(path, size)
             }
             Err(e) => {
@@ -103,7 +103,7 @@ impl FontRenderer {
         font_size: f32,
     ) -> Result<Self> {
         if !font_name.is_empty() {
-            info!(
+            debug!(
                 configured_font = %font_name,
                 size = font_size,
                 "Attempting to load user-configured font"
@@ -117,7 +117,7 @@ impl FontRenderer {
                 Self::from_system_font(conn, font_size)
             })
         } else {
-            info!(size = font_size, "No font configured, using system default");
+            debug!(size = font_size, "No font configured, using system default");
             Self::from_system_font(conn, font_size)
         }
         .context(format!(

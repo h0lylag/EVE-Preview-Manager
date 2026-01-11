@@ -3,7 +3,7 @@
 //! Handles low-level X11 window creation, rendering, and resource management.
 
 use anyhow::{Context, Result};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use x11rb::connection::Connection;
 use x11rb::protocol::damage::{
     ConnectionExt as DamageExt, Damage, ReportLevel as DamageReportLevel,
@@ -176,7 +176,7 @@ impl<'a> ThumbnailRenderer<'a> {
                 "Failed to map thumbnail window for '{}'",
                 character_name
             ))?;
-        info!(
+        debug!(
             window = window,
             character = %character_name,
             "Mapped thumbnail window"
@@ -200,7 +200,7 @@ impl<'a> ThumbnailRenderer<'a> {
         } else {
             // Default to RGB (usually 24-bit)
             // If it's not 32 or root depth, this might still be wrong, but it covers standard cases.
-            info!(character = %character_name, depth = src_depth, format = "RGB24", "Using RGB format for source window");
+            debug!(character = %character_name, depth = src_depth, format = "RGB24", "Using RGB format for source window");
             ctx.formats.rgb
         };
 
@@ -662,7 +662,7 @@ impl<'a> ThumbnailRenderer<'a> {
             window = self.window,
             character = %character_name,
             timestamp = timestamp,
-            "Focused window"
+            "Activating window via click"
         );
         Ok(())
     }

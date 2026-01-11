@@ -3,7 +3,7 @@ use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::common::constants::manager_ui::*;
 use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
@@ -117,7 +117,7 @@ impl SharedState {
                 error!(error = %e, "Failed to send config update to daemon");
                 return Err(anyhow::anyhow!("Failed to send config to daemon: {}", e));
             } else {
-                info!("Sent config update to daemon");
+                debug!("Sent config update to daemon");
             }
         }
         Ok(())
