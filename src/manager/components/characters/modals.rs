@@ -68,12 +68,16 @@ pub fn render_add_characters_modal(
                             let is_custom_source =
                                 profile.custom_windows.iter().any(|r| r.alias == name);
 
-                            let label_text = if already_in_cycle {
-                                format!("{} (already in this group)", name)
-                            } else if is_custom_source {
-                                format!("{} [Source]", name)
+                            let display_name = if is_custom_source {
+                                format!("[Source] {}", name)
                             } else {
                                 name.clone()
+                            };
+
+                            let label_text = if already_in_cycle {
+                                format!("{} (already in this group)", display_name)
+                            } else {
+                                display_name
                             };
 
                             ui.checkbox(selected, label_text);
