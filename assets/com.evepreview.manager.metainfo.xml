@@ -53,7 +53,7 @@
   <releases>
     <release version="1.6.0" date="2026-01-12">
       <description>
-        <p>New Features:</p>
+        <p>New:</p>
         <ul>
           <li>Automated Backups: EPM now automatically backs up your config. Backups are compressed (1-2Kb each) to keep storage impact minimal. Automatically prunes the oldest files. Manual backups are preserved indefinitely.</li>
           <li>Custom Source Settings: Integrated sources into cycle groups, added per-source hotkeys, and per-source visual overrides.</li>
