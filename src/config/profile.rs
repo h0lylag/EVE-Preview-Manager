@@ -16,8 +16,9 @@ use crate::common::types::CharacterSettings;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CycleGroup {
     pub name: String,
-    #[serde(default, rename = "characters", alias = "slots", deserialize_with = "deserialize_slots")]
-    pub slots: Vec<CycleSlot>, // Renamed from characters, supports both for compat
+    // Rename to "cycle_list" for JSON, but accept "characters" (legacy) and "slots" (intermediate) for compat
+    #[serde(default, rename = "cycle_list", alias = "characters", alias = "slots", deserialize_with = "deserialize_slots")]
+    pub cycle_list: Vec<CycleSlot>,
     pub hotkey_forward: Option<crate::config::HotkeyBinding>,
     pub hotkey_backward: Option<crate::config::HotkeyBinding>,
 }
@@ -34,7 +35,7 @@ impl CycleGroup {
     pub fn default_group() -> Self {
         Self {
             name: "Default".to_string(),
-            slots: Vec::new(),
+            cycle_list: Vec::new(),
             hotkey_forward: None,
             hotkey_backward: None,
         }

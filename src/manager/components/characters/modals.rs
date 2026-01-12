@@ -65,7 +65,7 @@ pub fn render_add_characters_modal(
                             let current_group =
                                 &profile.cycle_groups[state.selected_cycle_group_index];
                                 
-                            let already_in_cycle = current_group.slots.iter().any(|s| match s {
+                            let already_in_cycle = current_group.cycle_list.iter().any(|s| match s {
                                      crate::config::profile::CycleSlot::Eve(n) => n == &name,
                                      crate::config::profile::CycleSlot::Source(n) => n == &name,
                             });
@@ -101,7 +101,7 @@ pub fn render_add_characters_modal(
                     for (name, selected) in &state.character_selections {
                         if *selected {
                              // Check if already in group (sloppy check against string value inside slot)
-                             let already_exists = current_group.slots.iter().any(|s| match s {
+                             let already_exists = current_group.cycle_list.iter().any(|s| match s {
                                  crate::config::profile::CycleSlot::Eve(n) => n == name,
                                  crate::config::profile::CycleSlot::Source(n) => n == name,
                              });
@@ -113,7 +113,7 @@ pub fn render_add_characters_modal(
                                  } else {
                                      crate::config::profile::CycleSlot::Eve(name.clone())
                                  };
-                                 current_group.slots.push(slot);
+                                 current_group.cycle_list.push(slot);
                                  added_any = true;
                              }
                         }

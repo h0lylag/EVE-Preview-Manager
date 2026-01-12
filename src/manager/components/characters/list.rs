@@ -230,7 +230,7 @@ pub fn render_cycle_group_column(
             let (_, dropped_payload) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
                 ui.set_min_height(100.0);
 
-                for (row_idx, slot) in current_group.slots.iter().enumerate() {
+                for (row_idx, slot) in current_group.cycle_list.iter().enumerate() {
                     let item_id = egui::Id::new("cycle_group_item").with(row_idx);
 
                     let response = ui
@@ -297,12 +297,12 @@ pub fn render_cycle_group_column(
 
             if let Some(dragged_payload) = dropped_payload {
                 from_idx = Some(*dragged_payload);
-                to_idx = Some(current_group.slots.len());
+                to_idx = Some(current_group.cycle_list.len());
                 *changed = true;
             }
 
             if let Some(idx) = to_delete {
-                current_group.slots.remove(idx);
+                current_group.cycle_list.remove(idx);
             }
 
             if let (Some(from), Some(mut to)) = (from_idx, to_idx) {
@@ -310,13 +310,13 @@ pub fn render_cycle_group_column(
                     to -= 1;
                 }
                 if from != to {
-                    let item = current_group.slots.remove(from);
-                    let insert_idx = to.min(current_group.slots.len());
-                    current_group.slots.insert(insert_idx, item);
+                    let item = current_group.cycle_list.remove(from);
+                    let insert_idx = to.min(current_group.cycle_list.len());
+                    current_group.cycle_list.insert(insert_idx, item);
                 }
             }
 
-            if current_group.slots.is_empty() {
+            if current_group.cycle_list.is_empty() {
                 ui.label(egui::RichText::new("No characters in this group.").weak());
             }
         });

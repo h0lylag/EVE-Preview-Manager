@@ -108,10 +108,16 @@ impl From<ProfileHelper> for Profile {
         {
             cycle_groups.push(CycleGroup {
                 name: "Default".to_string(),
-                slots: helper
+                cycle_list: helper
                     .hotkey_cycle_group
                     .into_iter()
-                    .map(crate::config::profile::CycleSlot::Eve)
+                    .map(|name| {
+                        if helper.custom_windows.iter().any(|w| w.alias == name) {
+                            crate::config::profile::CycleSlot::Source(name)
+                        } else {
+                            crate::config::profile::CycleSlot::Eve(name)
+                        }
+                    })
                     .collect(),
                 hotkey_forward: helper.hotkey_cycle_forward,
                 hotkey_backward: helper.hotkey_cycle_backward,
@@ -143,6 +149,18 @@ impl From<ProfileHelper> for Profile {
         for key in keys_to_move {
             if let Some(val) = character_thumbnails.remove(&key) {
                 custom_source_thumbnails.insert(key, val);
+            }
+        }
+
+        // Fixup: Go through all cycle groups and ensure any entry matching a custom window is Source
+        let custom_aliases_set = custom_aliases; // move ownership
+        for group in &mut cycle_groups {
+            for slot in &mut group.cycle_list {
+                 if let crate::config::profile::CycleSlot::Eve(name) = slot {
+                     if custom_aliases_set.contains(name) {
+                         *slot = crate::config::profile::CycleSlot::Source(name.clone());
+                     }
+                 }
             }
         }
 
@@ -271,7 +289,7 @@ impl<'de> Deserialize<'de> for Profile {
             #[derive(Deserialize)]
             pub struct CycleGroupBinary {
                 pub name: String,
-                pub slots: Vec<CycleSlotBinary>,
+                pub cycle_list: Vec<CycleSlotBinary>,
                 pub hotkey_forward: Option<crate::config::HotkeyBinding>,
                 pub hotkey_backward: Option<crate::config::HotkeyBinding>,
             }
@@ -287,7 +305,7 @@ impl<'de> Deserialize<'de> for Profile {
             // Convert binary cycle groups to standard CycleGroup
             let cycle_groups: Vec<CycleGroup> = p.cycle_groups.into_iter().map(|g| CycleGroup {
                 name: g.name,
-                slots: g.slots.into_iter().map(|s| match s {
+                cycle_list: g.cycle_list.into_iter().map(|s| match s {
                     CycleSlotBinary::Eve(n) => crate::config::profile::CycleSlot::Eve(n),
                     CycleSlotBinary::Source(n) => crate::config::profile::CycleSlot::Source(n),
                 }).collect(),

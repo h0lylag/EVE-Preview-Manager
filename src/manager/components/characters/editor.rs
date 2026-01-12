@@ -187,7 +187,7 @@ pub fn render_character_editor_column(
                 profile.character_thumbnails.remove(&char_to_delete);
                 profile.character_hotkeys.remove(&char_to_delete);
                 for group in &mut profile.cycle_groups {
-                    group.slots.retain(|slot| match slot {
+                    group.cycle_list.retain(|slot| match slot {
                         crate::config::profile::CycleSlot::Eve(name) => name != &char_to_delete,
                         crate::config::profile::CycleSlot::Source(name) => name != &char_to_delete,
                     });

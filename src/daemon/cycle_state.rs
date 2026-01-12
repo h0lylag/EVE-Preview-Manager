@@ -39,7 +39,7 @@ impl CycleState {
                 group.name,
                 GroupState {
                     order: group
-                        .slots
+                        .cycle_list
                         .iter()
                         .map(|slot| match slot {
                             crate::config::profile::CycleSlot::Eve(name) => name.clone(),
