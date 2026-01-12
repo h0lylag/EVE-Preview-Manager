@@ -160,15 +160,58 @@ pub fn process_detected_window(
 
                 ctx.eve_clients.insert(window, thumbnail);
 
-                if let Some(thumb) = ctx.eve_clients.get_mut(&window)
-                    && let Err(e) = thumb.border(
-                        ctx.display_config,
-                        false,
-                        ctx.cycle_state.is_skipped(&thumb.character_name),
-                        ctx.font_renderer,
-                    )
-                {
-                    tracing::warn!(window = window, error = %e, "Failed to draw initial border for new window");
+                // Check if this newly detected/mapped window is actually the focused window
+                // This handles cases like unminimizing where MapNotify might race with FocusIn,
+                // or where we overwrote the focused state by re-inserting the thumbnail.
+                let is_actually_focused = crate::x11::get_active_window(
+                    ctx.app_ctx.conn,
+                    ctx.app_ctx.screen,
+                    ctx.app_ctx.atoms,
+                )
+                .unwrap_or(None)
+                .map(|active| active == window)
+                .unwrap_or(false);
+
+                if is_actually_focused {
+                    // Update this window to focused
+                    if let Some(thumb) = ctx.eve_clients.get_mut(&window) {
+                        thumb.state = crate::common::types::ThumbnailState::Normal { focused: true };
+                        if let Err(e) = thumb.border(
+                            ctx.display_config,
+                            true,
+                            ctx.cycle_state.is_skipped(&thumb.character_name),
+                            ctx.font_renderer,
+                        ) {
+                            tracing::warn!(window = window, error = %e, "Failed to draw active border for restored window");
+                        }
+                    }
+
+                    // Unfocus all others
+                    for (w, thumb) in ctx.eve_clients.iter_mut() {
+                        if *w != window && thumb.state.is_focused() {
+                            thumb.state = crate::common::types::ThumbnailState::Normal { focused: false };
+                             if let Err(e) = thumb.border(
+                                ctx.display_config,
+                                false,
+                                ctx.cycle_state.is_skipped(&thumb.character_name),
+                                ctx.font_renderer,
+                            ) {
+                                tracing::warn!(window = *w, error = %e, "Failed to clear border for previous window");
+                            }
+                        }
+                    }
+                } else {
+                    // Not focused, just draw inactive border
+                    if let Some(thumb) = ctx.eve_clients.get_mut(&window)
+                        && let Err(e) = thumb.border(
+                            ctx.display_config,
+                            false,
+                            ctx.cycle_state.is_skipped(&thumb.character_name),
+                            ctx.font_renderer,
+                        )
+                    {
+                        tracing::warn!(window = window, error = %e, "Failed to draw initial border for new window");
+                    }
                 }
             }
             Ok(None) => {}
