@@ -233,6 +233,9 @@ pub struct Profile {
     /// Require EVE window focused for hotkeys to work
     pub hotkey_require_eve_focus: bool,
 
+    /// Reset cycle index to the beginning when switching between cycle groups
+    pub hotkey_cycle_reset_index: bool,
+
     /// Hotkey to switch to this profile (global)
     pub hotkey_profile_switch: Option<crate::config::HotkeyBinding>,
 
@@ -376,6 +379,7 @@ fn default_profiles() -> Vec<Profile> {
         hotkey_logged_out_cycle: false, // Default: off
         hotkey_require_eve_focus:
             crate::common::constants::defaults::behavior::HOTKEY_REQUIRE_EVE_FOCUS,
+        hotkey_cycle_reset_index: false,
         hotkey_profile_switch: None,
         hotkey_toggle_skip: None,     // User must configure
         hotkey_toggle_previews: None, // User must configure

@@ -67,6 +67,8 @@ struct ProfileHelper {
     #[serde(default)]
     hotkey_require_eve_focus: bool,
     #[serde(default)]
+    hotkey_cycle_reset_index: bool,
+    #[serde(default)]
     hotkey_profile_switch: Option<crate::config::HotkeyBinding>,
     #[serde(default)]
     hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
@@ -192,6 +194,7 @@ impl From<ProfileHelper> for Profile {
             hotkey_input_device: helper.hotkey_input_device,
             hotkey_logged_out_cycle: helper.hotkey_logged_out_cycle,
             hotkey_require_eve_focus: helper.hotkey_require_eve_focus,
+            hotkey_cycle_reset_index: helper.hotkey_cycle_reset_index,
             hotkey_profile_switch: helper.hotkey_profile_switch,
             hotkey_toggle_skip: helper.hotkey_toggle_skip,
             hotkey_toggle_previews: helper.hotkey_toggle_previews,
@@ -271,6 +274,8 @@ impl<'de> Deserialize<'de> for Profile {
                 #[serde(default)]
                 pub hotkey_require_eve_focus: bool,
                 #[serde(default)]
+                pub hotkey_cycle_reset_index: bool,
+                #[serde(default)]
                 pub hotkey_profile_switch: Option<crate::config::HotkeyBinding>,
                 #[serde(default)]
                 pub hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
@@ -342,6 +347,7 @@ impl<'de> Deserialize<'de> for Profile {
                 cycle_groups,
                 hotkey_logged_out_cycle: p.hotkey_logged_out_cycle,
                 hotkey_require_eve_focus: p.hotkey_require_eve_focus,
+                hotkey_cycle_reset_index: p.hotkey_cycle_reset_index,
                 hotkey_profile_switch: p.hotkey_profile_switch,
                 hotkey_toggle_skip: p.hotkey_toggle_skip,
                 hotkey_toggle_previews: p.hotkey_toggle_previews,

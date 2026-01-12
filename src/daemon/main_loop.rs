@@ -735,11 +735,11 @@ fn handle_cycle_command(
     match command {
         CycleCommand::Forward(group) => resources
             .cycle
-            .cycle_forward(group, logged_out_map)
+            .cycle_forward(group, logged_out_map, resources.config.profile.hotkey_cycle_reset_index)
             .map(|(w, s)| (w, s.to_string())),
         CycleCommand::Backward(group) => resources
             .cycle
-            .cycle_backward(group, logged_out_map)
+            .cycle_backward(group, logged_out_map, resources.config.profile.hotkey_cycle_reset_index)
             .map(|(w, s)| (w, s.to_string())),
         CycleCommand::CharacterHotkey(binding) => {
             debug!(

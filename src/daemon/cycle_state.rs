@@ -29,6 +29,9 @@ pub struct CycleState {
 
     /// Characters temporarily skipped from cycling
     skipped_characters: HashSet<String>,
+
+    /// The name of the cycle group that was last active (used for reset logic)
+    last_active_group: Option<String>,
 }
 
 impl CycleState {
@@ -56,6 +59,7 @@ impl CycleState {
             current_window: None,
             active_windows: HashMap::new(),
             skipped_characters: HashSet::new(),
+            last_active_group: None,
         }
     }
 
@@ -135,9 +139,19 @@ impl CycleState {
         &mut self,
         group_name: &str,
         logged_out_map: Option<&HashMap<Window, String>>,
+        reset_on_switch: bool,
     ) -> Option<(Window, String)> {
         match self.groups.get_mut(group_name) {
             Some(group_state) => {
+                // Reset index logic
+                if reset_on_switch {
+                    let group_changed = self.last_active_group.as_deref() != Some(group_name);
+                    if group_changed {
+                        debug!(group = group_name, "Switched to new cycle group with reset enabled - resetting index to prev");
+                        group_state.current_index = group_state.order.len().saturating_sub(1); // Set to end so next increment moves to 0
+                    }
+                }
+                self.last_active_group = Some(group_name.to_string());
                 if self.active_windows.is_empty() && logged_out_map.is_none() {
                     warn!(
                         active_windows = self.active_windows.len(),
@@ -207,9 +221,19 @@ impl CycleState {
         &mut self,
         group_name: &str,
         logged_out_map: Option<&HashMap<Window, String>>,
+        reset_on_switch: bool,
     ) -> Option<(Window, String)> {
         match self.groups.get_mut(group_name) {
             Some(group_state) => {
+                // Reset index logic
+                if reset_on_switch {
+                    let group_changed = self.last_active_group.as_deref() != Some(group_name);
+                    if group_changed {
+                        debug!(group = group_name, "Switched to new cycle group with reset enabled - resetting index to 0");
+                        group_state.current_index = 0; // Set to 0 so next decrement moves to len-1 (conceptually "backward from 0" means "last item")
+                    }
+                }
+                self.last_active_group = Some(group_name.to_string());
                 if self.active_windows.is_empty() && logged_out_map.is_none() {
                     return None;
                 }

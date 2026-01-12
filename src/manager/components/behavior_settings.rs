@@ -143,6 +143,21 @@ pub fn ui(
 
             ui.add_space(ITEM_SPACING);
 
+            // Cycle Group Reset Behavior
+            if ui.checkbox(
+                &mut profile.hotkey_cycle_reset_index,
+                "Reset cycle order when switching groups"
+            ).changed() {
+                action = BehaviorSettingsAction::SettingsChanged;
+            }
+
+            ui.label(egui::RichText::new(
+                "When enabled, cycling through separate groups always starts at the first character")
+                .small()
+                .weak());
+
+            ui.add_space(ITEM_SPACING);
+
             // Preserve thumbnail position on character swap
             if ui.checkbox(&mut profile.thumbnail_preserve_position_on_swap,
                 "New characters inherit thumbnail position").changed() {
