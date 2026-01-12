@@ -570,23 +570,38 @@ mod tests {
         // Wait, cycle_forward logic: current_index = (current_index + 1) % len.
         // Initial current_index is 0.
         // 1. cycle_forward -> index 1 ("B"). Returns B.
-        assert_eq!(state.cycle_forward("G1", None, false), Some((200, "B".to_string())));
+        assert_eq!(
+            state.cycle_forward("G1", None, false),
+            Some((200, "B".to_string()))
+        );
         // Current index is 1.
 
         // Cycle G2: Start (0->D), Forward (1->E).
         // Switch to G2.
-        assert_eq!(state.cycle_forward("G2", None, false), Some((500, "E".to_string())));
-        
+        assert_eq!(
+            state.cycle_forward("G2", None, false),
+            Some((500, "E".to_string()))
+        );
+
         // Switch back to G1 with reset=false. Should resume at next index (2->C).
-        assert_eq!(state.cycle_forward("G1", None, false), Some((300, "C".to_string())));
-        
+        assert_eq!(
+            state.cycle_forward("G1", None, false),
+            Some((300, "C".to_string()))
+        );
+
         // Switch to G2 again.
-        assert_eq!(state.cycle_forward("G2", None, false), Some((400, "D".to_string())));
-        
+        assert_eq!(
+            state.cycle_forward("G2", None, false),
+            Some((400, "D".to_string()))
+        );
+
         // Switch back to G1 with reset=true. Should reset to 0 ("A")?
         // Logic: if reset, set current_index = len - 1.
         // Then cycle_forward increments -> 0.
         // So it should return index 0 ("A").
-        assert_eq!(state.cycle_forward("G1", None, true), Some((100, "A".to_string())));
+        assert_eq!(
+            state.cycle_forward("G1", None, true),
+            Some((100, "A".to_string()))
+        );
     }
 }
