@@ -44,7 +44,7 @@ pub struct Thumbnail<'a> {
 
     // === Geometry (public, immutable after creation) ===
     pub dimensions: Dimensions,
-    pub src_dimensions: Dimensions,
+
     pub current_position: Position, // Cached position for hit testing
 
     // === Backend ===
@@ -123,16 +123,6 @@ impl<'a> Thumbnail<'a> {
             dimensions,
         )?;
 
-        // Initialize source dimensions
-        let geom = ctx
-            .conn
-            .get_geometry(src)
-            .context("Failed to get initial source geometry")?
-            .reply()
-            .context("Failed to receive initial source geometry reply")?;
-
-        let src_dimensions = Dimensions::new(geom.width, geom.height);
-
         Ok(Self {
             character_name,
             state: ThumbnailState::default(),
@@ -141,7 +131,6 @@ impl<'a> Thumbnail<'a> {
             preview_mode,
             dimensions,
             current_position: Position::new(x, y),
-            src_dimensions,
             renderer,
         })
     }
@@ -212,8 +201,15 @@ impl<'a> Thumbnail<'a> {
     }
 
     /// Update the cached source dimensions (e.g. on ConfigureNotify)
-    pub fn update_source_dimensions(&mut self, width: u16, height: u16) {
-        self.src_dimensions = Dimensions { width, height };
+    ///
+    /// # NOTE
+    /// This is currently a **no-op**. We intentionally do NOT cache dimensions here.
+    /// Relying on `ConfigureNotify` for dimensions introduced race conditions with Steam/Xwayland
+    /// windows, where the event loop would see valid dimensions but the server would see 1x1.
+    ///
+    /// Geometry is now queried freshly in `renderer::capture()`.
+    pub fn update_source_dimensions(&mut self, _width: u16, _height: u16) {
+        // No-op
     }
 
     /// Moves the thumbnail to a new position updates the cached state.
@@ -278,7 +274,6 @@ impl<'a> Thumbnail<'a> {
                 display_config,
                 &self.character_name,
                 self.dimensions,
-                self.src_dimensions,
                 font_renderer,
             )?;
         }
@@ -301,17 +296,13 @@ impl<'a> Thumbnail<'a> {
                     display_config,
                     &self.character_name,
                     self.dimensions,
-                    self.src_dimensions,
                     font_renderer,
                 )?;
             }
             _ => match &self.preview_mode {
                 crate::common::types::PreviewMode::Live => {
-                    self.renderer.update(
-                        &self.character_name,
-                        self.dimensions,
-                        self.src_dimensions,
-                    )?;
+                    self.renderer
+                        .update(&self.character_name, self.dimensions)?;
                 }
                 crate::common::types::PreviewMode::Static { color } => {
                     // ... color parsing ...

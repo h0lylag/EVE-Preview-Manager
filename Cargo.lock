@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "eve-preview-manager"
-version = "1.6.0"
+version = "1.6.1-hotfix.1"
 dependencies = [
  "anyhow",
  "chrono",

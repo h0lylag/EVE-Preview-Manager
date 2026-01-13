@@ -415,36 +415,64 @@ impl<'a> ThumbnailRenderer<'a> {
     ///
     /// # Errors
     /// Returns an error if X11 composite operations fail.
-    pub fn capture(
-        &self,
-        character_name: &str,
-        dimensions: Dimensions,
-        src_dimensions: Dimensions,
-    ) -> Result<()> {
+    /// Captures the current content of the source window and composites it into the thumbnail.
+    ///
+    /// This applies the necessary scaling transform to fit the source content into the thumbnail dimensions.
+    ///
+    /// # Errors
+    /// Returns an error if X11 composite operations fail.
+    pub fn capture(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
+        // Query attributes to check map state
+        let attr_cookie = self.conn.get_window_attributes(self.src)?;
+        let attrs = attr_cookie.reply()?;
+
+        // SAFETY: Check map state to prevent crashing KWin/Xwayland.
+        // Attempting to composite from an unmapped window (even with valid size)
+        // triggers a "Double free or corruption" crash in glamor/Xwayland.
+        if attrs.map_state != MapState::VIEWABLE {
+            // Debug logging for capture issues
+            tracing::trace!(
+                character = character_name,
+                src_window = self.src,
+                "Skipping capture of unmapped window"
+            );
+            return Ok(()); // Skip capture to prevent crash
+        }
+
+        // NOTE: Query geometry fresh every frame.
+        // Do NOT rely on cached dimensions (e.g., from ConfigureNotify).
+        // Steam/Proton windows race between events and actual state, leading to
+        // invalid reads if we trust the cache. Always ask the server.
+        // Query source window geometry fresh
+        let geom_cookie = self.conn.get_geometry(self.src)?;
+        let geom = geom_cookie.reply()?;
+        let src_width = geom.width;
+        let src_height = geom.height;
+
         // Debug logging for capture issues
         tracing::trace!(
             character = character_name,
             src_window = self.src,
-            width = src_dimensions.width,
-            height = src_dimensions.height,
+            width = src_width,
+            height = src_height,
             "Capturing source window"
         );
 
         // Safety Check: Skip capture if window is effectively empty/unmapped to avoid X server crashes
         // A 1x1 window (like seen with Firefox initially) can crash X11 drivers when used in Render operations
-        if src_dimensions.width <= 1 || src_dimensions.height <= 1 {
+        if src_width <= 1 || src_height <= 1 {
             tracing::warn!(
                 character = character_name,
-                width = src_dimensions.width,
-                height = src_dimensions.height,
+                width = src_width,
+                height = src_height,
                 "Skipping capture of 1x1/empty window (likely not mapped yet)"
             );
             return Ok(());
         }
 
         let transform = Transform {
-            matrix11: to_fixed(src_dimensions.width as f32 / dimensions.width as f32),
-            matrix22: to_fixed(src_dimensions.height as f32 / dimensions.height as f32),
+            matrix11: to_fixed(src_width as f32 / dimensions.width as f32),
+            matrix22: to_fixed(src_height as f32 / dimensions.height as f32),
             matrix33: to_fixed(1.0),
             ..Default::default()
         };
@@ -531,16 +559,14 @@ impl<'a> ThumbnailRenderer<'a> {
         display_config: &DisplayConfig,
         character_name: &str,
         dimensions: Dimensions,
-        src_dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.overlay
             .draw_minimized(display_config, character_name, dimensions, font_renderer)?;
-        self.update(character_name, dimensions, src_dimensions)
-            .context(format!(
-                "Failed to update minimized display for '{}'",
-                character_name
-            ))?;
+        self.update(character_name, dimensions).context(format!(
+            "Failed to update minimized display for '{}'",
+            character_name
+        ))?;
         Ok(())
     }
 
@@ -601,17 +627,11 @@ impl<'a> ThumbnailRenderer<'a> {
     }
 
     /// Logic for full update cycle: capture source -> apply overlay.
-    pub fn update(
-        &self,
-        character_name: &str,
-        dimensions: Dimensions,
-        src_dimensions: Dimensions,
-    ) -> Result<()> {
-        self.capture(character_name, dimensions, src_dimensions)
-            .context(format!(
-                "Failed to capture source window for '{}'",
-                character_name
-            ))?;
+    pub fn update(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
+        self.capture(character_name, dimensions).context(format!(
+            "Failed to capture source window for '{}'",
+            character_name
+        ))?;
         self.overlay(character_name, dimensions)
             .context(format!("Failed to apply overlay for '{}'", character_name))?;
         Ok(())
@@ -635,13 +655,33 @@ impl<'a> ThumbnailRenderer<'a> {
     /// # Arguments
     /// * `timestamp` - X11 timestamp from the input event that triggered this action.
     pub fn focus(&self, character_name: &str, timestamp: u32) -> Result<()> {
+        // Explicitly raise the window to the front.
+        // Some clients (like RuneLite/Java) or Window Managers (especially under Xwayland)
+        // require an explicit StackMode::ABOVE request to actually bring the window
+        // to the foreground, even when _NET_ACTIVE_WINDOW is sent.
+        self.conn
+            .configure_window(
+                self.src,
+                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            )
+            .context(format!(
+                "Failed to raise window for '{}' to top of stack",
+                character_name
+            ))?;
+
         let ev = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
             sequence: 0,
             window: self.src,
             type_: self.atoms.net_active_window,
-            data: [2, timestamp, 0, 0, 0].into(),
+            data: ClientMessageData::from([
+                x11::ACTIVE_WINDOW_SOURCE_PAGER,
+                timestamp,
+                0,
+                0,
+                0,
+            ]),
         };
 
         self.conn

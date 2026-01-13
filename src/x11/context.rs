@@ -42,6 +42,8 @@ pub struct CachedAtoms {
     pub net_wm_window_type_notification: Atom,
     pub net_wm_window_type_combo: Atom,
     pub net_wm_window_type_dnd: Atom,
+    pub net_wm_name: Atom,
+    pub net_wm_visible_name: Atom,
 }
 
 impl CachedAtoms {
@@ -190,6 +192,18 @@ impl CachedAtoms {
                 .context("Failed to intern _NET_WM_WINDOW_TYPE_DND atom")?
                 .reply()
                 .context("Failed to get reply for _NET_WM_WINDOW_TYPE_DND atom")?
+                .atom,
+            net_wm_name: conn
+                .intern_atom(false, b"_NET_WM_NAME")
+                .context("Failed to intern _NET_WM_NAME atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_NAME atom")?
+                .atom,
+            net_wm_visible_name: conn
+                .intern_atom(false, b"_NET_WM_VISIBLE_NAME")
+                .context("Failed to intern _NET_WM_VISIBLE_NAME atom")?
+                .reply()
+                .context("Failed to get reply for _NET_WM_VISIBLE_NAME atom")?
                 .atom,
         })
     }

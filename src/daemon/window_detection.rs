@@ -53,10 +53,64 @@ pub fn identify_window(
         .flatten()
         .unwrap_or_default();
 
-    let wm_name = if let Ok(reply) = wm_name_cookie.reply() {
+    // Get WM_NAME (Legacy)
+    let wm_name_legacy = if let Ok(reply) = wm_name_cookie.reply() {
         String::from_utf8_lossy(&reply.value).to_string()
     } else {
         String::new()
+    };
+
+    // NOTE: Robust Title Fetching Strategy
+    // Steam/Proton games often set title properties inconsistently or use non-UTF8 encodings.
+    // To ensure reliable detection (especially at startup), we must check the full fallback chain:
+    // 1. WM_NAME (Legacy X11)
+    // 2. _NET_WM_NAME (Modern EWMH)
+    // 3. _NET_WM_VISIBLE_NAME (Fallback for some compositors/toolkits)
+    //
+    // SAFETY: We use AtomEnum::ANY to accept any property type (UTF8_STRING, STRING, COMPOUND_TEXT).
+    // Restricting to UTF8_STRING caused false negatives for valid windows.
+    let wm_name = if !wm_name_legacy.is_empty() {
+        wm_name_legacy.clone()
+    } else {
+        // Try _NET_WM_NAME (Any Type)
+        let net_name = if let Ok(cookie) = ctx.conn.get_property(
+            false,
+            window,
+            ctx.atoms.net_wm_name,
+            AtomEnum::ANY, // Accept any type (UTF8_STRING, STRING, COMPOUND_TEXT)
+            0,
+            1024,
+        ) {
+            cookie
+                .reply()
+                .ok()
+                .map(|r| String::from_utf8_lossy(&r.value).to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if !net_name.is_empty() {
+            net_name
+        } else {
+            // Try _NET_WM_VISIBLE_NAME (Any Type)
+            if let Ok(cookie) = ctx.conn.get_property(
+                false,
+                window,
+                ctx.atoms.net_wm_visible_name,
+                AtomEnum::ANY,
+                0,
+                1024,
+            ) {
+                cookie
+                    .reply()
+                    .ok()
+                    .map(|r| String::from_utf8_lossy(&r.value).to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        }
     };
 
     for rule in custom_rules {
@@ -217,6 +271,74 @@ pub fn check_and_create_window<'a>(
                 EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE | EventMask::STRUCTURE_NOTIFY,
             ),
         )?;
+
+        // Gather info for filtering and logging
+        let mut width = 0;
+        let mut height = 0;
+        if let Ok(cookie) = ctx.conn.get_geometry(window)
+            && let Ok(geom) = cookie.reply()
+        {
+            width = geom.width;
+            height = geom.height;
+        }
+
+        let mut title = String::new();
+        // Try WM_NAME (Legacy) first
+        if let Ok(cookie) =
+            ctx.conn
+                .get_property(false, window, ctx.atoms.wm_name, AtomEnum::STRING, 0, 1024)
+            && let Ok(reply) = cookie.reply()
+        {
+            title = String::from_utf8_lossy(&reply.value).to_string();
+        }
+
+        // Fallback 1: _NET_WM_NAME (Any Type)
+        if title.is_empty()
+            && let Some(reply) = ctx
+                .conn
+                .get_property(
+                    false,
+                    window,
+                    ctx.atoms.net_wm_name,
+                    AtomEnum::ANY, // Accept any type
+                    0,
+                    1024,
+                )
+                .ok()
+                .and_then(|c| c.reply().ok())
+        {
+            let val = String::from_utf8_lossy(&reply.value).to_string();
+            if !val.is_empty() {
+                title = val;
+            }
+        }
+
+        // Fallback 2: _NET_WM_VISIBLE_NAME (Any Type)
+        if title.is_empty()
+            && let Some(reply) = ctx
+                .conn
+                .get_property(
+                    false,
+                    window,
+                    ctx.atoms.net_wm_visible_name,
+                    AtomEnum::ANY, // Accept any type
+                    0,
+                    1024,
+                )
+                .ok()
+                .and_then(|c| c.reply().ok())
+        {
+            title = String::from_utf8_lossy(&reply.value).to_string();
+        }
+
+        debug!(
+            window = window,
+            alias = %identity.name,
+            width = width,
+            height = height,
+            title = %title,
+            "Inspecting custom source candidate checks"
+        );
     }
 
     if identity.rule.as_ref().is_some_and(|r| r.limit) {

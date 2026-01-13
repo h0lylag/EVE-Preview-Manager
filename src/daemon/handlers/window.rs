@@ -128,14 +128,22 @@ pub fn process_detected_window(
 
                                 // 2. Send synthetic Expose event to force the application to repaint
                                 // This fixes issues where apps wait for focus or interaction to paint their first frame
+                                let src_geom = ctx
+                                    .app_ctx
+                                    .conn
+                                    .get_geometry(window)
+                                    .context("Failed to get geometry for custom source expose")?
+                                    .reply()
+                                    .context("Failed to receive geometry reply")?;
+
                                 let expose = ExposeEvent {
                                     response_type: EXPOSE_EVENT,
                                     sequence: 0,
                                     window,
                                     x: 0,
                                     y: 0,
-                                    width: thumbnail.src_dimensions.width,
-                                    height: thumbnail.src_dimensions.height,
+                                    width: src_geom.width,
+                                    height: src_geom.height,
                                     count: 0,
                                 };
 
@@ -488,7 +496,10 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
 #[tracing::instrument(skip(ctx), fields(window = event.window))]
 pub fn handle_configure_notify(ctx: &mut EventContext, event: ConfigureNotifyEvent) -> Result<()> {
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&event.window) {
-        // Update cached source dimensions so the next capture uses the correct size
+        // NOTE: This call is effectively a no-op.
+        // We stopped caching source dimensions here to fix a race condition where
+        // the event loop sees valid dimensions but the X server sees 1x1/unmapped.
+        // Geometry is now queried freshly in `renderer::capture()`.
         thumbnail.update_source_dimensions(event.width, event.height);
 
         tracing::debug!(
