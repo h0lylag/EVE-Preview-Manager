@@ -45,6 +45,13 @@ pub fn activate_window(
         window
     ))?;
 
+    // Also explicitly set input focus to work around KWin focus stealing prevention
+    // RevertToParent ensures focus goes to parent if this window is destroyed
+    conn.set_input_focus(InputFocus::PARENT, window, timestamp)
+        .context(format!("Failed to set input focus for window {}", window))?;
+    
+    tracing::debug!(window = window, "SetInputFocus completed successfully");
+
     conn.flush()
         .context("Failed to flush X11 connection after window activation")?;
     Ok(())
@@ -106,5 +113,65 @@ pub fn minimize_window(
 
     conn.flush()
         .context("Failed to flush X11 connection after window minimize")?;
+    Ok(())
+}
+
+/// Requests the window manager to restore/unminimize a window using EWMH protocols
+pub fn unminimize_window(
+    conn: &RustConnection,
+    screen: &Screen,
+    atoms: &CachedAtoms,
+    window: Window,
+) -> Result<()> {
+    // Remove the _NET_WM_STATE_HIDDEN flag to unminimize
+    let event = ClientMessageEvent {
+        response_type: CLIENT_MESSAGE_EVENT,
+        format: 32,
+        sequence: 0,
+        window,
+        type_: atoms.net_wm_state,
+        data: ClientMessageData::from([
+            x11::NET_WM_STATE_REMOVE,
+            atoms.net_wm_state_hidden,
+            0,
+            x11::ACTIVE_WINDOW_SOURCE_PAGER,
+            0,
+        ]),
+    };
+
+    conn.send_event(
+        false,
+        screen.root,
+        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+        event,
+    )
+    .context(format!(
+        "Failed to send _NET_WM_STATE unminimize event for window {}",
+        window
+    ))?;
+
+    // Fallback for WMs that expect ICCCM-style deiconify (normal state) requests
+    let change_state_event = ClientMessageEvent {
+        response_type: CLIENT_MESSAGE_EVENT,
+        format: 32,
+        sequence: 0,
+        window,
+        type_: atoms.wm_change_state,
+        data: ClientMessageData::from([x11::NORMAL_STATE, 0, 0, 0, 0]),
+    };
+
+    conn.send_event(
+        false,
+        screen.root,
+        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+        change_state_event,
+    )
+    .context(format!(
+        "Failed to send WM_CHANGE_STATE normal state event for window {}",
+        window
+    ))?;
+
+    conn.flush()
+        .context("Failed to flush X11 connection after window unminimize")?;
     Ok(())
 }

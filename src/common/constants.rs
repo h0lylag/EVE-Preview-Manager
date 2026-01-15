@@ -20,6 +20,12 @@ pub mod x11 {
     /// _NET_WM_STATE action: add/set property (1)
     pub const NET_WM_STATE_ADD: u32 = 1;
 
+    /// _NET_WM_STATE action: remove property (0)
+    pub const NET_WM_STATE_REMOVE: u32 = 0;
+
+    /// WM_CHANGE_STATE normal value (requests the WM to restore/deiconify)
+    pub const NORMAL_STATE: u32 = 1;
+
     /// WM_CHANGE_STATE iconic value (requests the WM to minimize)
     pub const ICONIC_STATE: u32 = 3;
 }

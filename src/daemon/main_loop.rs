@@ -14,7 +14,7 @@ use crate::common::constants::eve;
 use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
 use crate::config::DaemonConfig;
 use crate::input::listener::{self, CycleCommand, TimestampedCommand};
-use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window};
+use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window, unminimize_window};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 
 use super::cycle_state::CycleState;
@@ -381,9 +381,17 @@ async fn run_event_loop(
         }
 
         // Sync allowed windows with backend
+        // Include both EVE client source windows AND thumbnail windows to ensure hotkeys
+        // work when focus is on either the clients themselves or their thumbnails.
+        // This is critical when thumbnails are hidden/shown or clients are minimized.
         {
-            let current_windows: HashSet<u32> = resources.eve_clients.keys().cloned().collect();
-            
+            let mut current_windows: HashSet<u32> = HashSet::new();
+
+            for (src_window, thumbnail) in resources.eve_clients.iter() {
+                current_windows.insert(*src_window); // EVE client source window
+                current_windows.insert(thumbnail.window()); // Thumbnail overlay window
+            }
+
             let need_update = {
                 if let Ok(guard) = allowed_windows.read() {
                     *guard != current_windows
@@ -522,8 +530,15 @@ async fn run_event_loop(
                             character = %display_name,
                             "Activating window via hotkey"
                         );
-                                                                                                                                                                                                                                                                                                                                                                                                                                                
 
+                        // NOTE: When minimize mode is enabled, unminimize the target window FIRST
+                        // before calling activate_window. This ensures the window is restored from
+                        // minimized state so it can properly receive keyboard focus.
+                        if resources.config.profile.client_minimize_on_switch
+                            && let Err(e) = unminimize_window(ctx.conn, ctx.screen, ctx.atoms, window)
+                        {
+                            error!(window = window, error = %e, "Failed to unminimize window before activation");
+                        }
 
                         if let Err(e) = activate_window(ctx.conn, ctx.screen, ctx.atoms, window, timestamp) {
                             error!(window = window, error = %e, "Failed to activate window");
@@ -531,6 +546,13 @@ async fn run_event_loop(
                             debug!(window = window, "activate_window completed successfully");
 
                             if resources.config.profile.client_minimize_on_switch {
+                                // NOTE: Critical delay to prevent KWin focus thrashing. Without this,
+                                // KWin repeatedly redirects focus to window 2097152 (internal KWin window)
+                                // during the minimize operations, causing continuous FocusOut/FocusIn loops.
+                                // The 25ms allows KWin to fully commit to the focus transfer before we
+                                // start changing other window states.
+                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
                                 // Minimize all other EVE clients after successful activation
                                 let other_windows: Vec<Window> = resources.eve_clients
                                     .keys()

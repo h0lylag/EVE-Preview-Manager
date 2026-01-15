@@ -293,8 +293,13 @@ fn run_x11_listener(
                                     }
 
                                     if !is_allowed {
+                                        // Try to get window class/title for debugging
+                                        let window_class =
+                                            get_window_class_sync(&conn, focus_reply.focus)
+                                                .unwrap_or_else(|_| "Unknown".to_string());
                                         debug!(
                                             window = focus_reply.focus,
+                                            class = %window_class,
                                             "Focus required but window (and ancestors) not in allowed set, replaying"
                                         );
                                         conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
