@@ -3,6 +3,9 @@
 use anyhow::{Context, Result};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
+use x11rb::protocol::xproto::{
+    ConnectionExt, KeyButMask, MOTION_NOTIFY_EVENT, Motion, MotionNotifyEvent,
+};
 use x11rb::rust_connection::RustConnection;
 
 use super::CachedAtoms;
@@ -45,12 +48,9 @@ pub fn activate_window(
         window
     ))?;
 
-    // Also explicitly set input focus to work around KWin focus stealing prevention
-    // RevertToParent ensures focus goes to parent if this window is destroyed
-    conn.set_input_focus(InputFocus::PARENT, window, timestamp)
-        .context(format!("Failed to set input focus for window {}", window))?;
-    
-    tracing::debug!(window = window, "SetInputFocus completed successfully");
+    // Inject a synthetic motion event to wake up the client's input handling
+    // This fixes "stuck mouse" issues on XWayland where hover states don't activate
+    refresh_pointer_state(conn, window, timestamp).context("Failed to refresh pointer state")?;
 
     conn.flush()
         .context("Failed to flush X11 connection after window activation")?;
@@ -173,5 +173,46 @@ pub fn unminimize_window(
 
     conn.flush()
         .context("Failed to flush X11 connection after window unminimize")?;
+    Ok(())
+}
+
+/// Injects a synthetic MotionNotify event to force the client to re-evaluate the cursor position.
+///
+/// This is necessary for XWayland compatibility (e.g., Wine/Proton games) where clients
+/// often fail to detect that the mouse is hovering them after being programmatically activated.
+///
+/// Use this instead of WarpPointer on Wayland sessions.
+fn refresh_pointer_state(conn: &RustConnection, window: Window, timestamp: u32) -> Result<()> {
+    // Construct a synthetic MotionNotify event
+    // The goal is to tell the client "the mouse is right here" without moving it physically.
+    let motion_event = MotionNotifyEvent {
+        response_type: MOTION_NOTIFY_EVENT,
+        detail: Motion::NORMAL,
+        sequence: 0,
+        time: timestamp,
+        root: 0, // Not needed for this hack
+        event: window,
+        child: window,
+        root_x: 0,  // Not needed
+        root_y: 0,  // Not needed
+        event_x: 0, // Not needed, client usually re-polls or just seeing the event is enough
+        event_y: 0, // Not needed
+        state: KeyButMask::default(),
+        same_screen: true,
+    };
+
+    // Send the event directly to the window
+    conn.send_event(
+        false,                     // propagate
+        window,                    // destination
+        EventMask::POINTER_MOTION, // event mask
+        motion_event,              // event content
+    )?;
+
+    tracing::debug!(
+        window = window,
+        "Injected synthetic MotionNotify to refresh pointer state"
+    );
+
     Ok(())
 }
