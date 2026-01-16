@@ -196,7 +196,7 @@ impl SharedState {
         self.settings_changed = false;
         self.config_status_message = Some(StatusMessage {
             text: "Configuration saved successfully".to_string(),
-            color: COLOR_SUCCESS,
+            color_rgb: COLOR_SUCCESS_RGB,
         });
         info!("Configuration saved to disk");
         Ok(())
@@ -258,7 +258,7 @@ impl SharedState {
                 error!(error = ?err, "Failed to save config after profile switch");
                 self.status_message = Some(StatusMessage {
                     text: format!("Profile switch failed: {err}"),
-                    color: STATUS_STOPPED,
+                    color_rgb: STATUS_STOPPED_RGB,
                 });
             } else {
                 // Reload daemon with new profile
@@ -281,7 +281,7 @@ impl SharedState {
         self.settings_changed = false;
         self.config_status_message = Some(StatusMessage {
             text: "Changes discarded".to_string(),
-            color: COLOR_ERROR,
+            color_rgb: COLOR_ERROR_RGB,
         });
         info!("Configuration changes discarded");
     }
@@ -292,7 +292,7 @@ impl SharedState {
 
         self.config_status_message = Some(StatusMessage {
             text: "Thumbnail positions saved".to_string(),
-            color: STATUS_RUNNING,
+            color_rgb: STATUS_RUNNING_RGB,
         });
         Ok(())
     }

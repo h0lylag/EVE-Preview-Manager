@@ -1,7 +1,5 @@
 #![allow(clippy::collapsible_if)]
 #[cfg(target_os = "linux")]
-use eframe::egui;
-#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
@@ -11,7 +9,6 @@ use crate::manager::{state::SharedState, utils::load_tray_icon_pixmap};
 #[cfg(target_os = "linux")]
 pub struct AppTray {
     pub state: Arc<Mutex<SharedState>>,
-    pub ctx: egui::Context,
     pub is_flatpak: bool,
 }
 
@@ -42,6 +39,14 @@ impl ksni::Tray for AppTray {
             .map(|icon| vec![icon])
             .unwrap_or_default()
     }
+    
+    // Double-click to open window
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // Use Slint's invoke_from_event_loop to show window from tray thread
+        let _ = slint::invoke_from_event_loop(|| {
+            crate::manager::app_slint::show_main_window_from_tray();
+        });
+    }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
@@ -63,6 +68,19 @@ impl ksni::Tray for AppTray {
         };
 
         vec![
+            // Open window item
+            StandardItem {
+                label: "Open".into(),
+                activate: Box::new(|_this: &mut AppTray| {
+                    let _ = slint::invoke_from_event_loop(|| {
+                        crate::manager::app_slint::show_main_window_from_tray();
+                    });
+                }),
+                ..Default::default()
+            }
+            .into(),
+            // Separator
+            MenuItem::Separator,
             // Refresh item
             StandardItem {
                 label: "Refresh".into(),
@@ -70,7 +88,6 @@ impl ksni::Tray for AppTray {
                     if let Ok(mut state) = this.state.lock() {
                         state.reload_daemon_config();
                     }
-                    this.ctx.request_repaint();
                 }),
                 ..Default::default()
             }
@@ -84,7 +101,6 @@ impl ksni::Tray for AppTray {
                     if let Ok(mut state) = this.state.lock() {
                         state.switch_profile(idx);
                     }
-                    this.ctx.request_repaint();
                 }),
                 options: profile_names
                     .iter()
@@ -119,7 +135,10 @@ impl ksni::Tray for AppTray {
                     if let Ok(mut state) = this.state.lock() {
                         state.should_quit = true;
                     }
-                    this.ctx.request_repaint();
+                    // Quit the Slint event loop
+                    let _ = slint::invoke_from_event_loop(|| {
+                        let _ = slint::quit_event_loop();
+                    });
                 }),
                 ..Default::default()
             }

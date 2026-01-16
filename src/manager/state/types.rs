@@ -1,5 +1,4 @@
 use crate::common::constants::manager_ui::*;
-use eframe::egui;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ManagerTab {
@@ -19,11 +18,11 @@ pub enum DaemonStatus {
 }
 
 impl DaemonStatus {
-    pub fn color(&self) -> egui::Color32 {
+    pub fn color_rgb(&self) -> (u8, u8, u8) {
         match self {
-            DaemonStatus::Running => STATUS_RUNNING,
-            DaemonStatus::Starting => STATUS_STARTING,
-            _ => STATUS_STOPPED,
+            DaemonStatus::Running => STATUS_RUNNING_RGB,
+            DaemonStatus::Starting => STATUS_STARTING_RGB,
+            _ => STATUS_STOPPED_RGB,
         }
     }
 
@@ -42,5 +41,5 @@ impl DaemonStatus {
 
 pub struct StatusMessage {
     pub text: String,
-    pub color: egui::Color32,
+    pub color_rgb: (u8, u8, u8),
 }

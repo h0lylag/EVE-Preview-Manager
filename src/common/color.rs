@@ -61,21 +61,22 @@ impl HexColor {
     }
 }
 
-/// Convert HEX string to egui::Color32
-pub fn hex_to_color32(hex: &str) -> Option<egui::Color32> {
+/// Convert HEX string to Slint Color
+pub fn hex_to_slint_color(hex: &str) -> Option<slint::Color> {
     let color = HexColor::parse(hex)?;
-    let a = (color.0 >> 24) & 0xFF;
-    let r = (color.0 >> 16) & 0xFF;
-    let g = (color.0 >> 8) & 0xFF;
-    let b = color.0 & 0xFF;
-    Some(egui::Color32::from_rgba_premultiplied(
-        r as u8, g as u8, b as u8, a as u8,
-    ))
+    let a = ((color.0 >> 24) & 0xFF) as u8;
+    let r = ((color.0 >> 16) & 0xFF) as u8;
+    let g = ((color.0 >> 8) & 0xFF) as u8;
+    let b = (color.0 & 0xFF) as u8;
+    Some(slint::Color::from_argb_u8(a, r, g, b))
 }
 
-/// Convert egui::Color32 to HEX string (#AARRGGBB)
-pub fn color32_to_hex(color: egui::Color32) -> String {
-    let [r, g, b, a] = color.to_array();
+/// Convert Slint Color to HEX string (#AARRGGBB)
+pub fn slint_color_to_hex(color: slint::Color) -> String {
+    let r = color.red();
+    let g = color.green();
+    let b = color.blue();
+    let a = color.alpha();
     format!("#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
 }
 

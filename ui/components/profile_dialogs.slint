@@ -1,0 +1,25 @@
+// Profile management dialogs
+import { Button, LineEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export component ProfileDialogs {
+    // Dialog visibility
+    in-out property <bool> show-new-dialog: false;
+    in-out property <bool> show-duplicate-dialog: false;
+    in-out property <bool> show-edit-dialog: false;
+    in-out property <bool> show-delete-confirm: false;
+    
+    // Dialog input fields
+    in-out property <string> edit-profile-name: "";
+    in-out property <string> edit-profile-desc: "";
+    
+    // Callbacks
+    callback create-profile(string, string);
+    callback duplicate-profile-confirmed(string, string);
+    callback edit-profile-confirmed(string, string);
+    callback delete-profile-confirmed();
+    callback cancel-dialog();
+    
+    // TODO: Implement modal dialogs
+    // Slint doesn't have built-in modal dialogs yet in 1.14.1
+    // Will need to implement as overlays or separate windows
+}

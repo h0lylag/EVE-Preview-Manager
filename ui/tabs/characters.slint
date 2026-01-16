@@ -1,0 +1,40 @@
+// Character management tab
+import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+
+export component CharactersTab {
+    // TODO: Add character management properties and callbacks
+    
+    HorizontalBox {
+        // Left: Character list
+        VerticalBox {
+            width: 250px;
+            
+            Text {
+                text: "Characters";
+                font-size: 16px;
+                font-weight: 700;
+            }
+            
+            ScrollView {
+                Text {
+                    text: "TODO: Character list";
+                }
+            }
+        }
+        
+        // Right: Character editor
+        ScrollView {
+            VerticalBox {
+                Text {
+                    text: "Character Editor";
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+                
+                Text {
+                    text: "TODO: Character editor controls";
+                }
+            }
+        }
+    }
+}

@@ -125,23 +125,21 @@ pub mod config {
     }
 }
 
-/// Manager-specific constants (egui manager window)
+/// Manager-specific constants (UI manager window)
 pub mod manager_ui {
-    use egui;
-
     /// Layout spacing
     pub const SECTION_SPACING: f32 = 15.0;
     pub const ITEM_SPACING: f32 = 8.0;
 
-    /// Status colors
-    pub const STATUS_RUNNING: egui::Color32 = egui::Color32::from_rgb(100, 200, 100);
-    pub const STATUS_STARTING: egui::Color32 = egui::Color32::from_rgb(255, 200, 0);
-    pub const STATUS_STOPPED: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
+    /// Status colors (RGB)
+    pub const STATUS_RUNNING_RGB: (u8, u8, u8) = (100, 200, 100);
+    pub const STATUS_STARTING_RGB: (u8, u8, u8) = (255, 200, 0);
+    pub const STATUS_STOPPED_RGB: (u8, u8, u8) = (200, 0, 0);
 
-    /// Alert level colors
-    pub const COLOR_SUCCESS: egui::Color32 = egui::Color32::from_rgb(100, 200, 100); // Green - success messages
-    pub const COLOR_WARNING: egui::Color32 = egui::Color32::from_rgb(255, 200, 0); // Yellow - warnings/unsaved
-    pub const COLOR_ERROR: egui::Color32 = egui::Color32::from_rgb(200, 100, 100); // Red - errors/discard
+    /// Alert level colors (RGB)
+    pub const COLOR_SUCCESS_RGB: (u8, u8, u8) = (100, 200, 100); // Green - success messages
+    pub const COLOR_WARNING_RGB: (u8, u8, u8) = (255, 200, 0); // Yellow - warnings/unsaved
+    pub const COLOR_ERROR_RGB: (u8, u8, u8) = (200, 100, 100); // Red - errors/discard
 
     /// Daemon monitoring
     pub const DAEMON_CHECK_INTERVAL_MS: u64 = 500;

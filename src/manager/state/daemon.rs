@@ -88,7 +88,7 @@ impl SharedState {
             error!(error = ?err, "Failed to restart daemon");
             self.status_message = Some(super::types::StatusMessage {
                 text: format!("Restart failed: {err}"),
-                color: STATUS_STOPPED,
+                color_rgb: STATUS_STOPPED_RGB,
             });
         }
     }
@@ -157,7 +157,7 @@ impl SharedState {
                     info!("Daemon Status: {}", msg);
                     self.status_message = Some(crate::manager::state::StatusMessage {
                         text: msg,
-                        color: crate::common::constants::manager_ui::STATUS_RUNNING,
+                        color_rgb: crate::common::constants::manager_ui::STATUS_RUNNING_RGB,
                     });
                 }
                 DaemonMessage::PositionChanged {

@@ -1,0 +1,219 @@
+// Main window component for EVE Preview Manager
+import { Button, VerticalBox, HorizontalBox, TabWidget } from "std-widgets.slint";
+import { ProfileDialogs } from "components/profile_dialogs.slint";
+import { BehaviorTab } from "tabs/behavior.slint";
+import { AppearanceTab } from "tabs/appearance.slint";
+import { HotkeysTab } from "tabs/hotkeys.slint";
+import { CharactersTab } from "tabs/characters.slint";
+import { SourcesTab } from "tabs/sources.slint";
+
+export component MainWindow inherits Window {
+    title: "EVE Preview Manager";
+    preferred-width: 800px;
+    preferred-height: 600px;
+    
+    // Callbacks for window lifecycle
+    callback minimize-to-tray();
+    callback exit-app();
+    
+    // Daemon status properties
+    in property <string> daemon-status: "Stopped";
+    in property <color> daemon-status-color: #c80000;
+    in property <int> daemon-pid: 0;
+    in property <string> status-message: "";
+    in property <color> status-message-color: #ffffff;
+    
+    // Profile management properties
+    in-out property <int> selected-profile-index: 0;
+    in property <[string]> profile-names: [];
+    in property <[string]> profile-descriptions: [];
+    
+    // Profile management callbacks
+    callback load-profile(int);
+    callback new-profile();
+    callback duplicate-profile();
+    callback edit-profile();
+    callback delete-profile();
+    
+    // Save/Discard callbacks
+    callback save-config();
+    callback discard-changes();
+    
+    // Config status
+    in property <bool> has-unsaved-changes: false;
+    in property <string> config-status-message: "";
+    in property <color> config-status-color: #ffffff;
+    
+    // Tab selection
+    in-out property <int> active-tab: 0;
+    
+    VerticalBox {
+        padding: 10px;
+        spacing: 10px;
+        
+        // Header: Daemon Status + Tabs
+        HorizontalBox {
+            spacing: 10px;
+            
+            // Left: Daemon Status
+            HorizontalBox {
+                spacing: 5px;
+                
+                Text {
+                    text: daemon-status;
+                    color: daemon-status-color;
+                    font-weight: 700;
+                }
+                
+                if daemon-pid > 0: Text {
+                    text: "(PID: " + daemon-pid + ")";
+                }
+                
+                if status-message != "": Text {
+                    text: status-message;
+                    color: status-message-color;
+                }
+            }
+            
+            Rectangle { 
+                // Spacer
+                horizontal-stretch: 1;
+            }
+            
+            // Right: Tab Navigation
+            HorizontalBox {
+                spacing: 5px;
+                
+                Button {
+                    text: "Behavior";
+                    checkable: true;
+                    checked: active-tab == 0;
+                    clicked => { active-tab = 0; }
+                }
+                
+                Button {
+                    text: "Hotkeys";
+                    checkable: true;
+                    checked: active-tab == 1;
+                    clicked => { active-tab = 1; }
+                }
+                
+                Button {
+                    text: "Appearance";
+                    checkable: true;
+                    checked: active-tab == 2;
+                    clicked => { active-tab = 2; }
+                }
+                
+                Button {
+                    text: "Characters";
+                    checkable: true;
+                    checked: active-tab == 3;
+                    clicked => { active-tab = 3; }
+                }
+                
+                Button {
+                    text: "Sources";
+                    checkable: true;
+                    checked: active-tab == 4;
+                    clicked => { active-tab = 4; }
+                }
+            }
+        }
+        
+        Rectangle {
+            height: 2px;
+            background: #444444;
+        }
+        
+        // Control Bar: Profile Selector + Save/Discard
+        HorizontalBox {
+            spacing: 10px;
+            
+            // TODO: Profile selector will go here
+            Text {
+                text: "Profile: " + (selected-profile-index >= 0 && selected-profile-index < profile-names.length ? 
+                      profile-names[selected-profile-index] : "None");
+            }
+            
+            Rectangle { 
+                horizontal-stretch: 1;
+            }
+            
+            Button {
+                text: "💾 Save & Apply";
+                clicked => { save-config(); }
+            }
+            
+            Button {
+                text: "✖ Discard Changes";
+                clicked => { discard-changes(); }
+            }
+        }
+        
+        // Profile Actions + Config Status
+        HorizontalBox {
+            spacing: 5px;
+            
+            Button {
+                text: "➕ New";
+                clicked => { new-profile(); }
+            }
+            
+            Button {
+                text: "📋 Duplicate";
+                clicked => { duplicate-profile(); }
+            }
+            
+            Button {
+                text: "✏ Edit";
+                clicked => { edit-profile(); }
+            }
+            
+            Button {
+                text: "🗑 Delete";
+                clicked => { delete-profile(); }
+            }
+            
+            Rectangle { 
+                horizontal-stretch: 1;
+            }
+            
+            if config-status-message != "": Text {
+                text: config-status-message;
+                color: config-status-color;
+            }
+            
+            if has-unsaved-changes && config-status-message == "": Text {
+                text: "Unsaved changes";
+                color: #ffc800;
+            }
+        }
+        
+        Rectangle {
+            height: 2px;
+            background: #444444;
+        }
+        
+        // Tab Content
+        if active-tab == 0: BehaviorTab {
+            // TODO: Wire up properties and callbacks
+        }
+        
+        if active-tab == 1: HotkeysTab {
+            // TODO: Wire up properties and callbacks
+        }
+        
+        if active-tab == 2: AppearanceTab {
+            // TODO: Wire up properties and callbacks
+        }
+        
+        if active-tab == 3: CharactersTab {
+            // TODO: Wire up properties and callbacks
+        }
+        
+        if active-tab == 4: SourcesTab {
+            // TODO: Wire up properties and callbacks
+        }
+    }
+}

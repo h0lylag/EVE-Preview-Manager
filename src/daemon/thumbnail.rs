@@ -305,16 +305,10 @@ impl<'a> Thumbnail<'a> {
                         .update(&self.character_name, self.dimensions)?;
                 }
                 crate::common::types::PreviewMode::Static { color } => {
-                    // ... color parsing ...
-                    let color_u32 = crate::manager::utils::parse_hex_color(color)
-                        .map_err(|_| anyhow::anyhow!("Invalid hex color: {}", color))?;
-
-                    let x_color = x11rb::protocol::render::Color {
-                        red: (color_u32.r() as u16) * 257,
-                        green: (color_u32.g() as u16) * 257,
-                        blue: (color_u32.b() as u16) * 257,
-                        alpha: (color_u32.a() as u16) * 257,
-                    };
+                    let color_u32 = crate::common::color::HexColor::parse(color)
+                        .ok_or_else(|| anyhow::anyhow!("Invalid hex color: {}", color))?
+                        .argb32();
+                    let x_color = crate::common::color::HexColor::from_argb32(color_u32).to_x11_color();
 
                     self.renderer
                         .update_static(&self.character_name, self.dimensions, x_color)?;
