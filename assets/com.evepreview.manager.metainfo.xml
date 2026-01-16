@@ -53,9 +53,16 @@
   <releases>
     <release version="1.6.2" date="2026-01-15">
       <description>
+        <p>Fixed:</p>
+        <ul>
+          <li>Resolved mouse detection issues in recently focused EVE clients by forcing a cursor state refresh after window activation</li>
+          <li>Fixed previews flickering/redrawing when using the "Hide Thumbnails When EVE Loses Focus" option and cycling through clients</li>
+          <li>Resolved an issue causing the configuration file to be saved excessively</li>
+          <li>Improved window activation and focus reliability when using the "Minimize EVE Clients" option</li>
+        </ul>
         <p>Other:</p>
         <ul>
-          <li>Addresses performance and window focus edge cases introduced after migrating to the IPC backend. Implements delta-based updates and conditional rebuilds to reduce overhead in the communication channel.</li>
+          <li>Optimized performance and stability with delta-based IPC for thumbnail updates and conditional font rebuilds, reducing input latency and focus thrashing when cycling clients at fast intervals</li>
         </ul>
       </description>
     </release>
