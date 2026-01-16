@@ -12,7 +12,7 @@ pub enum ManagerTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonStatus {
     Starting,
-    Running,
+    Running(u32),
     Stopped,
     Crashed(Option<i32>),
 }
@@ -20,7 +20,7 @@ pub enum DaemonStatus {
 impl DaemonStatus {
     pub fn color_rgb(&self) -> (u8, u8, u8) {
         match self {
-            DaemonStatus::Running => STATUS_RUNNING_RGB,
+            DaemonStatus::Running(_) => STATUS_RUNNING_RGB,
             DaemonStatus::Starting => STATUS_STARTING_RGB,
             _ => STATUS_STOPPED_RGB,
         }
@@ -28,7 +28,7 @@ impl DaemonStatus {
 
     pub fn label(&self) -> String {
         match self {
-            DaemonStatus::Running => "Daemon running".to_string(),
+            DaemonStatus::Running(pid) => format!("Daemon running (PID: {})", pid),
             DaemonStatus::Starting => "Daemon starting...".to_string(),
             DaemonStatus::Stopped => "Daemon stopped".to_string(),
             DaemonStatus::Crashed(code) => match code {

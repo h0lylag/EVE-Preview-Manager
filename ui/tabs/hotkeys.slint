@@ -1,19 +1,100 @@
 // Hotkey configuration tab
-import { VerticalBox, ScrollView, Button, CheckBox } from "std-widgets.slint";
+import { VerticalBox, ScrollView, Button, CheckBox, HorizontalBox, GroupBox, LineEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+component HotkeyRecorder {
+    in property <string> label;
+    in property <string> binding-text;
+    callback record-clicked();
+    
+    HorizontalBox {
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            width: 150px;
+            color: Theme.text-primary;
+        }
+        
+        Button {
+            text: root.binding-text == "" ? "Click to Set" : root.binding-text;
+            width: 200px;
+            clicked => {
+                root.record-clicked();
+            }
+        }
+    }
+}
 
 export component HotkeysTab {
-    // TODO: Add hotkey settings properties and callbacks
+    // Properties
+    in-out property <string> input-device;
+    in-out property <string> hotkey-toggle-preview;
+    in-out property <string> hotkey-toggle-skip;
+    in-out property <string> hotkey-profile-switch;
+    
+    callback update-binding(string); // ID of the binding being updated
     
     ScrollView {
         VerticalBox {
+            spacing: Theme.spacing-large;
+            alignment: start;
+
             Text {
                 text: "Hotkey Settings";
-                font-size: 18px;
+                font-size: Theme.font-size-header;
                 font-weight: 700;
+                color: Theme.text-primary;
             }
-            
+             
+            // Backend Settings
+            GroupBox {
+                title: "Input Backend";
+                VerticalBox {
+                    spacing: 10px;
+                    HorizontalBox {
+                        Text {
+                            text: "Input Device Path:";
+                            vertical-alignment: center;
+                            width: 150px;
+                        }
+                        LineEdit {
+                            text: root.input-device;
+                            enabled: false; // Read-only for now, detection is auto
+                        }
+                    }
+                }
+            }
+             
+            // Global Hotkeys
+            GroupBox {
+                title: "Global Hotkeys";
+                VerticalBox {
+                    spacing: 10px;
+                    
+                    HotkeyRecorder {
+                        label: "Toggle Previews:";
+                        binding-text: root.hotkey-toggle-preview;
+                        record-clicked => { root.update-binding("toggle_previews"); }
+                    }
+                    
+                    HotkeyRecorder {
+                        label: "Toggle Ignore/Skip:";
+                        binding-text: root.hotkey-toggle-skip;
+                        record-clicked => { root.update-binding("toggle_skip"); }
+                    }
+                    
+                    HotkeyRecorder {
+                        label: "Next Profile:";
+                        binding-text: root.hotkey-profile-switch;
+                        record-clicked => { root.update-binding("profile_switch"); }
+                    }
+                }
+            }
+             
             Text {
-                text: "TODO: Implement hotkey configuration controls";
+                text: "Note: Hotkey recording logic to be implemented on backend.";
+                color: #888;
+                font-size: 12px;
             }
         }
     }

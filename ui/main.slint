@@ -1,16 +1,18 @@
 // Main window component for EVE Preview Manager
-import { Button, VerticalBox, HorizontalBox, TabWidget } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, TabWidget, ComboBox, LineEdit } from "std-widgets.slint";
 import { ProfileDialogs } from "components/profile_dialogs.slint";
 import { BehaviorTab } from "tabs/behavior.slint";
 import { AppearanceTab } from "tabs/appearance.slint";
 import { HotkeysTab } from "tabs/hotkeys.slint";
 import { CharactersTab } from "tabs/characters.slint";
 import { SourcesTab } from "tabs/sources.slint";
+import { Theme } from "theme.slint";
 
 export component MainWindow inherits Window {
     title: "EVE Preview Manager";
     preferred-width: 800px;
     preferred-height: 600px;
+    background: Theme.background;
     
     // Callbacks for window lifecycle
     callback minimize-to-tray();
@@ -18,10 +20,10 @@ export component MainWindow inherits Window {
     
     // Daemon status properties
     in property <string> daemon-status: "Stopped";
-    in property <color> daemon-status-color: #c80000;
+    in property <color> daemon-status-color: Theme.danger; // Default stop color
     in property <int> daemon-pid: 0;
     in property <string> status-message: "";
-    in property <color> status-message-color: #ffffff;
+    in property <color> status-message-color: Theme.text-primary;
     
     // Profile management properties
     in-out property <int> selected-profile-index: 0;
@@ -44,34 +46,103 @@ export component MainWindow inherits Window {
     in property <string> config-status-message: "";
     in property <color> config-status-color: #ffffff;
     
+    // Profile Dialog Properties (bound to Rust)
+    in-out property <bool> show-new-profile-dialog: false;
+    in-out property <bool> show-duplicate-profile-dialog: false;
+    in-out property <bool> show-edit-profile-dialog: false;
+    in-out property <bool> show-delete-profile-confirm: false;
+    in-out property <string> edit-profile-name: "";
+    in-out property <string> edit-profile-desc: "";
+    
+    callback create-profile(string, string);
+    callback duplicate-profile-confirmed(string, string);
+    callback edit-profile-confirmed(string, string);
+    callback delete-profile-confirmed();
+    callback cancel-profile-dialog();
+
+    // Source Properties (bound to Rust)
+    in property <[StandardListViewItem]> source-model;
+    in-out property <int> source-selected-index: -1;
+    in-out property <string> source-edit-alias: "";
+    in-out property <string> source-edit-title-pattern: "";
+    in-out property <string> source-edit-class-pattern: "";
+    callback source-selected(int);
+    callback save-source();
+    callback add-source();
+    callback remove-source();
+
+    // Character Properties (bound to Rust)
+    in property <[StandardListViewItem]> character-model;
+    in-out property <int> character-selected-index: -1;
+    in-out property <string> character-edit-name: "";
+    in-out property <int> character-edit-width: 0;
+    in-out property <int> character-edit-height: 0;
+    in-out property <bool> character-edit-disabled: false;
+    callback character-selected(int);
+    callback save-character();
+
+    // Hotkey Properties (bound to Rust)
+    in-out property <string> hotkey-input-device: "Auto";
+    in-out property <string> hotkey-toggle-preview: "None";
+    in-out property <string> hotkey-toggle-skip: "None";
+    in-out property <string> hotkey-profile-switch: "None";
+    callback update-binding(string);
+    
+    // Behavior Properties (bound to Rust)
+    in-out property <bool> behavior-auto-save-position: true;
+    in-out property <int> behavior-snap-threshold: 20;
+    in-out property <bool> behavior-hide-not-focused: false;
+    in-out property <bool> behavior-preserve-position: true;
+    in-out property <bool> behavior-minimize-on-switch: false;
+    in-out property <bool> behavior-require-eve-focus: false;
+    in-out property <bool> behavior-cycle-logged-out: false;
+    in-out property <bool> behavior-reset-index: false;
+
+    // Appearance Properties (bound to Rust)
+    in-out property <bool> appearance-thumbnail-enabled: true;
+    in-out property <float> appearance-thumbnail-opacity: 100.0;
+    in-out property <bool> appearance-active-border-enabled: true;
+    in-out property <int> appearance-active-border-size: 2;
+    in-out property <string> appearance-active-border-color: "#00FF00";
+    in-out property <bool> appearance-inactive-border-enabled: false;
+    in-out property <int> appearance-inactive-border-size: 2;
+    in-out property <string> appearance-inactive-border-color: "#666666";
+    in-out property <bool> appearance-show-overlay: false;
+
     // Tab selection
     in-out property <int> active-tab: 0;
     
     VerticalBox {
-        padding: 10px;
-        spacing: 10px;
+        padding: Theme.padding-normal;
+        spacing: Theme.spacing-normal;
         
         // Header: Daemon Status + Tabs
         HorizontalBox {
-            spacing: 10px;
+            spacing: Theme.spacing-normal;
             
             // Left: Daemon Status
             HorizontalBox {
-                spacing: 5px;
+                spacing: Theme.spacing-small;
                 
                 Text {
                     text: daemon-status;
                     color: daemon-status-color;
                     font-weight: 700;
+                    font-size: Theme.font-size-large;
+                    vertical-alignment: center;
                 }
                 
                 if daemon-pid > 0: Text {
                     text: "(PID: " + daemon-pid + ")";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-size-small;
+                    vertical-alignment: center;
                 }
                 
                 if status-message != "": Text {
                     text: status-message;
                     color: status-message-color;
+                    vertical-alignment: center;
                 }
             }
             
@@ -82,7 +153,7 @@ export component MainWindow inherits Window {
             
             // Right: Tab Navigation
             HorizontalBox {
-                spacing: 5px;
+                spacing: Theme.spacing-small;
                 
                 Button {
                     text: "Behavior";
@@ -122,18 +193,22 @@ export component MainWindow inherits Window {
         }
         
         Rectangle {
-            height: 2px;
-            background: #444444;
+            height: 1px;
+            background: Theme.border;
         }
         
         // Control Bar: Profile Selector + Save/Discard
         HorizontalBox {
-            spacing: 10px;
+            spacing: Theme.spacing-normal;
             
-            // TODO: Profile selector will go here
-            Text {
-                text: "Profile: " + (selected-profile-index >= 0 && selected-profile-index < profile-names.length ? 
-                      profile-names[selected-profile-index] : "None");
+            ComboBox {
+                model: root.profile-names;
+                current-index <=> root.selected-profile-index;
+                width: 250px;
+                selected(val) => {
+                    // Logic handled via index change binding or callback if needed
+                    root.load-profile(root.selected-profile-index);
+                }
             }
             
             Rectangle { 
@@ -142,6 +217,7 @@ export component MainWindow inherits Window {
             
             Button {
                 text: "💾 Save & Apply";
+                primary: true;
                 clicked => { save-config(); }
             }
             
@@ -153,7 +229,7 @@ export component MainWindow inherits Window {
         
         // Profile Actions + Config Status
         HorizontalBox {
-            spacing: 5px;
+            spacing: Theme.spacing-small;
             
             Button {
                 text: "➕ New";
@@ -182,38 +258,91 @@ export component MainWindow inherits Window {
             if config-status-message != "": Text {
                 text: config-status-message;
                 color: config-status-color;
+                vertical-alignment: center;
             }
             
             if has-unsaved-changes && config-status-message == "": Text {
                 text: "Unsaved changes";
-                color: #ffc800;
+                color: Theme.warning;
+                vertical-alignment: center;
             }
         }
         
         Rectangle {
-            height: 2px;
-            background: #444444;
+            height: 1px;
+            background: Theme.border;
         }
         
         // Tab Content
         if active-tab == 0: BehaviorTab {
-            // TODO: Wire up properties and callbacks
+            auto-save-position <=> root.behavior-auto-save-position;
+            snap-threshold <=> root.behavior-snap-threshold;
+            hide-when-not-focused <=> root.behavior-hide-not-focused;
+            preserve-position <=> root.behavior-preserve-position;
+            minimize-on-switch <=> root.behavior-minimize-on-switch;
+            require-eve-focus <=> root.behavior-require-eve-focus;
+            cycle-logged-out <=> root.behavior-cycle-logged-out;
+            reset-index <=> root.behavior-reset-index;
         }
         
         if active-tab == 1: HotkeysTab {
-            // TODO: Wire up properties and callbacks
+            input-device <=> root.hotkey-input-device;
+            hotkey-toggle-preview <=> root.hotkey-toggle-preview;
+            hotkey-toggle-skip <=> root.hotkey-toggle-skip;
+            hotkey-profile-switch <=> root.hotkey-profile-switch;
+            update-binding(id) => { root.update-binding(id); }
         }
         
         if active-tab == 2: AppearanceTab {
-            // TODO: Wire up properties and callbacks
+            thumbnail-enabled <=> root.appearance-thumbnail-enabled;
+            thumbnail-opacity <=> root.appearance-thumbnail-opacity;
+            active-border-enabled <=> root.appearance-active-border-enabled;
+            active-border-size <=> root.appearance-active-border-size;
+            active-border-color <=> root.appearance-active-border-color;
+            inactive-border-enabled <=> root.appearance-inactive-border-enabled;
+            inactive-border-size <=> root.appearance-inactive-border-size;
+            inactive-border-color <=> root.appearance-inactive-border-color;
+            show-overlay <=> root.appearance-show-overlay;
         }
         
         if active-tab == 3: CharactersTab {
-            // TODO: Wire up properties and callbacks
+            character-model: root.character-model;
+            selected-index <=> root.character-selected-index;
+            edit-name <=> root.character-edit-name;
+            edit-width <=> root.character-edit-width;
+            edit-height <=> root.character-edit-height;
+            edit-disabled <=> root.character-edit-disabled;
+            selection-changed(idx) => { root.character-selected(idx); }
+            save-character => { root.save-character(); }
         }
         
         if active-tab == 4: SourcesTab {
-            // TODO: Wire up properties and callbacks
+            source-model: root.source-model;
+            selected-index <=> root.source-selected-index;
+            edit-alias <=> root.source-edit-alias;
+            edit-title-pattern <=> root.source-edit-title-pattern;
+            edit-class-pattern <=> root.source-edit-class-pattern;
+            
+            selection-changed(idx) => { root.source-selected(idx); }
+            save-source => { root.save-source(); }
+            add-source => { root.add-source(); }
+            remove-source => { root.remove-source(); }
         }
+    }
+    
+    ProfileDialogs {
+        show-new-dialog <=> root.show-new-profile-dialog;
+        show-duplicate-dialog <=> root.show-duplicate-profile-dialog;
+        show-edit-dialog <=> root.show-edit-profile-dialog;
+        show-delete-confirm <=> root.show-delete-profile-confirm;
+        
+        edit-profile-name <=> root.edit-profile-name;
+        edit-profile-desc <=> root.edit-profile-desc;
+        
+        create-profile(name, desc) => { root.create-profile(name, desc); }
+        duplicate-profile-confirmed(name, desc) => { root.duplicate-profile-confirmed(name, desc); }
+        edit-profile-confirmed(name, desc) => { root.edit-profile-confirmed(name, desc); }
+        delete-profile-confirmed => { root.delete-profile-confirmed(); }
+        cancel-dialog => { root.cancel-profile-dialog(); }
     }
 }

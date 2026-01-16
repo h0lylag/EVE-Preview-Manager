@@ -1,19 +1,137 @@
 // Custom window sources tab
-import { VerticalBox, ScrollView, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, Button, LineEdit, CheckBox, GroupBox, ListView, StandardTableView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
 
 export component SourcesTab {
-    // TODO: Add sources management properties and callbacks
+    in property <[StandardListViewItem]> source-model;
+    in-out property <int> selected-index: -1;
     
-    ScrollView {
+    // Editor properties
+    in-out property <string> edit-alias: "";
+    in-out property <string> edit-title-pattern: "";
+    in-out property <string> edit-class-pattern: "";
+    
+    callback selection-changed(int);
+    callback save-source();
+    callback add-source();
+    callback remove-source();
+    
+    HorizontalBox {
+        spacing: Theme.spacing-large;
+        
+        // Left: Source list
         VerticalBox {
-            Text {
-                text: "Custom Window Sources";
-                font-size: 18px;
-                font-weight: 700;
-            }
+            width: 250px;
+            alignment: start;
+            spacing: Theme.spacing-normal;
             
             Text {
-                text: "TODO: Implement sources management controls";
+                text: "Source List";
+                font-size: Theme.font-size-large;
+                font-weight: 700;
+                color: Theme.text-primary;
+            }
+            
+            Rectangle {
+                background: Theme.surface;
+                border-color: Theme.border;
+                border-width: 1px;
+                vertical-stretch: 1;
+                border-radius: Theme.border-radius;
+                
+                ListView {
+                    for item[i] in root.source-model: Rectangle {
+                        height: 30px;
+                        background: root.selected-index == i ? Theme.primary.with-alpha(0.5) : transparent;
+                        
+                        TouchArea {
+                            clicked => {
+                                root.selected-index = i;
+                                root.selection-changed(i);
+                            }
+                        }
+                        
+                        Text {
+                            x: 10px;
+                            text: item.text;
+                            vertical-alignment: center;
+                            color: root.selected-index == i ? Theme.text-primary : Theme.text-secondary;
+                        }
+                    }
+                }
+            }
+            
+            HorizontalBox {
+                Button {
+                    text: "Add";
+                    clicked => { root.add-source(); }
+                }
+                Button {
+                    text: "Remove";
+                    enabled: root.selected-index >= 0;
+                    clicked => { root.remove-source(); }
+                }
+            }
+        }
+        
+        // Right: Source editor
+        VerticalBox {
+            alignment: start;
+            spacing: Theme.spacing-large;
+            
+            Text {
+                text: "Source Settings";
+                font-size: Theme.font-size-large;
+                font-weight: 700;
+                color: Theme.text-primary;
+            }
+            
+            GroupBox {
+                title: "Properties";
+                enabled: root.selected-index >= 0;
+                
+                VerticalBox {
+                    spacing: 10px;
+                    
+                    HorizontalBox {
+                        Text { text: "Alias:"; width: 100px; vertical-alignment: center; }
+                        LineEdit { 
+                            text: root.edit-alias;
+                            edited => { 
+                                root.edit-alias = self.text;
+                                root.save-source(); 
+                            }
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        Text { text: "Title Pattern:"; width: 100px; vertical-alignment: center; }
+                        LineEdit { 
+                            text: root.edit-title-pattern;
+                            edited => { 
+                                root.edit-title-pattern = self.text;
+                                root.save-source(); 
+                            }
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        Text { text: "Class Pattern:"; width: 100px; vertical-alignment: center; }
+                        LineEdit { 
+                            text: root.edit-class-pattern;
+                            edited => { 
+                                root.edit-class-pattern = self.text;
+                                root.save-source(); 
+                            }
+                        }
+                    }
+                    
+                    Text {
+                        text: "Patterns support simple glob matching (e.g. '*Discord*')";
+                        color: #888;
+                        font-size: 12px;
+                    }
+                }
             }
         }
     }

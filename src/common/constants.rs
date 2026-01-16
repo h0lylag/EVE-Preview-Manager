@@ -135,6 +135,7 @@ pub mod manager_ui {
     pub const STATUS_RUNNING_RGB: (u8, u8, u8) = (100, 200, 100);
     pub const STATUS_STARTING_RGB: (u8, u8, u8) = (255, 200, 0);
     pub const STATUS_STOPPED_RGB: (u8, u8, u8) = (200, 0, 0);
+    pub const STATUS_WARNING_RGB: (u8, u8, u8) = (255, 165, 0); // Orange
 
     /// Alert level colors (RGB)
     pub const COLOR_SUCCESS_RGB: (u8, u8, u8) = (100, 200, 100); // Green - success messages

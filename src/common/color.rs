@@ -80,6 +80,11 @@ pub fn slint_color_to_hex(color: slint::Color) -> String {
     format!("#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
 }
 
+/// Create Slint Color from RGB u8 values
+pub fn slint_color_from_rgb(r: u8, g: u8, b: u8) -> slint::Color {
+    slint::Color::from_rgb_u8(r, g, b)
+}
+
 /// Opacity as percentage (0-100)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opacity(u8);

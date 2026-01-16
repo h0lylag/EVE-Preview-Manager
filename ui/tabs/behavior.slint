@@ -1,19 +1,102 @@
 // Behavior settings tab
-import { VerticalBox, ScrollView, CheckBox, Slider, Button } from "std-widgets.slint";
+import { VerticalBox, ScrollView, CheckBox, Slider, Button, GroupBox, HorizontalBox, LineEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
 
 export component BehaviorTab {
-    // TODO: Add behavior settings properties and callbacks
+    // Properties to be bound to the main window/Rust backend
+    in-out property <bool> auto-save-position;
+    in-out property <int> snap-threshold;
+    in-out property <bool> hide-when-not-focused;
+    in-out property <bool> preserve-position;
+    
+    in-out property <bool> minimize-on-switch;
+    
+    in-out property <bool> require-eve-focus;
+    in-out property <bool> cycle-logged-out;
+    in-out property <bool> reset-index;
     
     ScrollView {
         VerticalBox {
-            Text {
-                text: "Behavior Settings";
-                font-size: 18px;
-                font-weight: 700;
-            }
+            spacing: Theme.spacing-large;
+            alignment: start;
             
             Text {
-                text: "TODO: Implement behavior settings controls";
+                text: "Behavior Settings";
+                font-size: Theme.font-size-header;
+                font-weight: 700;
+                color: Theme.text-primary;
+            }
+            
+            // Thumbnail Behavior
+            GroupBox {
+                title: "Thumbnails";
+                VerticalBox {
+                    spacing: 12px;
+                    CheckBox {
+                        text: "Auto-save Position on Drag";
+                        checked <=> root.auto-save-position;
+                    }
+                    
+                    HorizontalBox {
+                        Text { 
+                            text: "Snap Threshold (" + root.snap-threshold + "px):";
+                            vertical-alignment: center;
+                            width: 150px;
+                        }
+                        Slider {
+                            value: root.snap-threshold;
+                            minimum: 0.0;
+                            maximum: 50.0;
+                            changed(val) => {
+                                root.snap-threshold = Math.round(val);
+                            }
+                        }
+                    }
+                    
+                    CheckBox {
+                        text: "Hide Thumbnails When EVE Loses Focus";
+                        checked <=> root.hide-when-not-focused;
+                    }
+                    
+                    CheckBox {
+                        text: "Preserve Position on Character Swap";
+                        checked <=> root.preserve-position;
+                    }
+                }
+            }
+            
+            // Client Management
+            GroupBox {
+                title: "Window Management";
+                VerticalBox {
+                    spacing: 12px;
+                    CheckBox {
+                        text: "Minimize EVE Clients on Switch";
+                        checked <=> root.minimize-on-switch;
+                    }
+                }
+            }
+            
+            // Hotkey Behavior
+            GroupBox {
+                title: "Hotkey Logic";
+                VerticalBox {
+                    spacing: 12px;
+                    CheckBox {
+                        text: "Require EVE Client Focus for Hotkeys";
+                        checked <=> root.require-eve-focus;
+                    }
+                    
+                    CheckBox {
+                        text: "Cycle Through Logged Out Characters";
+                        checked <=> root.cycle-logged-out;
+                    }
+                    
+                    CheckBox {
+                        text: "Reset Cycle Index When Switching Groups";
+                        checked <=> root.reset-index;
+                    }
+                }
             }
         }
     }

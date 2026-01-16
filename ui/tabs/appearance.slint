@@ -1,19 +1,170 @@
 // Appearance/Visual settings tab
-import { VerticalBox, ScrollView, LineEdit, Button } from "std-widgets.slint";
+import { VerticalBox, ScrollView, LineEdit, Button, CheckBox, Slider, GroupBox, HorizontalBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
 
 export component AppearanceTab {
-    // TODO: Add appearance settings properties and callbacks
+    // Properties to be bound to the main window/Rust backend
+    in-out property <bool> thumbnail-enabled;
+    in-out property <float> thumbnail-opacity: 100.0; // 0-100
+    
+    in-out property <bool> active-border-enabled;
+    in-out property <int> active-border-size;
+    in-out property <string> active-border-color;
+    
+    in-out property <bool> inactive-border-enabled;
+    in-out property <int> inactive-border-size;
+    in-out property <string> inactive-border-color;
+    
+    in-out property <bool> show-overlay;
     
     ScrollView {
         VerticalBox {
-            Text {
-                text: "Appearance Settings";
-                font-size: 18px;
-                font-weight: 700;
-            }
+            spacing: Theme.spacing-large;
+            alignment: start;
             
             Text {
-                text: "TODO: Implement appearance settings controls";
+                text: "Appearance Settings";
+                font-size: Theme.font-size-header;
+                font-weight: 700;
+                color: Theme.text-primary;
+            }
+            
+            // Thumbnail Visibility & Opacity
+            GroupBox {
+                title: "General";
+                VerticalBox {
+                    spacing: Theme.spacing-normal;
+                    CheckBox {
+                        text: "Enable Thumbnails";
+                        checked <=> root.thumbnail-enabled;
+                    }
+                    
+                    HorizontalBox {
+                        Text { 
+                            text: "Opacity: " + round(root.thumbnail-opacity) + "%";
+                            vertical-alignment: center;
+                            width: 100px;
+                            color: Theme.text-primary;
+                        }
+                        Slider {
+                            value <=> root.thumbnail-opacity;
+                            minimum: 10.0;
+                            maximum: 100.0;
+                        }
+                    }
+                    
+                    CheckBox {
+                        text: "Show 'MINIMIZED' Overlay";
+                        checked <=> root.show-overlay;
+                    }
+                }
+            }
+            
+            // Active Window Border
+            GroupBox {
+                title: "Active Window Border";
+                VerticalBox {
+                    spacing: Theme.spacing-normal;
+                    CheckBox {
+                        text: "Draw Border on Active Client";
+                        checked <=> root.active-border-enabled;
+                    }
+                    
+                    HorizontalBox {
+                        Text { 
+                            text: "Size:";
+                            vertical-alignment: center;
+                            width: 60px;
+                            color: root.active-border-enabled ? Theme.text-primary : Theme.text-secondary;
+                        }
+                        // Simple way to handle integer input for now
+                        // TODO: Replace with proper SpinBox when available or custom component
+                        LineEdit {
+                            enabled: root.active-border-enabled;
+                            text: root.active-border-size;
+                            width: 60px;
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.active-border-size = self.text.to-float();
+                                }
+                            }
+                        }
+                        
+                        Rectangle { width: 20px; }
+                        
+                        Text { 
+                            text: "Color (Hex):";
+                            vertical-alignment: center;
+                            width: 90px;
+                            color: root.active-border-enabled ? Theme.text-primary : Theme.text-secondary;
+                        }
+                        LineEdit {
+                            enabled: root.active-border-enabled;
+                            text: root.active-border-color; // e.g. "#00FF00"
+                            width: 100px;
+                            edited => { root.active-border-color = self.text; }
+                        }
+                        
+                        Rectangle { width: 10px; }
+                        
+                        // Preview color
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            background: @linear-gradient(0deg, #000, #000); // Accessing color from hex string is tricky in pure Slint without a converter
+                            border-width: 1px;
+                            border-color: #666;
+                            opacity: root.active-border-enabled ? 1.0 : 0.3;
+                        }
+                    }
+                }
+            }
+            
+            // Inactive Window Border
+            GroupBox {
+                title: "Inactive Window Border";
+                VerticalBox {
+                    spacing: 10px;
+                    CheckBox {
+                        text: "Draw Border on Inactive Clients";
+                        checked <=> root.inactive-border-enabled;
+                    }
+                    
+                    HorizontalBox {
+                        Text { 
+                            text: "Size:";
+                            vertical-alignment: center;
+                            width: 60px;
+                            color: root.inactive-border-enabled ? #fff : #666;
+                        }
+                        LineEdit {
+                            enabled: root.inactive-border-enabled;
+                            text: root.inactive-border-size;
+                            width: 60px;
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.inactive-border-size = self.text.to-float();
+                                }
+                            }
+                        }
+                        
+                        Rectangle { width: 20px; }
+                        
+                        Text { 
+                            text: "Color (Hex):";
+                            vertical-alignment: center;
+                            width: 90px;
+                            color: root.inactive-border-enabled ? #fff : #666;
+                        }
+                        LineEdit {
+                            enabled: root.inactive-border-enabled;
+                            text <=> root.inactive-border-color;
+                            width: 100px;
+                        }
+                    }
+                }
             }
         }
     }

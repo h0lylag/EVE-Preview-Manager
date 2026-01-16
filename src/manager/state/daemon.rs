@@ -123,7 +123,8 @@ impl SharedState {
             let _ = self.sync_to_daemon();
 
             self.bootstrap_rx = None; // Done
-            self.daemon_status = DaemonStatus::Running;
+            let pid = self.daemon.as_ref().map(|c| c.id()).unwrap_or(0);
+            self.daemon_status = DaemonStatus::Running(pid);
 
             // initialize heartbeats
             self.ipc_healthy = true;
@@ -253,7 +254,7 @@ impl SharedState {
             && self.last_heartbeat.elapsed() > Duration::from_secs(5)
         {
             // Only count missed beats if we are expecting them
-            if self.daemon_status == DaemonStatus::Running {
+            if matches!(self.daemon_status, DaemonStatus::Running(_)) {
                 self.missed_heartbeats += 1;
 
                 // We poll roughly every DAEMON_CHECK_INTERVAL_MS (500ms).

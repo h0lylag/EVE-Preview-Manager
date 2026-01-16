@@ -1,8 +1,8 @@
 // Profile management dialogs
-import { Button, LineEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, LineEdit, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
 
 export component ProfileDialogs {
-    // Dialog visibility
     in-out property <bool> show-new-dialog: false;
     in-out property <bool> show-duplicate-dialog: false;
     in-out property <bool> show-edit-dialog: false;
@@ -12,14 +12,229 @@ export component ProfileDialogs {
     in-out property <string> edit-profile-name: "";
     in-out property <string> edit-profile-desc: "";
     
-    // Callbacks
     callback create-profile(string, string);
     callback duplicate-profile-confirmed(string, string);
     callback edit-profile-confirmed(string, string);
     callback delete-profile-confirmed();
     callback cancel-dialog();
     
-    // TODO: Implement modal dialogs
-    // Slint doesn't have built-in modal dialogs yet in 1.14.1
-    // Will need to implement as overlays or separate windows
+    // Semi-transparent overlay
+    if root.show-new-dialog || root.show-duplicate-dialog || root.show-edit-dialog || root.show-delete-confirm : Rectangle {
+        background: #00000088;
+        x: 0; y: 0; width: 100%; height: 100%;
+        
+        TouchArea {
+            // Block clicks to underlying window
+        }
+    }
+    
+    // New Profile Dialog
+    if root.show-new-dialog : Rectangle {
+        background: Theme.surface;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.border-radius;
+        width: 400px;
+        height: 250px;
+        // Center it (assuming parent constraints allow centering, otherwise fixed offsets)
+        // Slint layout usually handles centering if in a layout manager, but here we are an overlay.
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        
+        VerticalBox {
+            alignment: center;
+            spacing: Theme.spacing-large;
+            padding: Theme.padding-normal;
+            
+            Text {
+                text: "Create New Profile";
+                font-size: Theme.font-size-header;
+                font-weight: 700;
+                color: Theme.text-primary;
+                horizontal-alignment: center;
+            }
+            
+            VerticalBox {
+                spacing: Theme.spacing-normal;
+                Text { text: "Profile Name:"; color: Theme.text-secondary; }
+                LineEdit { 
+                     text <=> root.edit-profile-name; 
+                     placeholder-text: "Enter profile name";
+                }
+                
+                Text { text: "Description:"; }
+                LineEdit { 
+                     text <=> root.edit-profile-desc;
+                     placeholder-text: "Enter description (optional)";
+                }
+            }
+            
+            HorizontalBox {
+                alignment: center;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel-dialog(); }
+                }
+                Button {
+                    text: "Create";
+                    primary: true;
+                    enabled: root.edit-profile-name != "";
+                    clicked => { root.create-profile(root.edit-profile-name, root.edit-profile-desc); }
+                }
+            }
+        }
+    }
+
+    // Duplicate Profile Dialog
+    if root.show-duplicate-dialog : Rectangle {
+        background: Theme.surface;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.border-radius;
+        width: 400px;
+        height: 250px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        
+        VerticalBox {
+            alignment: center;
+            spacing: Theme.spacing-large;
+            padding: Theme.padding-normal;
+            
+            Text {
+                text: "Duplicate Profile";
+                font-size: Theme.font-size-header;
+                font-weight: 700;
+                color: Theme.text-primary;
+                horizontal-alignment: center;
+            }
+            
+            VerticalBox {
+                spacing: Theme.spacing-normal;
+                Text { text: "New Profile Name:"; color: Theme.text-secondary; }
+                LineEdit { 
+                     text <=> root.edit-profile-name; 
+                     placeholder-text: "Enter new profile name";
+                }
+                
+                Text { text: "New App Description:"; }
+                 LineEdit { 
+                     text <=> root.edit-profile-desc; 
+                     placeholder-text: "Enter description";
+                }
+            }
+            
+            HorizontalBox {
+                alignment: center;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel-dialog(); }
+                }
+                Button {
+                    text: "Duplicate";
+                    primary: true;
+                    enabled: root.edit-profile-name != "";
+                    clicked => { root.duplicate-profile-confirmed(root.edit-profile-name, root.edit-profile-desc); }
+                }
+            }
+        }
+    }
+
+    // Edit Profile Dialog
+    if root.show-edit-dialog : Rectangle {
+        background: Theme.surface;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.border-radius;
+        width: 400px;
+        height: 250px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        
+        VerticalBox {
+            alignment: center;
+            spacing: Theme.spacing-large;
+            padding: Theme.padding-normal;
+            
+            Text {
+                text: "Edit Profile";
+                font-size: Theme.font-size-header;
+                font-weight: 700;
+                color: Theme.text-primary;
+                horizontal-alignment: center;
+            }
+            
+            VerticalBox {
+                spacing: Theme.spacing-normal;
+                Text { text: "Profile Name:"; color: Theme.text-secondary; }
+                LineEdit { 
+                     text <=> root.edit-profile-name; 
+                }
+                
+                Text { text: "Description:"; }
+                LineEdit { 
+                     text <=> root.edit-profile-desc;
+                }
+            }
+            
+            HorizontalBox {
+                alignment: center;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel-dialog(); }
+                }
+                Button {
+                    text: "Save";
+                    primary: true;
+                    enabled: root.edit-profile-name != "";
+                    clicked => { root.edit-profile-confirmed(root.edit-profile-name, root.edit-profile-desc); }
+                }
+            }
+        }
+    }
+
+    // Delete Confirmation Dialog
+    if root.show-delete-confirm : Rectangle {
+        background: #3a1a1a; 
+        border-color: Theme.danger;
+        border-width: 1px;
+        border-radius: Theme.border-radius;
+        width: 350px;
+        height: 180px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        
+        VerticalBox {
+            alignment: center;
+            spacing: Theme.spacing-large;
+            padding: Theme.padding-normal;
+            
+            Text {
+                text: "Delete Profile?";
+                font-size: Theme.font-size-header;
+                font-weight: 700;
+                color: Theme.danger;
+                horizontal-alignment: center;
+            }
+            
+            Text {
+                text: "Are you sure you want to delete this profile? This action cannot be undone.";
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+            
+            HorizontalBox {
+                alignment: center;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel-dialog(); }
+                }
+                Button {
+                    text: "Delete";
+                    // primary: true; // Slint button might not support 'danger' variant directly but primary is usually blue
+                    clicked => { root.delete-profile-confirmed(); }
+                }
+            }
+        }
+    }
 }

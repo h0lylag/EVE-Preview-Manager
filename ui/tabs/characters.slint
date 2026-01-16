@@ -1,38 +1,121 @@
 // Character management tab
-import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, Button, LineEdit, CheckBox, GroupBox, ListView, StandardTableView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
 
 export component CharactersTab {
-    // TODO: Add character management properties and callbacks
+    in property <[StandardListViewItem]> character-model;
+    in-out property <int> selected-index: -1;
+    
+    // Editor properties
+    in-out property <string> edit-name: "";
+    in-out property <int> edit-width;
+    in-out property <int> edit-height;
+    in-out property <bool> edit-disabled;
+    
+    callback selection-changed(int);
+    callback save-character();
     
     HorizontalBox {
+        spacing: Theme.spacing-large;
+        
         // Left: Character list
         VerticalBox {
             width: 250px;
+            alignment: start;
             
             Text {
-                text: "Characters";
-                font-size: 16px;
+                text: "Cycle List";
+                font-size: Theme.font-size-large;
                 font-weight: 700;
+                color: Theme.text-primary;
             }
             
-            ScrollView {
-                Text {
-                    text: "TODO: Character list";
+            Rectangle {
+                background: Theme.surface;
+                border-color: Theme.border;
+                border-width: 1px;
+                border-radius: Theme.border-radius;
+                
+                ListView {
+                    for item[i] in root.character-model: Rectangle {
+                        height: 30px;
+                        background: root.selected-index == i ? Theme.primary.with-alpha(0.5) : transparent;
+                        
+                        TouchArea {
+                            clicked => {
+                                root.selected-index = i;
+                                root.selection-changed(i);
+                            }
+                        }
+                        
+                        Text {
+                            x: 10px;
+                            text: item.text;
+                            vertical-alignment: center;
+                            color: root.selected-index == i ? Theme.text-primary : Theme.text-secondary;
+                        }
+                    }
                 }
             }
         }
         
         // Right: Character editor
-        ScrollView {
-            VerticalBox {
-                Text {
-                    text: "Character Editor";
-                    font-size: 16px;
-                    font-weight: 700;
-                }
+        VerticalBox {
+            alignment: start;
+            spacing: Theme.spacing-large;
+            
+            Text {
+                text: "Character Settings";
+                font-size: Theme.font-size-large;
+                font-weight: 700;
+                color: Theme.text-primary;
+            }
+            
+            GroupBox {
+                title: "Properties";
+                enabled: root.selected-index >= 0;
                 
-                Text {
-                    text: "TODO: Character editor controls";
+                VerticalBox {
+                    spacing: 10px;
+                    
+                    HorizontalBox {
+                        Text { text: "Name:"; width: 80px; vertical-alignment: center; }
+                        LineEdit { text: root.edit-name; enabled: false; } // Name is key, read-only
+                    }
+                    
+                    HorizontalBox {
+                        Text { text: "Width:"; width: 80px; vertical-alignment: center; }
+                        LineEdit { 
+                            text: root.edit-width;
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.edit-width = self.text.to-float();
+                                    root.save-character();
+                                }
+                            }
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        Text { text: "Height:"; width: 80px; vertical-alignment: center; }
+                        LineEdit { 
+                            text: root.edit-height;
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.edit-height = self.text.to-float();
+                                    root.save-character();
+                                }
+                            }
+                        }
+                    }
+                    
+                    CheckBox {
+                        text: "Disabled (Skip in Cycle)";
+                        checked <=> root.edit-disabled;
+                        toggled => { root.save-character(); }
+                    }
                 }
             }
         }
