@@ -1,5 +1,5 @@
 // Hotkey configuration tab
-import { VerticalBox, ScrollView, Button, CheckBox, HorizontalBox, GroupBox, LineEdit } from "std-widgets.slint";
+import { VerticalBox, ScrollView, Button, CheckBox, HorizontalBox, GroupBox, LineEdit, ComboBox } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 
 component HotkeyRecorder {
@@ -28,9 +28,13 @@ component HotkeyRecorder {
 export component HotkeysTab {
     // Properties
     in-out property <string> input-device;
+    in-out property <string> hotkey-backend: "X11"; // "X11" or "Evdev"
     in-out property <string> hotkey-toggle-preview;
     in-out property <string> hotkey-toggle-skip;
     in-out property <string> hotkey-profile-switch;
+    in-out property <string> hotkey-cycle-forward;
+    in-out property <string> hotkey-cycle-backward;
+    in-out property <bool> hotkey-require-eve-focus;
     
     callback update-binding(string); // ID of the binding being updated
     
@@ -62,6 +66,20 @@ export component HotkeysTab {
                             enabled: false; // Read-only for now, detection is auto
                         }
                     }
+                    
+                    HorizontalBox {
+                        Text {
+                            text: "Backend:";
+                            vertical-alignment: center;
+                            width: 150px;
+                        }
+                        // TODO: Bind to backend selection property
+                        ComboBox {
+                            model: ["X11", "Evdev"];
+                            current-index: 0; 
+                            enabled: true;
+                        }
+                    }
                 }
             }
              
@@ -70,6 +88,24 @@ export component HotkeysTab {
                 title: "Global Hotkeys";
                 VerticalBox {
                     spacing: 10px;
+                    
+                    CheckBox {
+                        text: "Require EVE Client Focus for Hotkeys";
+                        // Note: Property needs to be added to root first
+                        checked <=> root.hotkey-require-eve-focus;
+                    }
+                    
+                    HotkeyRecorder {
+                        label: "Cycle Forward:";
+                        binding-text: root.hotkey-cycle-forward;
+                        record-clicked => { root.update-binding("cycle_forward"); }
+                    }
+                    
+                    HotkeyRecorder {
+                        label: "Cycle Backward:";
+                        binding-text: root.hotkey-cycle-backward;
+                        record-clicked => { root.update-binding("cycle_backward"); }
+                    }
                     
                     HotkeyRecorder {
                         label: "Toggle Previews:";

@@ -292,6 +292,7 @@ mod tests {
                 thumbnail_snap_threshold: snap_threshold,
                 thumbnail_hide_not_focused: hide_when_no_focus,
                 thumbnail_preserve_position_on_swap: false,
+                thumbnail_new_clients_inherit_position: true,
                 client_minimize_on_switch: false,
                 hotkey_input_device: None,
                 hotkey_logged_out_cycle: false,

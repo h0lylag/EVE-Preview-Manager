@@ -177,6 +177,37 @@ impl HotkeyBinding {
         }
     }
 }
+impl FromStr for HotkeyBinding {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('+').collect();
+        let mut key_array = Vec::new();
+
+        for part in parts {
+            let part = part.trim();
+            if part.is_empty() { continue; }
+            
+            match part.to_uppercase().as_str() {
+                "CTRL" => key_array.push("KEY_LEFTCTRL".to_string()),
+                "SHIFT" => key_array.push("KEY_LEFTSHIFT".to_string()),
+                "ALT" => key_array.push("KEY_LEFTALT".to_string()),
+                "SUPER" | "META" => key_array.push("KEY_LEFTMETA".to_string()),
+                key => {
+                    // Assume it's the main key
+                    // Try adding KEY_ prefix if not present
+                    if key.starts_with("KEY_") {
+                        key_array.push(key.to_string());
+                    } else {
+                        key_array.push(format!("KEY_{}", key));
+                    }
+                }
+            }
+        }
+        
+        Self::from_key_array(&key_array)
+    }
+}
 
 impl Default for HotkeyBinding {
     fn default() -> Self {

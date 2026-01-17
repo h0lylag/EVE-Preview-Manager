@@ -10,6 +10,9 @@ export component SourcesTab {
     in-out property <string> edit-alias: "";
     in-out property <string> edit-title-pattern: "";
     in-out property <string> edit-class-pattern: "";
+    // Visual Overrides
+    in-out property <string> edit-border-color: "";
+    in-out property <int> edit-border-size: 0;
     
     callback selection-changed(int);
     callback save-source();
@@ -130,6 +133,42 @@ export component SourcesTab {
                         text: "Patterns support simple glob matching (e.g. '*Discord*')";
                         color: #888;
                         font-size: 12px;
+                    }
+                }
+            }
+            
+            GroupBox {
+                title: "Visual Overrides (Optional)";
+                enabled: root.selected-index >= 0;
+                
+                VerticalBox {
+                    spacing: 10px;
+                    
+                    HorizontalBox {
+                        Text { text: "Border Color:"; width: 100px; vertical-alignment: center; }
+                        LineEdit { 
+                            text: root.edit-border-color;
+                            placeholder-text: "e.g. #FF0000";
+                            edited => { 
+                                root.edit-border-color = self.text;
+                                root.save-source(); 
+                            }
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        Text { text: "Border Size:"; width: 100px; vertical-alignment: center; }
+                        LineEdit { 
+                            text: root.edit-border-size;
+                            placeholder-text: "0";
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.edit-border-size = self.text.to-float();
+                                    root.save-source();
+                                }
+                            }
+                        }
                     }
                 }
             }

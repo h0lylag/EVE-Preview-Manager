@@ -17,6 +17,13 @@ export component AppearanceTab {
     
     in-out property <bool> show-overlay;
     
+    // Thumbnail Text Properties
+    in-out property <int> thumbnail-text-size;
+    in-out property <string> thumbnail-text-color;
+    in-out property <int> thumbnail-text-x;
+    in-out property <int> thumbnail-text-y;
+    in-out property <string> thumbnail-text-font;
+    
     ScrollView {
         VerticalBox {
             spacing: Theme.spacing-large;
@@ -56,6 +63,72 @@ export component AppearanceTab {
                     CheckBox {
                         text: "Show 'MINIMIZED' Overlay";
                         checked <=> root.show-overlay;
+                    }
+                }
+            }
+
+            // Thumbnail Text Settings
+            GroupBox {
+                title: "Thumbnail Text";
+                VerticalBox {
+                    spacing: Theme.spacing-normal;
+                    
+                    HorizontalBox {
+                        Text { text: "Font Size:"; width: 80px; vertical-alignment: center; color: Theme.text-primary; }
+                        LineEdit { 
+                            text: root.thumbnail-text-size;
+                            width: 60px;
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.thumbnail-text-size = self.text.to-float();
+                                }
+                            }
+                        }
+                        
+                        Rectangle { width: 20px; }
+                        
+                        Text { text: "Color:"; width: 60px; vertical-alignment: center; color: Theme.text-primary; }
+                        LineEdit { 
+                            text <=> root.thumbnail-text-color;
+                            width: 100px;
+                        }
+                    }
+
+                    HorizontalBox {
+                        Text { text: "Offset X:"; width: 80px; vertical-alignment: center; color: Theme.text-primary; }
+                        LineEdit { 
+                            text: root.thumbnail-text-x;
+                            width: 60px;
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.thumbnail-text-x = self.text.to-float();
+                                }
+                            }
+                        }
+
+                        Rectangle { width: 20px; }
+
+                        Text { text: "Offset Y:"; width: 60px; vertical-alignment: center; color: Theme.text-primary; }
+                        LineEdit { 
+                            text: root.thumbnail-text-y;
+                            width: 60px;
+                            input-type: number;
+                            edited => {
+                                if (self.text.is-float()) {
+                                    root.thumbnail-text-y = self.text.to-float();
+                                }
+                            }
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        Text { text: "Font:"; width: 80px; vertical-alignment: center; color: Theme.text-primary; }
+                        LineEdit { 
+                            text <=> root.thumbnail-text-font;
+                            placeholder-text: "System Font Name";
+                        }
                     }
                 }
             }

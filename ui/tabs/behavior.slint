@@ -11,14 +11,30 @@ export component BehaviorTab {
     
     in-out property <bool> minimize-on-switch;
     
-    in-out property <bool> require-eve-focus;
+    // in-out property <bool> require-eve-focus; // Moved to Hotkeys
+    in-out property <bool> inherit-position;
     in-out property <bool> cycle-logged-out;
     in-out property <bool> reset-index;
     
+    // Backup Properties
+    in-out property <bool> backup-enabled;
+    in-out property <int> backup-interval; // Days
+    in-out property <int> backup-retention; // Count
+    in-out property <string> backup-last-date;
+    
+    callback create-backup();
+    callback restore-backup();
+    callback delete-backup();
+    
     ScrollView {
-        VerticalBox {
+        HorizontalBox { // Main layout split
             spacing: Theme.spacing-large;
             alignment: start;
+
+            VerticalBox { // Left Column: Behavior
+                width: 50%;
+                spacing: Theme.spacing-large;
+                alignment: start;
             
             Text {
                 text: "Behavior Settings";
@@ -62,6 +78,11 @@ export component BehaviorTab {
                         text: "Preserve Position on Character Swap";
                         checked <=> root.preserve-position;
                     }
+
+                    CheckBox {
+                        text: "New characters inherit thumbnail position";
+                        checked <=> root.inherit-position; 
+                    }
                 }
             }
             
@@ -82,10 +103,12 @@ export component BehaviorTab {
                 title: "Hotkey Logic";
                 VerticalBox {
                     spacing: 12px;
+                    /* Moved to Hotkeys Tab
                     CheckBox {
                         text: "Require EVE Client Focus for Hotkeys";
                         checked <=> root.require-eve-focus;
                     }
+                    */
                     
                     CheckBox {
                         text: "Cycle Through Logged Out Characters";
@@ -97,7 +120,96 @@ export component BehaviorTab {
                         checked <=> root.reset-index;
                     }
                 }
-            }
-        }
+                }
+            } // End Left Column
+
+            VerticalBox { // Right Column: Backup & Restore
+                width: 50%;
+                spacing: Theme.spacing-large;
+                alignment: start;
+
+                Text {
+                    text: " "; // Spacer to align with header
+                    font-size: Theme.font-size-header;
+                }
+
+                GroupBox {
+                    title: "Backup & Restore";
+                    VerticalBox {
+                        spacing: 12px;
+                        
+                        CheckBox {
+                            text: "Enable Automatic Backups";
+                            checked <=> root.backup-enabled;
+                        }
+                        
+                        HorizontalBox {
+                            Text { 
+                                text: "Interval (Days):"; 
+                                width: 120px; 
+                                vertical-alignment: center;
+                            }
+                            Slider {
+                                minimum: 1.0;
+                                maximum: 30.0;
+                                value: root.backup-interval;
+                                changed(val) => { root.backup-interval = Math.round(val); }
+                            }
+                            Text {
+                                text: root.backup-interval;
+                                width: 30px;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            Text { 
+                                text: "Retention Count:"; 
+                                width: 120px; 
+                                vertical-alignment: center;
+                            }
+                            Slider {
+                                minimum: 1.0;
+                                maximum: 100.0;
+                                value: root.backup-retention;
+                                changed(val) => { root.backup-retention = Math.round(val); }
+                            }
+                            Text {
+                                text: root.backup-retention;
+                                width: 30px;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        
+                        Button {
+                            text: "Create Backup";
+                            clicked => { root.create-backup(); }
+                        }
+                        
+                        Text {
+                            text: "Configuration Backups";
+                            font-weight: 700;
+                        }
+                        
+                        // Placeholder for backup list dropdown
+                        // ComboBox { model: ["2026-01-15 17:38:54 (Auto)"]; }
+                        
+                        HorizontalBox {
+                            spacing: 10px;
+                            Button {
+                                text: "Restore";
+                                clicked => { root.restore-backup(); }
+                            }
+                            Button {
+                                text: "Delete";
+                                clicked => { root.delete-backup(); }
+                            }
+                        }
+                    }
+                }
+            } // End Right Column
+        } // End HorizontalBox (Main Split)
     }
 }

@@ -1,0 +1,79 @@
+import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+export component HotkeyModal inherits Rectangle {
+    in property <bool> show: false;
+    in property <string> binding-name: "Unknown";
+    
+    callback cancel();
+    callback key-pressed(string, string); // text, modifiers
+    
+    public function request-focus() {
+        scope.focus();
+    }
+    
+    // Cover the entire window
+    width: 100%;
+    height: 100%;
+    background: #000000AA; // Semi-transparent black
+    
+    // Only show when visible property is true
+    visible: root.show;
+    
+    // Block clicks from passing through
+    TouchArea {
+        clicked => {
+             scope.focus(); // Ensure focus if clicked
+        }
+    }
+
+    // Focus scope to capture keyboard input
+    scope := FocusScope {
+        enabled: root.show;
+        
+        key-pressed(event) => {
+            root.key-pressed(event.text, 
+                (event.modifiers.control ? "Ctrl+" : "") +
+                (event.modifiers.shift ? "Shift+" : "") +
+                (event.modifiers.alt ? "Alt+" : "") +
+                (event.modifiers.meta ? "Super+" : "")
+            );
+            return accept;
+        }
+    }
+
+    Rectangle {
+        width: 400px;
+        height: 200px;
+        background: Theme.surface;
+        border-radius: Theme.border-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        
+        VerticalBox {
+            padding: Theme.spacing-large;
+            spacing: Theme.spacing-large;
+            alignment: center;
+            
+            Text {
+                text: "Press any key to bind:";
+                font-size: Theme.font-size-header;
+                horizontal-alignment: center;
+                color: Theme.text-primary;
+            }
+            
+            Text {
+                text: root.binding-name;
+                font-size: Theme.font-size-large;
+                font-weight: 700;
+                horizontal-alignment: center;
+                color: Theme.primary;
+            }
+            
+            Button {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}

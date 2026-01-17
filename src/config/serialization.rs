@@ -54,6 +54,8 @@ struct ProfileHelper {
     thumbnail_hide_not_focused: bool,
     #[serde(default = "default_preserve_thumbnail_position_on_swap")]
     thumbnail_preserve_position_on_swap: bool,
+    #[serde(default = "default_preserve_thumbnail_position_on_swap")]
+    thumbnail_new_clients_inherit_position: bool,
     #[serde(default)]
     client_minimize_on_switch: bool,
     #[serde(default)]
@@ -188,6 +190,7 @@ impl From<ProfileHelper> for Profile {
             thumbnail_snap_threshold: helper.thumbnail_snap_threshold,
             thumbnail_hide_not_focused: helper.thumbnail_hide_not_focused,
             thumbnail_preserve_position_on_swap: helper.thumbnail_preserve_position_on_swap,
+            thumbnail_new_clients_inherit_position: helper.thumbnail_new_clients_inherit_position,
             client_minimize_on_switch: helper.client_minimize_on_switch,
             client_minimize_show_overlay: helper.client_minimize_show_overlay,
             hotkey_backend: helper.hotkey_backend,
@@ -259,6 +262,8 @@ impl<'de> Deserialize<'de> for Profile {
                 pub thumbnail_hide_not_focused: bool,
                 #[serde(default = "default_preserve_thumbnail_position_on_swap")]
                 pub thumbnail_preserve_position_on_swap: bool,
+                #[serde(default = "default_preserve_thumbnail_position_on_swap")]
+                pub thumbnail_new_clients_inherit_position: bool,
                 #[serde(default)]
                 pub client_minimize_on_switch: bool,
                 #[serde(default)]
@@ -350,6 +355,7 @@ impl<'de> Deserialize<'de> for Profile {
                 thumbnail_snap_threshold: p.thumbnail_snap_threshold,
                 thumbnail_hide_not_focused: p.thumbnail_hide_not_focused,
                 thumbnail_preserve_position_on_swap: p.thumbnail_preserve_position_on_swap,
+                thumbnail_new_clients_inherit_position: p.thumbnail_new_clients_inherit_position,
                 client_minimize_on_switch: p.client_minimize_on_switch,
                 client_minimize_show_overlay: p.client_minimize_show_overlay,
                 hotkey_backend: p.hotkey_backend,

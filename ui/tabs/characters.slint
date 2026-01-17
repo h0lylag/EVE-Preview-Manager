@@ -14,6 +14,8 @@ export component CharactersTab {
     
     callback selection-changed(int);
     callback save-character();
+    callback move-character-up(int);
+    callback move-character-down(int);
     
     HorizontalBox {
         spacing: Theme.spacing-large;
@@ -55,6 +57,20 @@ export component CharactersTab {
                             color: root.selected-index == i ? Theme.text-primary : Theme.text-secondary;
                         }
                     }
+                }
+            }
+            
+            HorizontalBox {
+                spacing: Theme.spacing-small;
+                Button {
+                    text: "▲";
+                    enabled: root.selected-index > 0;
+                    clicked => { root.move-character-up(root.selected-index); }
+                }
+                Button {
+                    text: "▼";
+                    enabled: root.selected-index >= 0 && root.selected-index < root.character-model.length - 1;
+                    clicked => { root.move-character-down(root.selected-index); }
                 }
             }
         }

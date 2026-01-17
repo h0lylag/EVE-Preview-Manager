@@ -398,7 +398,7 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                     let settings = if ctx
                         .daemon_config
                         .profile
-                        .thumbnail_preserve_position_on_swap
+                        .thumbnail_new_clients_inherit_position
                     {
                         crate::common::types::CharacterSettings::new(
                             current_pos.x,

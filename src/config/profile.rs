@@ -213,6 +213,10 @@ pub struct Profile {
     /// When a new character logs in without saved coordinates, inherit the previous character's thumbnail position
     /// This keeps thumbnails in place when swapping characters on the same EVE client
     pub thumbnail_preserve_position_on_swap: bool,
+    
+    /// When enabled, new characters (not previously seen) inherit the position of the currently active thumbnail
+    /// instaed of defaulting to (0,0) or center.
+    pub thumbnail_new_clients_inherit_position: bool,
 
     // Client behavior settings
     pub client_minimize_on_switch: bool,
@@ -377,6 +381,7 @@ fn default_profiles() -> Vec<Profile> {
         thumbnail_hide_not_focused:
             crate::common::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS,
         thumbnail_preserve_position_on_swap: default_preserve_thumbnail_position_on_swap(),
+        thumbnail_new_clients_inherit_position: true, // Default to true for better UX
         client_minimize_on_switch:
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH,
         client_minimize_show_overlay: false, // Default: off (clean minimized look)

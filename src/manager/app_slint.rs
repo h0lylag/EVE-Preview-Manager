@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "linux")]
 use ksni::TrayMethods;
@@ -119,11 +119,32 @@ fn setup_callbacks(window: &MainWindow) {
                                 profile.thumbnail_snap_threshold = _window.get_behavior_snap_threshold() as u16;
                                 profile.thumbnail_hide_not_focused = _window.get_behavior_hide_not_focused();
                                 profile.thumbnail_preserve_position_on_swap = _window.get_behavior_preserve_position();
+                                profile.thumbnail_new_clients_inherit_position = _window.get_behavior_inherit_position();
                                 profile.client_minimize_on_switch = _window.get_behavior_minimize_on_switch();
-                                profile.hotkey_require_eve_focus = _window.get_behavior_require_eve_focus();
+                                profile.hotkey_require_eve_focus = _window.get_hotkey_require_eve_focus();
+                                profile.hotkey_logged_out_cycle = _window.get_behavior_cycle_logged_out();
                                 profile.hotkey_logged_out_cycle = _window.get_behavior_cycle_logged_out();
                                 profile.hotkey_cycle_reset_index = _window.get_behavior_reset_index();
+                                
+                                // Thumbnail Text Settings
+                                profile.thumbnail_text_size = _window.get_appearance_thumbnail_text_size() as u16;
+                                profile.thumbnail_text_color = _window.get_appearance_thumbnail_text_color().to_string();
+                                profile.thumbnail_text_x = _window.get_appearance_thumbnail_text_x() as i16;
+                                profile.thumbnail_text_y = _window.get_appearance_thumbnail_text_y() as i16;
+                                profile.thumbnail_text_font = _window.get_appearance_thumbnail_text_font().to_string();
+                                
+                                // Hotkey Backend
+                                let backend_str = _window.get_hotkey_backend().to_string();
+                                profile.hotkey_backend = match backend_str.as_str() {
+                                    "Evdev" => crate::config::profile::HotkeyBackendType::Evdev,
+                                    _ => crate::config::profile::HotkeyBackendType::X11,
+                                };
                             }
+                            
+                            // Global Backup Settings
+                            state.config.global.backup_enabled = _window.get_backup_enabled();
+                            state.config.global.backup_interval_days = _window.get_backup_interval() as u32;
+                            state.config.global.backup_retention_count = _window.get_backup_retention() as u32;
 
                             // Save to disk
                             match state.save_config(crate::manager::state::core::SaveMode::Explicit) {
@@ -389,7 +410,77 @@ fn setup_callbacks(window: &MainWindow) {
         window.on_update_binding(move |binding_id| {
              if let Some(_window) = window_weak.upgrade() {
                  debug!("Update binding requested for: {}", binding_id);
-                 // TODO: Implement hotkey recording logic
+                 // UI handles showing modal, backend just acknowledges or prepares
+             }
+        });
+        
+        let window_weak = window.as_weak();
+        window.on_cancel_binding(move || {
+             debug!("Binding cancelled by user");
+        });
+
+        let window_weak = window.as_weak();
+        window.on_apply_binding(move |binding_id, text, modifiers| {
+             if let Some(window) = window_weak.upgrade() {
+                 let key_combo = format!("{}{}", modifiers, text.to_uppercase());
+                 debug!("Applying binding: {} = {}", binding_id, key_combo);
+                 
+                 SHARED_STATE.with(|state_cell| {
+                    if let Some(state_arc) = state_cell.borrow().as_ref() {
+                        if let Ok(mut state) = state_arc.lock() {
+                            if let Some(profile) = state.config.get_active_profile_mut() {
+                                use crate::config::HotkeyBinding;
+                                use std::str::FromStr;
+                                
+                                // let binding_result = HotkeyBinding::from_str(&key_combo);
+                                let binding_result = key_combo.parse::<HotkeyBinding>();
+                                
+                                match binding_result {
+                                    Ok(binding) => {
+                                        match binding_id.as_str() {
+                                            "cycle_forward" => {
+                                                if let Some(group) = profile.cycle_groups.first_mut() {
+                                                     group.hotkey_forward = Some(binding);
+                                                     window.set_hotkey_cycle_forward(group.hotkey_forward.as_ref().map(|b| b.display_name().into()).unwrap_or_default());
+                                                }
+                                            },
+                                            "cycle_backward" => {
+                                                if let Some(group) = profile.cycle_groups.first_mut() {
+                                                     group.hotkey_backward = Some(binding);
+                                                     window.set_hotkey_cycle_backward(group.hotkey_backward.as_ref().map(|b| b.display_name().into()).unwrap_or_default());
+                                                }
+                                            },
+                                            "toggle_previews" => {
+                                                profile.hotkey_toggle_previews = Some(binding.clone());
+                                                window.set_hotkey_toggle_preview(binding.display_name().into());
+                                            },
+                                            "toggle_skip" => {
+                                                profile.hotkey_toggle_skip = Some(binding.clone());
+                                                window.set_hotkey_toggle_skip(binding.display_name().into());
+                                            },
+                                            "profile_switch" => {
+                                                 // TODO: This maps to profile hotkeys, which is complex (map vs field)
+                                                 // Assume "Next Profile" action or specific profile binding?
+                                                 // Current logic in hotkeys.slint suggests "Next Profile"
+                                                 // But Profile struct usually maps specific keys to specific profiles.
+                                                 // We'll skip this one or implement naive "Next" if supported.
+                                                 warn!("Profile switch binding not fully supported via simple recorder yet");
+                                            },
+                                            _ => warn!("Unknown binding ID: {}", binding_id),
+                                        }
+                                        
+                                        state.settings_changed = true;
+                                        window.set_has_unsaved_changes(true);
+                                        update_window_from_state(&window);
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to parse hotkey binding '{}': {}", key_combo, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                 });
              }
         });
     }
@@ -468,6 +559,54 @@ fn setup_callbacks(window: &MainWindow) {
                 });
             }
         });
+     
+        let window_weak = window.as_weak();
+        window.on_move_character_up(move |index| {
+            if let Some(window) = window_weak.upgrade() {
+                SHARED_STATE.with(|state_cell| {
+                    if let Some(state_arc) = state_cell.borrow().as_ref() {
+                        if let Ok(mut state) = state_arc.lock() {
+                            if let Some(profile) = state.config.get_active_profile_mut() {
+                                if let Some(group) = profile.cycle_groups.first_mut() {
+                                    if index > 0 && (index as usize) < group.cycle_list.len() {
+                                        group.cycle_list.swap(index as usize, (index - 1) as usize);
+                                        state.settings_changed = true;
+                                        window.set_has_unsaved_changes(true);
+                                        // Refresh model and selection
+                                        update_window_from_state(&window);
+                                        window.set_character_selected_index(index - 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        
+        let window_weak = window.as_weak();
+        window.on_move_character_down(move |index| {
+             if let Some(window) = window_weak.upgrade() {
+                SHARED_STATE.with(|state_cell| {
+                    if let Some(state_arc) = state_cell.borrow().as_ref() {
+                        if let Ok(mut state) = state_arc.lock() {
+                            if let Some(profile) = state.config.get_active_profile_mut() {
+                                if let Some(group) = profile.cycle_groups.first_mut() {
+                                    if index >= 0 && (index as usize) < group.cycle_list.len() - 1 {
+                                        group.cycle_list.swap(index as usize, (index + 1) as usize);
+                                        state.settings_changed = true;
+                                        window.set_has_unsaved_changes(true);
+                                        // Refresh model and selection
+                                        update_window_from_state(&window);
+                                        window.set_character_selected_index(index + 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
         let window_weak = window.as_weak();
         window.on_source_selected(move |index| {
             if let Some(window) = window_weak.upgrade() {
@@ -479,6 +618,10 @@ fn setup_callbacks(window: &MainWindow) {
                                     window.set_source_edit_alias(rule.alias.clone().into());
                                     window.set_source_edit_title_pattern(rule.title_pattern.clone().unwrap_or_default().into());
                                     window.set_source_edit_class_pattern(rule.class_pattern.clone().unwrap_or_default().into());
+                                    
+                                    // Visual Overrides
+                                    window.set_source_edit_border_color(rule.active_border_color.clone().unwrap_or_default().into());
+                                    window.set_source_edit_border_size(rule.active_border_size.unwrap_or(0) as i32);
                                 }
                             }
                         }
@@ -499,12 +642,16 @@ fn setup_callbacks(window: &MainWindow) {
                              let alias = window.get_source_edit_alias().to_string();
                              let title = window.get_source_edit_title_pattern().to_string();
                              let class = window.get_source_edit_class_pattern().to_string();
+                             let border_color = window.get_source_edit_border_color().to_string();
+                             let border_size = window.get_source_edit_border_size() as u16;
                              
                              if let Some(profile) = state.config.get_active_profile_mut() {
                                  if let Some(rule) = profile.custom_windows.get_mut(index as usize) {
                                      rule.alias = alias;
                                      rule.title_pattern = if title.is_empty() { None } else { Some(title) };
                                      rule.class_pattern = if class.is_empty() { None } else { Some(class) };
+                                     rule.active_border_color = if border_color.is_empty() { None } else { Some(border_color) };
+                                     rule.active_border_size = if border_size == 0 { None } else { Some(border_size) };
                                      
                                      state.settings_changed = true;
                                      window.set_has_unsaved_changes(true);
@@ -591,6 +738,32 @@ fn setup_callbacks(window: &MainWindow) {
             }
         });
     }
+
+    // Backup Callbacks
+    {
+        let window_weak = window.as_weak();
+        window.on_create_backup(move || {
+             if let Some(_window) = window_weak.upgrade() {
+                 info!("Creating manual backup...");
+                 match crate::config::backup::BackupManager::create_backup(true, None) {
+                     Ok(path) => info!("Backup created successfully at {:?}", path),
+                     Err(e) => error!("Failed to create backup: {}", e),
+                 }
+             }
+        });
+        
+        let _window_weak = window.as_weak();
+        window.on_restore_backup(move || {
+            // TODO: Implement restore dialog
+            info!("Restore backup requested (not implemented in UI yet)");
+        });
+        
+        let _window_weak = window.as_weak();
+        window.on_delete_backup(move || {
+             // TODO: Implement delete logic
+             info!("Delete backup requested (not implemented in UI yet)");
+        });
+    }
 }
 
 /// Update window properties from shared state
@@ -628,6 +801,11 @@ fn update_window_from_state(window: &MainWindow) {
                 // Update config status
                 window.set_has_unsaved_changes(state.settings_changed);
                 
+                // Update Global Backup Settings
+                window.set_backup_enabled(state.config.global.backup_enabled);
+                window.set_backup_interval(state.config.global.backup_interval_days as i32);
+                window.set_backup_retention(state.config.global.backup_retention_count as i32);
+                
                 // Update Appearance Tab Properties
                 if let Some(profile) = state.config.get_active_profile() {
                     window.set_appearance_thumbnail_enabled(profile.thumbnail_enabled);
@@ -656,8 +834,9 @@ fn update_window_from_state(window: &MainWindow) {
                     window.set_behavior_snap_threshold(profile.thumbnail_snap_threshold as i32);
                     window.set_behavior_hide_not_focused(profile.thumbnail_hide_not_focused);
                     window.set_behavior_preserve_position(profile.thumbnail_preserve_position_on_swap);
+                    window.set_behavior_inherit_position(profile.thumbnail_new_clients_inherit_position);
                     window.set_behavior_minimize_on_switch(profile.client_minimize_on_switch);
-                    window.set_behavior_require_eve_focus(profile.hotkey_require_eve_focus);
+                    window.set_hotkey_require_eve_focus(profile.hotkey_require_eve_focus);
                     window.set_behavior_cycle_logged_out(profile.hotkey_logged_out_cycle);
                     window.set_behavior_reset_index(profile.hotkey_cycle_reset_index);
                     
@@ -667,6 +846,18 @@ fn update_window_from_state(window: &MainWindow) {
                     } else {
                         window.set_hotkey_input_device("Auto".into());
                     }
+                    
+                    match profile.hotkey_backend {
+                         crate::config::profile::HotkeyBackendType::X11 => window.set_hotkey_backend("X11".into()),
+                         crate::config::profile::HotkeyBackendType::Evdev => window.set_hotkey_backend("Evdev".into()),
+                    }
+                    
+                    // Thumbnail Text Settings
+                    window.set_appearance_thumbnail_text_size(profile.thumbnail_text_size as i32);
+                    window.set_appearance_thumbnail_text_color(profile.thumbnail_text_color.clone().into());
+                    window.set_appearance_thumbnail_text_x(profile.thumbnail_text_x as i32);
+                    window.set_appearance_thumbnail_text_y(profile.thumbnail_text_y as i32);
+                    window.set_appearance_thumbnail_text_font(profile.thumbnail_text_font.clone().into());
                 }
                 
                 // Hotkeys (Global/Profile) - These are actually stored in Profile
@@ -682,6 +873,14 @@ fn update_window_from_state(window: &MainWindow) {
                     let profile_switch = profile.hotkey_profile_switch.as_ref()
                         .map(|h| h.display_name()).unwrap_or("None".to_string());
                     window.set_hotkey_profile_switch(profile_switch.into());
+                    
+                    // Cycle Hotkeys (from Default Group)
+                     if let Some(group) = profile.cycle_groups.first() {
+                        let forward = group.hotkey_forward.as_ref().map(|h| h.display_name()).unwrap_or("None".to_string());
+                        let backward = group.hotkey_backward.as_ref().map(|h| h.display_name()).unwrap_or("None".to_string());
+                        window.set_hotkey_cycle_forward(forward.into());
+                        window.set_hotkey_cycle_backward(backward.into());
+                     }
                     
                     // Character Model
                     // Use first cycle group for now

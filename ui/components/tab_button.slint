@@ -1,0 +1,34 @@
+import { Theme } from "../theme.slint";
+import { HorizontalBox } from "std-widgets.slint";
+
+export component TabButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    border-radius: Theme.border-radius;
+    background: root.active ? Theme.primary : ta.has-hover ? Theme.surface-hover : Theme.surface;
+    
+    // Animation for smooth transition
+    animate background { duration: 150ms; }
+
+    HorizontalBox {
+        padding-left: Theme.spacing-large;
+        padding-right: Theme.spacing-large;
+        padding-top: Theme.spacing-normal;
+        padding-bottom: Theme.spacing-normal;
+        
+        Text {
+            text: root.text;
+            color: root.active ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.font-size-normal;
+            font-weight: root.active ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}

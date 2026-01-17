@@ -2,6 +2,8 @@
 import { Button, VerticalBox, HorizontalBox, TabWidget, ComboBox, LineEdit } from "std-widgets.slint";
 import { ProfileDialogs } from "components/profile_dialogs.slint";
 import { BehaviorTab } from "tabs/behavior.slint";
+import { TabButton } from "components/tab_button.slint";
+import { HotkeyModal } from "components/hotkey_modal.slint";
 import { AppearanceTab } from "tabs/appearance.slint";
 import { HotkeysTab } from "tabs/hotkeys.slint";
 import { CharactersTab } from "tabs/characters.slint";
@@ -66,6 +68,8 @@ export component MainWindow inherits Window {
     in-out property <string> source-edit-alias: "";
     in-out property <string> source-edit-title-pattern: "";
     in-out property <string> source-edit-class-pattern: "";
+    in-out property <string> source-edit-border-color: "";
+    in-out property <int> source-edit-border-size: 0;
     callback source-selected(int);
     callback save-source();
     callback add-source();
@@ -80,13 +84,20 @@ export component MainWindow inherits Window {
     in-out property <bool> character-edit-disabled: false;
     callback character-selected(int);
     callback save-character();
+    callback move-character-up(int);
+    callback move-character-down(int);
 
     // Hotkey Properties (bound to Rust)
     in-out property <string> hotkey-input-device: "Auto";
+    in-out property <string> hotkey-backend: "X11";
     in-out property <string> hotkey-toggle-preview: "None";
     in-out property <string> hotkey-toggle-skip: "None";
     in-out property <string> hotkey-profile-switch: "None";
-    callback update-binding(string);
+    in-out property <string> hotkey-cycle-forward: "None";
+    // in-out property <string> hotkey-cycle-forward: "None"; // Removed duplicate
+    in-out property <string> hotkey-cycle-backward: "None";
+    in-out property <bool> hotkey-require-eve-focus: false;
+
     
     // Behavior Properties (bound to Rust)
     in-out property <bool> behavior-auto-save-position: true;
@@ -94,7 +105,9 @@ export component MainWindow inherits Window {
     in-out property <bool> behavior-hide-not-focused: false;
     in-out property <bool> behavior-preserve-position: true;
     in-out property <bool> behavior-minimize-on-switch: false;
-    in-out property <bool> behavior-require-eve-focus: false;
+    // in-out property <bool> behavior-minimize-on-switch: false; // Removed duplicate
+    // in-out property <bool> behavior-require-eve-focus: false; // Moved to Hotkeys properties
+    in-out property <bool> behavior-inherit-position: false;
     in-out property <bool> behavior-cycle-logged-out: false;
     in-out property <bool> behavior-reset-index: false;
 
@@ -108,12 +121,35 @@ export component MainWindow inherits Window {
     in-out property <int> appearance-inactive-border-size: 2;
     in-out property <string> appearance-inactive-border-color: "#666666";
     in-out property <bool> appearance-show-overlay: false;
+    // Thumbnail Text
+    in-out property <int> appearance-thumbnail-text-size: 14;
+    in-out property <string> appearance-thumbnail-text-color: "#FFFFFF";
+    in-out property <int> appearance-thumbnail-text-x: 0;
+    in-out property <int> appearance-thumbnail-text-y: 0;
+    in-out property <string> appearance-thumbnail-text-font: "";
+    
+    // Backup Properties (bound to Rust)
+    in-out property <bool> backup-enabled: true;
+    in-out property <int> backup-interval: 1;
+    in-out property <int> backup-retention: 30;
+    callback create-backup();
+    callback restore-backup();
+    callback delete-backup();
 
     // Tab selection
     in-out property <int> active-tab: 0;
     
+    // Hotkey Binding State
+    property <bool> is-binding: false;
+    property <string> active-binding-id;
+    
+    // Callbacks
+    callback update-binding(string); // Relay from tab to backend
+    callback cancel-binding();       // Cancel request from modal
+    callback apply-binding(string, string, string); // id, text, modifiers
+
     VerticalBox {
-        padding: Theme.padding-normal;
+        padding: 0px;
         spacing: Theme.spacing-normal;
         
         // Header: Daemon Status + Tabs
@@ -155,38 +191,33 @@ export component MainWindow inherits Window {
             HorizontalBox {
                 spacing: Theme.spacing-small;
                 
-                Button {
+                TabButton {
                     text: "Behavior";
-                    checkable: true;
-                    checked: active-tab == 0;
+                    active: active-tab == 0;
                     clicked => { active-tab = 0; }
                 }
                 
-                Button {
+                TabButton {
                     text: "Hotkeys";
-                    checkable: true;
-                    checked: active-tab == 1;
+                    active: active-tab == 1;
                     clicked => { active-tab = 1; }
                 }
                 
-                Button {
+                TabButton {
                     text: "Appearance";
-                    checkable: true;
-                    checked: active-tab == 2;
+                    active: active-tab == 2;
                     clicked => { active-tab = 2; }
                 }
                 
-                Button {
+                TabButton {
                     text: "Characters";
-                    checkable: true;
-                    checked: active-tab == 3;
+                    active: active-tab == 3;
                     clicked => { active-tab = 3; }
                 }
                 
-                Button {
+                TabButton {
                     text: "Sources";
-                    checkable: true;
-                    checked: active-tab == 4;
+                    active: active-tab == 4;
                     clicked => { active-tab = 4; }
                 }
             }
@@ -280,17 +311,36 @@ export component MainWindow inherits Window {
             hide-when-not-focused <=> root.behavior-hide-not-focused;
             preserve-position <=> root.behavior-preserve-position;
             minimize-on-switch <=> root.behavior-minimize-on-switch;
-            require-eve-focus <=> root.behavior-require-eve-focus;
+            // require-eve-focus <=> root.behavior-require-eve-focus;
+            inherit-position <=> root.behavior-inherit-position;
             cycle-logged-out <=> root.behavior-cycle-logged-out;
             reset-index <=> root.behavior-reset-index;
+            
+            // Backup
+            backup-enabled <=> root.backup-enabled;
+            backup-interval <=> root.backup-interval;
+            backup-retention <=> root.backup-retention;
+            create-backup => { root.create-backup(); }
+            restore-backup => { root.restore-backup(); }
+            delete-backup => { root.delete-backup(); }
         }
         
         if active-tab == 1: HotkeysTab {
             input-device <=> root.hotkey-input-device;
+            hotkey-backend <=> root.hotkey-backend;
             hotkey-toggle-preview <=> root.hotkey-toggle-preview;
             hotkey-toggle-skip <=> root.hotkey-toggle-skip;
             hotkey-profile-switch <=> root.hotkey-profile-switch;
-            update-binding(id) => { root.update-binding(id); }
+            hotkey-cycle-forward: root.hotkey-cycle-forward;
+            hotkey-cycle-backward: root.hotkey-cycle-backward;
+            hotkey-require-eve-focus <=> root.hotkey-require-eve-focus;
+            
+            update-binding(id) => {
+                root.is-binding = true;
+                root.active-binding-id = id;
+                root.update-binding(id); // Notify backend
+                modal.request-focus();
+            }
         }
         
         if active-tab == 2: AppearanceTab {
@@ -303,6 +353,11 @@ export component MainWindow inherits Window {
             inactive-border-size <=> root.appearance-inactive-border-size;
             inactive-border-color <=> root.appearance-inactive-border-color;
             show-overlay <=> root.appearance-show-overlay;
+            thumbnail-text-size <=> root.appearance-thumbnail-text-size;
+            thumbnail-text-color <=> root.appearance-thumbnail-text-color;
+            thumbnail-text-x <=> root.appearance-thumbnail-text-x;
+            thumbnail-text-y <=> root.appearance-thumbnail-text-y;
+            thumbnail-text-font <=> root.appearance-thumbnail-text-font;
         }
         
         if active-tab == 3: CharactersTab {
@@ -314,6 +369,8 @@ export component MainWindow inherits Window {
             edit-disabled <=> root.character-edit-disabled;
             selection-changed(idx) => { root.character-selected(idx); }
             save-character => { root.save-character(); }
+            move-character-up(idx) => { root.move-character-up(idx); }
+            move-character-down(idx) => { root.move-character-down(idx); }
         }
         
         if active-tab == 4: SourcesTab {
@@ -322,6 +379,8 @@ export component MainWindow inherits Window {
             edit-alias <=> root.source-edit-alias;
             edit-title-pattern <=> root.source-edit-title-pattern;
             edit-class-pattern <=> root.source-edit-class-pattern;
+            edit-border-color <=> root.source-edit-border-color;
+            edit-border-size <=> root.source-edit-border-size;
             
             selection-changed(idx) => { root.source-selected(idx); }
             save-source => { root.save-source(); }
@@ -344,5 +403,23 @@ export component MainWindow inherits Window {
         edit-profile-confirmed(name, desc) => { root.edit-profile-confirmed(name, desc); }
         delete-profile-confirmed => { root.delete-profile-confirmed(); }
         cancel-dialog => { root.cancel-profile-dialog(); }
+    }
+
+    // Modal Overlay (Must be last to be on top)
+    modal := HotkeyModal {
+        show: root.is-binding;
+        binding-name: root.active-binding-id;
+        
+        cancel => {
+            root.is-binding = false;
+            root.cancel-binding();
+        }
+        
+        
+        // If we decide to handle keys in UI later:
+        key-pressed(text, modifiers) => {
+            root.is-binding = false;
+            root.apply-binding(root.active-binding-id, text, modifiers);
+        }
     }
 }
