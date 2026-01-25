@@ -236,6 +236,11 @@ pub mod defaults {
         /// Minimize other clients when switching via hotkey
         pub const MINIMIZE_CLIENTS_ON_SWITCH: bool = false;
 
+        /// Delay in milliseconds after activating a window before minimizing others
+        /// This prevents focus thrashing in some window managers (especially KWin)
+        /// Set to 0 to disable delay for maximum speed
+        pub const CLIENT_MINIMIZE_DELAY_MS: u64 = 25;
+
         /// Require EVE window focus for hotkey activation
         pub const HOTKEY_REQUIRE_EVE_FOCUS: bool = true;
 

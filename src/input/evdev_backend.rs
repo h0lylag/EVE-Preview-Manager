@@ -230,11 +230,11 @@ fn listen_for_hotkeys(
             }
 
             let key_code = event.code();
-            let pressed = event.value() == input::KEY_PRESS;
+            let pressed = event.value() != 0; // makes client swapping feel a little smoother
 
             debug!(key_code = key_code, value = event.value(), "Key event");
 
-            // Collect non-modifier key presses that might be hotkeys
+            // Collect non-modifier key presses (including repeats) that might be hotkeys
             if pressed {
                 let is_cycle_key = config
                     .cycle_hotkeys

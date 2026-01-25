@@ -546,12 +546,14 @@ async fn run_event_loop(
                             debug!(window = window, "activate_window completed successfully");
 
                             if resources.config.profile.client_minimize_on_switch {
-                                // NOTE: Critical delay to prevent KWin focus thrashing. Without this,
-                                // KWin repeatedly redirects focus to window 2097152 (internal KWin window)
-                                // during the minimize operations, causing continuous FocusOut/FocusIn loops.
-                                // The 25ms allows KWin to fully commit to the focus transfer before we
-                                // start changing other window states.
-                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                // NOTE: Configurable delay to prevent KWin focus thrashing.
+                                // Set to 0 for instant switching (allows rapid key repeats). 
+                                // Default: 25ms (safe for most WMs but blocks rapid cycling).
+                                if resources.config.profile.client_minimize_delay_ms > 0 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                        resources.config.profile.client_minimize_delay_ms
+                                    )).await;
+                                }
 
                                 // Minimize all other EVE clients after successful activation
                                 let other_windows: Vec<Window> = resources.eve_clients

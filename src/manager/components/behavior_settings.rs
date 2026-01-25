@@ -105,6 +105,36 @@ pub fn ui(
                         "Show 'MINIMIZED' text overlay").changed() {
                         action = BehaviorSettingsAction::SettingsChanged;
                     }
+                    
+                    ui.add_space(ITEM_SPACING / 2.0);
+                    
+                    // Minimize delay slider
+                    ui.horizontal(|ui| {
+                        ui.label("Minimize delay:");
+                        if ui.add(egui::Slider::new(&mut profile.client_minimize_delay_ms, 0..=100)
+                            .suffix(" ms")
+                            .text(""))
+                            .on_hover_text("Delay after switching windows before minimizing others.\n\
+                                            0ms = Instant (fastest, may cause focus issues on some WMs)\n\
+                                            25ms = Default (safe for KWin)\n\
+                                            50ms+ = Extra stable")
+                            .changed() {
+                            action = BehaviorSettingsAction::SettingsChanged;
+                        }
+                    });
+                    
+                    ui.label(egui::RichText::new(
+                        if profile.client_minimize_delay_ms == 0 {
+                            "Instant switching (no delay)"
+                        } else if profile.client_minimize_delay_ms < 25 {
+                            "Fast switching"
+                        } else if profile.client_minimize_delay_ms == 25 {
+                            "Default - prevents focus thrashing"
+                        } else {
+                            "Extra stable for problematic window managers"
+                        })
+                        .small()
+                        .weak());
                 });
             }
 

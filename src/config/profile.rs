@@ -218,6 +218,10 @@ pub struct Profile {
     pub client_minimize_on_switch: bool,
     /// When minimized, show "MINIMIZED" text overlay
     pub client_minimize_show_overlay: bool,
+    /// Delay in milliseconds after activating a window before minimizing others
+    /// This prevents focus thrashing in some window managers (especially KWin)
+    /// Set to 0 to disable delay for maximum speed
+    pub client_minimize_delay_ms: u64,
 
     // Hotkey settings (per-profile)
     /// Hotkey backend selection (X11 or evdev)
@@ -308,6 +312,10 @@ pub(crate) fn default_preserve_thumbnail_position_on_swap() -> bool {
     crate::common::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
 }
 
+pub(crate) fn default_client_minimize_delay_ms() -> u64 {
+    crate::common::constants::defaults::behavior::CLIENT_MINIMIZE_DELAY_MS
+}
+
 pub(crate) fn default_thumbnail_width() -> u16 {
     crate::common::constants::defaults::thumbnail::WIDTH
 }
@@ -380,6 +388,8 @@ fn default_profiles() -> Vec<Profile> {
         client_minimize_on_switch:
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH,
         client_minimize_show_overlay: false, // Default: off (clean minimized look)
+        client_minimize_delay_ms:
+            crate::common::constants::defaults::behavior::CLIENT_MINIMIZE_DELAY_MS,
         hotkey_backend: default_hotkey_backend(), // Default: X11 (secure, no permissions)
         hotkey_input_device: None, // Default: no device selected (only used by evdev backend)
         hotkey_logged_out_cycle: false, // Default: off
