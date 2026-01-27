@@ -308,6 +308,7 @@ mod tests {
                 hotkey_toggle_skip: None,
                 hotkey_toggle_previews: None,
                 client_minimize_show_overlay: false,
+                client_minimize_exempt_characters: String::new(),
             },
             character_thumbnails: HashMap::new(),
             custom_source_thumbnails: HashMap::new(),

@@ -456,4 +456,6 @@ pub fn render_overrides_section(
             });
         }
     });
+
+    ui.add_space(ITEM_SPACING);
 }

@@ -218,6 +218,8 @@ pub struct Profile {
     pub client_minimize_on_switch: bool,
     /// When minimized, show "MINIMIZED" text overlay
     pub client_minimize_show_overlay: bool,
+    /// Characters that are excluded from auto-minimize (comma-separated list)
+    pub client_minimize_exempt_characters: String,
 
     // Hotkey settings (per-profile)
     /// Hotkey backend selection (X11 or evdev)
@@ -380,6 +382,7 @@ fn default_profiles() -> Vec<Profile> {
         client_minimize_on_switch:
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH,
         client_minimize_show_overlay: false, // Default: off (clean minimized look)
+        client_minimize_exempt_characters: String::new(), // Default: no exempt characters
         hotkey_backend: default_hotkey_backend(), // Default: X11 (secure, no permissions)
         hotkey_input_device: None, // Default: no device selected (only used by evdev backend)
         hotkey_logged_out_cycle: false, // Default: off

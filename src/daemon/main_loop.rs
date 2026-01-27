@@ -554,10 +554,22 @@ async fn run_event_loop(
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
                                 // Minimize all other EVE clients after successful activation
+                                let exempt_chars = resources.config
+                                    .profile
+                                    .client_minimize_exempt_characters
+                                    .split(&[',', '\n'][..])
+                                    .map(|s| s.trim().to_lowercase())
+                                    .filter(|s| !s.is_empty())
+                                    .collect::<std::collections::HashSet<_>>();
+
                                 let other_windows: Vec<Window> = resources.eve_clients
-                                    .keys()
-                                    .copied()
-                                    .filter(|w| *w != window)
+                                    .iter()
+                                    .filter(|(w, _)| **w != window)
+                                    .filter(|(_, t)| {
+                                        // Check if this character is exempt from minimize
+                                        !exempt_chars.contains(&t.character_name.to_lowercase())
+                                    })
+                                    .map(|(w, _)| *w)
                                     .collect();
                                 for other_window in other_windows {
                                     if let Err(e) = minimize_window(ctx.conn, ctx.screen, ctx.atoms, other_window) {
