@@ -56,7 +56,9 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
                         thumbnail.character_name
                     ))?;
             }
-        } else if thumbnail.state.is_focused() {
+        } else {
+            // Update ALL other clients to unfocused state, regardless of cached state
+            // This ensures borders stay in sync even when minimize-on-switch is active
             thumbnail.state = ThumbnailState::Normal { focused: false };
             thumbnail
                 .border(
