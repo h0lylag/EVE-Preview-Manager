@@ -492,6 +492,11 @@ impl CycleState {
         debug!("No active characters found in extended hotkey group");
         None
     }
+
+    /// Get the window ID of the currently focused window (if known)
+    pub fn get_current_window(&self) -> Option<Window> {
+        self.current_window
+    }
 }
 
 #[cfg(test)]
