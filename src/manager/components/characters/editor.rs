@@ -455,6 +455,24 @@ pub fn render_overrides_section(
                 });
             });
         }
+
+        ui.add_space(4.0);
+
+        // Minimize Exemption
+        ui.horizontal(|ui| {
+            ui.label("Minimize Exemption:");
+            let mut is_exempt = settings.exempt_from_minimize;
+
+            if ui.checkbox(&mut is_exempt, "Exempt from minimize-on-switch").changed() {
+                settings.exempt_from_minimize = is_exempt;
+                *changed = true;
+            }
+        });
+        ui.label(
+            egui::RichText::new("This character won't be minimized when switching to others")
+                .small()
+                .weak(),
+        );
     });
 
     ui.add_space(ITEM_SPACING);

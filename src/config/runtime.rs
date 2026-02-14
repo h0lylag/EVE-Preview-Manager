@@ -135,6 +135,7 @@ impl DaemonConfig {
                         override_inactive_border_size: rule.inactive_border_size,
                         override_text_color: rule.text_color.clone(),
                         preview_mode: rule.preview_mode.clone().unwrap_or_default(),
+                        exempt_from_minimize: false,
                     }
                 });
         }

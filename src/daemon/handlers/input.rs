@@ -251,20 +251,40 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         && ctx.daemon_config.profile.client_minimize_on_switch
         && let Some(clicked_src) = clicked_src
     {
-        let exempt_chars = ctx.daemon_config
-            .profile
-            .client_minimize_exempt_characters
-            .split(&[',', '\n'][..])
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect::<std::collections::HashSet<_>>();
-
         // Collect windows to minimize and clear their borders first
         let windows_to_minimize: Vec<Window> = ctx
             .eve_clients
             .iter()
             .filter(|(_, t)| t.src() != clicked_src)
-            .filter(|(_, t)| !exempt_chars.contains(&t.character_name.to_lowercase()))
+            .filter(|(_, t)| {
+                // Check if this character is exempt from minimize
+                // Check both per-character setting AND global list
+                let has_per_char_flag = ctx.daemon_config
+                    .character_thumbnails
+                    .get(&t.character_name)
+                    .map(|settings| settings.exempt_from_minimize)
+                    .unwrap_or(false);
+                
+                let in_global_list = ctx.daemon_config
+                    .profile
+                    .client_minimize_exempt_characters
+                    .split(&[',', '\n'][..])
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .any(|exempt| exempt == t.character_name.to_lowercase());
+                
+                // If both are set, clear the per-character flag to avoid confusion
+                if has_per_char_flag && in_global_list {
+                    if let Some(settings) = ctx.daemon_config.character_thumbnails.get_mut(&t.character_name) {
+                        settings.exempt_from_minimize = false;
+                        debug!(character = %t.character_name, "Cleared per-character minimize exemption - character also in global list");
+                    }
+                }
+                
+                // Exempt if either flag is set (or both)
+                let is_exempt = has_per_char_flag || in_global_list;
+                !is_exempt
+            })
             .map(|(w, _)| *w)
             .collect();
 
