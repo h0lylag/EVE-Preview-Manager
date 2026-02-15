@@ -4,10 +4,10 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
-use x11rb::protocol::xproto::*;
 use x11rb::protocol::Event::{
     self, ConfigureNotify, CreateNotify, DamageNotify, DestroyNotify, PropertyNotify,
 };
+use x11rb::protocol::xproto::*;
 
 use super::cycle_state::CycleState;
 use super::session_state::SessionState;

@@ -226,7 +226,9 @@ pub fn process_detected_window(
                             // Minimized windows should stay Minimized - calling border() on them causes
                             // double-rendering. Instead, re-call minimized() to properly clear and re-render.
                             if thumb.state.is_minimized() {
-                                if let Err(e) = thumb.minimized(ctx.display_config, ctx.font_renderer) {
+                                if let Err(e) =
+                                    thumb.minimized(ctx.display_config, ctx.font_renderer)
+                                {
                                     tracing::warn!(window = *w, error = %e, "Failed to re-render minimized window");
                                 }
                             } else {

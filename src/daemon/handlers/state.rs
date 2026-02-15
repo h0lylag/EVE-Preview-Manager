@@ -21,16 +21,16 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
     // it's likely an intermediate focus event during a transition (e.g., window manager
     // focusing intermediate windows during tabbing). Skip processing entirely to avoid
     // corrupting the cycle state.
-    if let Some(expected) = expected_window {
-        if event.event != expected {
-            debug!(
-                focusin_window = event.event,
-                expected_window = expected,
-                "Ignoring FocusIn for unexpected window during transition"
-            );
-            // Don't update cycle state or draw borders - wait for the correct window's FocusIn
-            return Ok(());
-        }
+    if let Some(expected) = expected_window
+        && event.event != expected
+    {
+        debug!(
+            focusin_window = event.event,
+            expected_window = expected,
+            "Ignoring FocusIn for unexpected window during transition"
+        );
+        // Don't update cycle state or draw borders - wait for the correct window's FocusIn
+        return Ok(());
     }
 
     if ctx.cycle_state.set_current_by_window(event.event) {
