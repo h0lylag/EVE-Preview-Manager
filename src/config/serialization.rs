@@ -53,12 +53,14 @@ struct ProfileHelper {
     #[serde(default)]
     thumbnail_hide_not_focused: bool,
     #[serde(default = "default_preserve_thumbnail_position_on_swap")]
-    thumbnail_preserve_position_on_swap: bool,
+thumbnail_preserve_position_on_swap: bool,
     #[serde(default)]
     client_minimize_on_switch: bool,
-    #[serde(default)]
-    client_minimize_show_overlay: bool,
-    #[serde(default = "default_hotkey_backend")]
+#[serde(default)]
+                client_minimize_show_overlay: bool,
+                #[serde(default)]
+                client_minimize_exempt_characters: String,
+                #[serde(default = "default_hotkey_backend")]
     hotkey_backend: HotkeyBackendType,
     #[serde(default)]
     hotkey_input_device: Option<String>,
@@ -190,6 +192,7 @@ impl From<ProfileHelper> for Profile {
             thumbnail_preserve_position_on_swap: helper.thumbnail_preserve_position_on_swap,
             client_minimize_on_switch: helper.client_minimize_on_switch,
             client_minimize_show_overlay: helper.client_minimize_show_overlay,
+            client_minimize_exempt_characters: helper.client_minimize_exempt_characters,
             hotkey_backend: helper.hotkey_backend,
             hotkey_input_device: helper.hotkey_input_device,
             hotkey_logged_out_cycle: helper.hotkey_logged_out_cycle,
@@ -263,6 +266,8 @@ impl<'de> Deserialize<'de> for Profile {
                 pub client_minimize_on_switch: bool,
                 #[serde(default)]
                 pub client_minimize_show_overlay: bool,
+                #[serde(default)]
+                pub client_minimize_exempt_characters: String,
                 #[serde(default = "default_hotkey_backend")]
                 pub hotkey_backend: HotkeyBackendType,
                 #[serde(default)]
@@ -352,6 +357,7 @@ impl<'de> Deserialize<'de> for Profile {
                 thumbnail_preserve_position_on_swap: p.thumbnail_preserve_position_on_swap,
                 client_minimize_on_switch: p.client_minimize_on_switch,
                 client_minimize_show_overlay: p.client_minimize_show_overlay,
+                client_minimize_exempt_characters: p.client_minimize_exempt_characters.clone(),
                 hotkey_backend: p.hotkey_backend,
                 hotkey_input_device: p.hotkey_input_device,
                 cycle_groups,

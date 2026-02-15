@@ -192,6 +192,43 @@ pub fn render_cycle_group_column(
     ui.separator();
     ui.add_space(ITEM_SPACING);
 
+    // Excluded Characters from Minimization
+    if profile.client_minimize_on_switch {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Characters to exclude from minimize").strong());
+            });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("(one per line or comma-separated)")
+                    .small()
+                    .weak()
+                    .italics(),
+            );
+            let text_edit =
+                egui::TextEdit::multiline(&mut profile.client_minimize_exempt_characters);
+            if ui
+                .add(
+                    text_edit
+                        .desired_width(ui.available_width() - 20.0)
+                        .desired_rows(3),
+                )
+                .changed()
+            {
+                *changed = true;
+            }
+            ui.label(
+                egui::RichText::new("These characters won't be minimized when switching to others")
+                    .small()
+                    .weak(),
+            );
+        });
+    }
+
+    ui.add_space(ITEM_SPACING);
+    ui.separator();
+    ui.add_space(ITEM_SPACING);
+
     // Character List Header
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Characters").strong());

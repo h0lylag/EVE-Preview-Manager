@@ -545,6 +545,54 @@ async fn run_event_loop(
                         } else {
                             debug!(window = window, "activate_window completed successfully");
 
+                            // Set current window immediately after successful activation.
+                            // This ensures the border shows correctly during the 25ms delay before
+                            // FocusIn arrives. The FocusIn handler will confirm this later.
+                            resources.cycle.set_current_by_window(window);
+
+                            // Draw active border immediately to prevent flash during delay
+                            if let Some(thumb) = resources.eve_clients.get(&window) {
+                                let display_config = resources.config.build_display_config();
+                                if let Err(e) = thumb.border(
+                                    &display_config,
+                                    true,
+                                    resources.cycle.is_skipped(&thumb.character_name),
+                                    &font_renderer,
+                                ) {
+                                    warn!(window = window, error = %e, "Failed to draw initial active border");
+                                }
+                            }
+
+                            // Clear borders from ALL other windows immediately (including minimized ones)
+                            // This ensures we don't leave stale active borders on minimized windows
+                            for (w, thumb) in resources.eve_clients.iter_mut() {
+                                if *w != window {
+                                    let display_config = resources.config.build_display_config();
+                                    // Only change state for non-minimized windows
+                                    // Minimized windows should stay Minimized - calling border() on them causes
+                                    // double-rendering. Instead, re-call minimized() to properly clear and re-render.
+                                    if thumb.state.is_minimized() {
+                                        if let Err(e) = thumb.minimized(&display_config, &font_renderer) {
+                                            warn!(window = *w, error = %e, "Failed to re-render minimized window");
+                                        }
+                                    } else {
+                                        thumb.state = crate::common::types::ThumbnailState::Normal { focused: false };
+                                        if let Err(e) = thumb.border(
+                                            &display_config,
+                                            false,
+                                            resources.cycle.is_skipped(&thumb.character_name),
+                                            &font_renderer,
+                                        ) {
+                                            warn!(window = *w, error = %e, "Failed to clear border during switch");
+                                        }
+                                    }
+                                }
+                            }
+
+                            // CRITICAL: Flush X11 connection to ensure border updates are rendered
+                            // before the 25ms delay. Without this, borders may flash to wrong clients.
+                            let _ = ctx.conn.flush();
+
                             if resources.config.profile.client_minimize_on_switch {
                                 // NOTE: Critical delay to prevent KWin focus thrashing. Without this,
                                 // KWin repeatedly redirects focus to window 2097152 (internal KWin window)
@@ -555,11 +603,55 @@ async fn run_event_loop(
 
                                 // Minimize all other EVE clients after successful activation
                                 let other_windows: Vec<Window> = resources.eve_clients
-                                    .keys()
-                                    .copied()
-                                    .filter(|w| *w != window)
+                                    .iter()
+                                    .filter(|(w, _)| **w != window)
+                                    .filter(|(_, t)| {
+                                        // Check if this character is exempt from minimize
+                                        // Check both per-character setting AND global list
+                                        let has_per_char_flag = resources.config
+                                            .character_thumbnails
+                                            .get(&t.character_name)
+                                            .map(|settings| settings.exempt_from_minimize)
+                                            .unwrap_or(false);
+                                        
+                                        let in_global_list = resources.config
+                                            .profile
+                                            .client_minimize_exempt_characters
+                                            .split(&[',', '\n'][..])
+                                            .map(|s| s.trim().to_lowercase())
+                                            .filter(|s| !s.is_empty())
+                                            .any(|exempt| exempt == t.character_name.to_lowercase());
+                                        
+                                        // If both are set, clear the per-character flag to avoid confusion
+                                        if has_per_char_flag && in_global_list {
+                                            if let Some(settings) = resources.config.character_thumbnails.get_mut(&t.character_name) {
+                                                settings.exempt_from_minimize = false;
+                                                debug!(character = %t.character_name, "Cleared per-character minimize exemption - character also in global list");
+                                            }
+                                        }
+                                        
+                                        // Exempt if either flag is set (or both)
+                                        let is_exempt = has_per_char_flag || in_global_list;
+                                        !is_exempt
+                                    })
+                                    .map(|(w, _)| *w)
                                     .collect();
                                 for other_window in other_windows {
+                                    // Clear border on the window BEFORE minimizing it
+                                    // This prevents leaving stale active borders on minimized windows
+                                    if let Some(thumb) = resources.eve_clients.get_mut(&other_window) {
+                                        // Don't change state here - let the minimize handler set it to Minimized
+                                        // Just clear the border for now
+                                        let display_config = resources.config.build_display_config();
+                                        if let Err(e) = thumb.border(
+                                            &display_config,
+                                            false,
+                                            resources.cycle.is_skipped(&thumb.character_name),
+                                            &font_renderer,
+                                        ) {
+                                            warn!(window = other_window, error = %e, "Failed to clear border before minimize");
+                                        }
+                                    }
                                     if let Err(e) = minimize_window(ctx.conn, ctx.screen, ctx.atoms, other_window) {
                                         debug!(window = other_window, error = %e, "Failed to minimize window via hotkey");
                                     }

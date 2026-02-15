@@ -191,7 +191,6 @@ impl CycleState {
                     // Check active windows first
                     if let Some(&window) = self.active_windows.get(character_name) {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, "Cycling forward to logged-in character");
-                        self.current_window = Some(window);
                         return Some((window, character_name.clone()));
                     }
 
@@ -202,7 +201,6 @@ impl CycleState {
                             .find(|(_, last_char)| *last_char == character_name)
                     {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, window = window, "Cycling forward to logged-out character");
-                        self.current_window = Some(window);
                         return Some((window, character_name.clone()));
                     }
 
@@ -268,7 +266,6 @@ impl CycleState {
 
                     if let Some(&window) = self.active_windows.get(character_name) {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, "Cycling backward to logged-in character");
-                        self.current_window = Some(window);
                         return Some((window, character_name.clone()));
                     }
 
@@ -278,7 +275,6 @@ impl CycleState {
                             .find(|(_, last_char)| *last_char == character_name)
                     {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, window = window, "Cycling backward to logged-out character");
-                        self.current_window = Some(window);
                         return Some((window, character_name.clone()));
                     }
 
@@ -315,9 +311,6 @@ impl CycleState {
                 }
             }
 
-            // Always update current_window
-            self.current_window = Some(window);
-
             return Some((window, character_name));
         }
 
@@ -335,9 +328,6 @@ impl CycleState {
                     group.current_index = index;
                 }
             }
-
-            // Always update current_window
-            self.current_window = Some(window);
 
             return Some((window, character_name));
         }
@@ -501,6 +491,11 @@ impl CycleState {
 
         debug!("No active characters found in extended hotkey group");
         None
+    }
+
+    /// Get the window ID of the currently focused window (if known)
+    pub fn get_current_window(&self) -> Option<Window> {
+        self.current_window
     }
 }
 

@@ -135,6 +135,7 @@ impl DaemonConfig {
                         override_inactive_border_size: rule.inactive_border_size,
                         override_text_color: rule.text_color.clone(),
                         preview_mode: rule.preview_mode.clone().unwrap_or_default(),
+                        exempt_from_minimize: false,
                     }
                 });
         }
@@ -308,6 +309,7 @@ mod tests {
                 hotkey_toggle_skip: None,
                 hotkey_toggle_previews: None,
                 client_minimize_show_overlay: false,
+                client_minimize_exempt_characters: String::new(),
             },
             character_thumbnails: HashMap::new(),
             custom_source_thumbnails: HashMap::new(),
