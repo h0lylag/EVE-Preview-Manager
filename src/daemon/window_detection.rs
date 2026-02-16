@@ -490,36 +490,47 @@ pub fn check_and_create_window<'a>(
 }
 
 /// Initial scan for existing EVE windows to populate thumbnails
+use super::cycle_state::CycleState;
+
 pub fn scan_eve_windows<'a>(
     ctx: &AppContext<'a>,
     display_config: &DisplayConfig,
     font_renderer: &crate::daemon::font::FontRenderer,
     daemon_config: &mut DaemonConfig,
     state: &mut SessionState,
+    cycle_state: &mut CycleState,
 ) -> Result<HashMap<Window, Thumbnail<'a>>> {
-    let net_client_list = ctx.atoms.net_client_list;
-    let prop = ctx
-        .conn
-        .get_property(
-            false,
-            ctx.screen.root,
-            net_client_list,
-            AtomEnum::WINDOW,
-            0,
-            u32::MAX,
-        )
-        .context("Failed to query _NET_CLIENT_LIST property")?
-        .reply()
-        .context("Failed to get window list from X11 server")?;
-    let windows: Vec<u32> = prop
-        .value32()
-        .ok_or_else(|| anyhow::anyhow!("Invalid return from _NET_CLIENT_LIST"))?
-        .collect();
-
     let mut eve_clients = HashMap::new();
+
+    // Get all windows
+    let windows = match ctx.conn.query_tree(ctx.screen.root) {
+        Ok(cookie) => match cookie.reply() {
+            Ok(reply) => reply.children,
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to get root window children: {}", e));
+            }
+        },
+        Err(e) => {
+            return Err(anyhow::anyhow!("Failed to query tree: {}", e));
+        }
+    };
+
     for w in windows {
-        // Use the map we are building as the "existing_thumbnails" context for limit checks
-        // We handle errors gracefully here so one bad window doesn't prevent the daemon from starting
+        // 1. Identify valid windows (EVE or Custom Source)
+        // We use identify_window directly so we can track them even if no thumbnail is created
+        let identity = match identify_window(ctx, w, state, &daemon_config.profile.custom_windows) {
+            Ok(Some(id)) => id,
+            Ok(None) => continue, // Not a relevant window
+            Err(e) => {
+                tracing::warn!("Failed to identify window {} during scan: {}", w, e);
+                continue;
+            }
+        };
+
+        // Register identified window with CycleState
+        cycle_state.add_window(identity.name.clone(), w);
+
+        // 2. Try to create thumbnail
         match check_and_create_window(
             ctx,
             daemon_config,
@@ -528,7 +539,7 @@ pub fn scan_eve_windows<'a>(
             font_renderer,
             state,
             &eve_clients,
-            None,
+            Some(identity.clone()),
         ) {
             Ok(Some(eve)) => {
                 // Save initial position and dimensions (important for first-time characters)
@@ -601,10 +612,16 @@ pub fn scan_eve_windows<'a>(
                 eve_clients.insert(w, eve);
             }
             Ok(None) => {
-                // Window ignored / not matched
+                // Window ignored / not matched for thumbnail creation (e.g. global disabled)
+                // BUT it was already added to identified_windows above
+                // (actually it was added to CycleState above)
             }
             Err(e) => {
-                tracing::warn!("Failed to process window {} during initial scan: {}", w, e);
+                tracing::warn!(
+                    "Failed to create thumbnail for window {} during scan: {}",
+                    w,
+                    e
+                );
             }
         }
     }

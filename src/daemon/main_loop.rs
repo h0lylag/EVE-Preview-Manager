@@ -387,9 +387,15 @@ async fn run_event_loop(
         {
             let mut current_windows: HashSet<u32> = HashSet::new();
 
-            for (src_window, thumbnail) in resources.eve_clients.iter() {
-                current_windows.insert(*src_window); // EVE client source window
-                current_windows.insert(thumbnail.window()); // Thumbnail overlay window
+            // allow hotkeys for all EVE client source windows known to the cycle state
+            // (including those without thumbnails/previews)
+            for src_window in resources.cycle.get_active_windows().values() {
+                current_windows.insert(*src_window);
+            }
+
+            // allow hotkeys for thumbnail overlay windows
+            for thumbnail in resources.eve_clients.values() {
+                current_windows.insert(thumbnail.window());
             }
 
             let need_update = {
@@ -449,7 +455,11 @@ async fn run_event_loop(
                 let should_process = if resources.config.profile.hotkey_require_eve_focus {
                     match crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms) {
                         Ok(Some(active_window)) => {
-                            if resources.eve_clients.contains_key(&active_window) {
+                            // Check if active window is a known EVE window (thumbnail OR just identified)
+                            let is_known = resources.eve_clients.contains_key(&active_window) ||
+                                         resources.cycle.get_active_windows().values().any(|&w| w == active_window);
+
+                            if is_known {
                                 true
                             } else {
                                 // NOTE: The active window might be a child (e.g. in Wine/Proton apps like Mod Organizer).
@@ -462,7 +472,8 @@ async fn run_event_loop(
                                     match ctx.conn.query_tree(current) {
                                         Ok(cookie) => {
                                             if let Ok(reply) = cookie.reply() {
-                                                if resources.eve_clients.contains_key(&reply.parent) {
+                                                if resources.eve_clients.contains_key(&reply.parent) ||
+                                                   resources.cycle.get_active_windows().values().any(|&w| w == reply.parent) {
                                                     found_ancestor = true;
                                                     debug!(
                                                         child = active_window,
@@ -911,25 +922,17 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
             formats: &formats,
         };
 
+        // Initial scan for existing EVE windows
+        // Now populates cycle_state directly during scan
         eve_clients = super::window_detection::scan_eve_windows(
             &ctx,
             &config,
             &font_renderer,
             &mut daemon_config,
             &mut session_state,
+            &mut cycle_state,
         )
         .context("Failed to get initial list of EVE windows")?;
-    }
-
-    // Register initial windows with cycle state
-    if config.enabled {
-        for (window, thumbnail) in eve_clients.iter() {
-            cycle_state.add_window(thumbnail.character_name.clone(), *window);
-        }
-    } else {
-        for (window, character_name) in session_state.window_last_character.iter() {
-            cycle_state.add_window(character_name.clone(), *window);
-        }
     }
 
     // Initialize border state for all windows (defaults to inactive/cleared)

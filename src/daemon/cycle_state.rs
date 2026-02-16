@@ -497,6 +497,11 @@ impl CycleState {
     pub fn get_current_window(&self) -> Option<Window> {
         self.current_window
     }
+
+    /// Get all active windows known to cycle state
+    pub fn get_active_windows(&self) -> &HashMap<String, Window> {
+        &self.active_windows
+    }
 }
 
 #[cfg(test)]
