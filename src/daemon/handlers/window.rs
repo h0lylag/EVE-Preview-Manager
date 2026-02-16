@@ -12,13 +12,13 @@ pub fn handle_damage_notify(
     ctx: &mut EventContext,
     event: x11rb::protocol::damage::NotifyEvent,
 ) -> Result<()> {
-    if !ctx.display_config.enabled {
-        return Ok(());
-    }
+    // We cannot return early here based on global enabled check, because
+    // some thumbnails might have per-character "Always Show" overrides.
+    // Instead, we check the override status for the specific thumbnail below.
 
     if let Some(thumbnail) = ctx
         .eve_clients
-        .values()
+        .values_mut()
         .find(|thumbnail| thumbnail.damage() == event.damage)
     {
         thumbnail
@@ -61,212 +61,206 @@ pub fn process_detected_window(
 
     ctx.cycle_state.add_window(identity.name.clone(), window);
 
-    if ctx.display_config.enabled {
-        match check_and_create_window(
-            ctx.app_ctx,
-            ctx.daemon_config,
-            ctx.display_config,
-            window,
-            ctx.font_renderer,
-            ctx.session_state,
-            ctx.eve_clients,
-            Some(identity.clone()),
-        ) {
-            Ok(Some(thumbnail)) => {
-                let geom_result = ctx
-                    .app_ctx
-                    .conn
-                    .get_geometry(thumbnail.window())
-                    .map_err(anyhow::Error::from)
-                    .and_then(|cookie| cookie.reply().map_err(anyhow::Error::from));
+    match check_and_create_window(
+        ctx.app_ctx,
+        ctx.daemon_config,
+        ctx.display_config,
+        window,
+        ctx.font_renderer,
+        ctx.session_state,
+        ctx.eve_clients,
+        Some(identity.clone()),
+    ) {
+        Ok(Some(mut thumbnail)) => {
+            let geom_result = ctx
+                .app_ctx
+                .conn
+                .get_geometry(thumbnail.window())
+                .map_err(anyhow::Error::from)
+                .and_then(|cookie| cookie.reply().map_err(anyhow::Error::from));
 
-                match geom_result {
-                    Ok(geom) => {
-                        if !thumbnail.character_name.is_empty() {
-                            let settings = crate::common::types::CharacterSettings::new(
-                                geom.x,
-                                geom.y,
-                                thumbnail.dimensions.width,
-                                thumbnail.dimensions.height,
-                            );
+            match geom_result {
+                Ok(geom) => {
+                    if !thumbnail.character_name.is_empty() {
+                        let settings = crate::common::types::CharacterSettings::new(
+                            geom.x,
+                            geom.y,
+                            thumbnail.dimensions.width,
+                            thumbnail.dimensions.height,
+                        );
 
-                            if identity.is_eve {
-                                // Check if we already have settings for this character.
-                                // If so, update the geometry but PRESERVE the user's overrides (like preview_mode).
-                                // This fixes the issue where unminimizing a client (MapNotify) would reset it to Live mode.
-                                if let Some(existing) = ctx
-                                    .daemon_config
-                                    .character_thumbnails
-                                    .get_mut(&thumbnail.character_name)
-                                {
-                                    existing.x = settings.x;
-                                    existing.y = settings.y;
-                                    existing.dimensions = settings.dimensions;
-                                } else {
-                                    ctx.daemon_config
-                                        .character_thumbnails
-                                        .insert(thumbnail.character_name.clone(), settings.clone());
-                                }
+                        if identity.is_eve {
+                            // Check if we already have settings for this character.
+                            // If so, update the geometry but PRESERVE the user's overrides (like preview_mode).
+                            // This fixes the issue where unminimizing a client (MapNotify) would reset it to Live mode.
+                            if let Some(existing) = ctx
+                                .daemon_config
+                                .character_thumbnails
+                                .get_mut(&thumbnail.character_name)
+                            {
+                                existing.x = settings.x;
+                                existing.y = settings.y;
+                                existing.dimensions = settings.dimensions;
                             } else {
                                 ctx.daemon_config
-                                    .custom_source_thumbnails
+                                    .character_thumbnails
                                     .insert(thumbnail.character_name.clone(), settings.clone());
                             }
+                        } else {
+                            ctx.daemon_config
+                                .custom_source_thumbnails
+                                .insert(thumbnail.character_name.clone(), settings.clone());
+                        }
 
-                            let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
+                        let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
+                            name: thumbnail.character_name.clone(),
+                            x: settings.x,
+                            y: settings.y,
+                            width: settings.dimensions.width,
+                            height: settings.dimensions.height,
+                            is_custom: !identity.is_eve,
+                        });
+
+                        // Only send CharacterDetected if this is a new window (avoid spam from Create+Map)
+                        if !ctx.eve_clients.contains_key(&window) {
+                            let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected {
                                 name: thumbnail.character_name.clone(),
-                                x: settings.x,
-                                y: settings.y,
-                                width: settings.dimensions.width,
-                                height: settings.dimensions.height,
                                 is_custom: !identity.is_eve,
                             });
+                        }
 
-                            // Only send CharacterDetected if this is a new window (avoid spam from Create+Map)
-                            if !ctx.eve_clients.contains_key(&window) {
-                                let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected {
-                                    name: thumbnail.character_name.clone(),
-                                    is_custom: !identity.is_eve,
-                                });
+                        // Force initial update for custom sources as they might not emit Damage events immediately
+                        if !identity.is_eve {
+                            // 1. Attempt immediate capture
+                            if let Err(e) = thumbnail.update(ctx.display_config, ctx.font_renderer)
+                            {
+                                tracing::warn!(
+                                    "Failed to perform initial update for custom source {}: {}",
+                                    thumbnail.character_name,
+                                    e
+                                );
                             }
 
-                            // Force initial update for custom sources as they might not emit Damage events immediately
-                            if !identity.is_eve {
-                                // 1. Attempt immediate capture
-                                if let Err(e) =
-                                    thumbnail.update(ctx.display_config, ctx.font_renderer)
-                                {
-                                    tracing::warn!(
-                                        "Failed to perform initial update for custom source {}: {}",
-                                        thumbnail.character_name,
-                                        e
-                                    );
-                                }
+                            // 2. Send synthetic Expose event to force the application to repaint
+                            // This fixes issues where apps wait for focus or interaction to paint their first frame
+                            let src_geom = ctx
+                                .app_ctx
+                                .conn
+                                .get_geometry(window)
+                                .context("Failed to get geometry for custom source expose")?
+                                .reply()
+                                .context("Failed to receive geometry reply")?;
 
-                                // 2. Send synthetic Expose event to force the application to repaint
-                                // This fixes issues where apps wait for focus or interaction to paint their first frame
-                                let src_geom = ctx
-                                    .app_ctx
-                                    .conn
-                                    .get_geometry(window)
-                                    .context("Failed to get geometry for custom source expose")?
-                                    .reply()
-                                    .context("Failed to receive geometry reply")?;
+                            let expose = ExposeEvent {
+                                response_type: EXPOSE_EVENT,
+                                sequence: 0,
+                                window,
+                                x: 0,
+                                y: 0,
+                                width: src_geom.width,
+                                height: src_geom.height,
+                                count: 0,
+                            };
 
-                                let expose = ExposeEvent {
-                                    response_type: EXPOSE_EVENT,
-                                    sequence: 0,
-                                    window,
-                                    x: 0,
-                                    y: 0,
-                                    width: src_geom.width,
-                                    height: src_geom.height,
-                                    count: 0,
-                                };
-
-                                if let Err(e) = ctx.app_ctx.conn.send_event(
-                                    false,
-                                    window,
-                                    EventMask::EXPOSURE,
-                                    expose,
-                                ) {
-                                    tracing::warn!(
-                                        "Failed to send Expose event to {}: {}",
-                                        thumbnail.character_name,
-                                        e
-                                    );
-                                }
-                                let _ = ctx.app_ctx.conn.flush();
+                            if let Err(e) = ctx.app_ctx.conn.send_event(
+                                false,
+                                window,
+                                EventMask::EXPOSURE,
+                                expose,
+                            ) {
+                                tracing::warn!(
+                                    "Failed to send Expose event to {}: {}",
+                                    thumbnail.character_name,
+                                    e
+                                );
                             }
+                            let _ = ctx.app_ctx.conn.flush();
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to query geometry for new thumbnail window {}: {}",
-                            thumbnail.window(),
-                            e
-                        );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to query geometry for new thumbnail window {}: {}",
+                        thumbnail.window(),
+                        e
+                    );
+                }
+            }
+
+            ctx.eve_clients.insert(window, thumbnail);
+
+            // Check if this newly detected/mapped window is actually the focused window
+            // This handles cases like unminimizing where MapNotify might race with FocusIn,
+            // or where we overwrote the focused state by re-inserting the thumbnail.
+            let is_actually_focused = crate::x11::get_active_window(
+                ctx.app_ctx.conn,
+                ctx.app_ctx.screen,
+                ctx.app_ctx.atoms,
+            )
+            .unwrap_or(None)
+            .map(|active| active == window)
+            .unwrap_or(false);
+
+            if is_actually_focused {
+                // Update this window to focused
+                if let Some(thumb) = ctx.eve_clients.get_mut(&window) {
+                    thumb.state = crate::common::types::ThumbnailState::Normal { focused: true };
+                    if let Err(e) = thumb.border(
+                        ctx.display_config,
+                        true,
+                        ctx.cycle_state.is_skipped(&thumb.character_name),
+                        ctx.font_renderer,
+                    ) {
+                        tracing::warn!(window = window, error = %e, "Failed to draw active border for restored window");
                     }
                 }
 
-                ctx.eve_clients.insert(window, thumbnail);
-
-                // Check if this newly detected/mapped window is actually the focused window
-                // This handles cases like unminimizing where MapNotify might race with FocusIn,
-                // or where we overwrote the focused state by re-inserting the thumbnail.
-                let is_actually_focused = crate::x11::get_active_window(
-                    ctx.app_ctx.conn,
-                    ctx.app_ctx.screen,
-                    ctx.app_ctx.atoms,
-                )
-                .unwrap_or(None)
-                .map(|active| active == window)
-                .unwrap_or(false);
-
-                if is_actually_focused {
-                    // Update this window to focused
-                    if let Some(thumb) = ctx.eve_clients.get_mut(&window) {
-                        thumb.state =
-                            crate::common::types::ThumbnailState::Normal { focused: true };
-                        if let Err(e) = thumb.border(
-                            ctx.display_config,
-                            true,
-                            ctx.cycle_state.is_skipped(&thumb.character_name),
-                            ctx.font_renderer,
-                        ) {
-                            tracing::warn!(window = window, error = %e, "Failed to draw active border for restored window");
-                        }
-                    }
-
-                    // Clear borders from ALL other windows (including minimized ones)
-                    // This prevents stale active borders from appearing on wrong clients
-                    for (w, thumb) in ctx.eve_clients.iter_mut() {
-                        if *w != window {
-                            // Only change state for non-minimized windows
-                            // Minimized windows should stay Minimized - calling border() on them causes
-                            // double-rendering. Instead, re-call minimized() to properly clear and re-render.
-                            if thumb.state.is_minimized() {
-                                if let Err(e) =
-                                    thumb.minimized(ctx.display_config, ctx.font_renderer)
-                                {
-                                    tracing::warn!(window = *w, error = %e, "Failed to re-render minimized window");
-                                }
-                            } else {
-                                thumb.state =
-                                    crate::common::types::ThumbnailState::Normal { focused: false };
-                                if let Err(e) = thumb.border(
-                                    ctx.display_config,
-                                    false,
-                                    ctx.cycle_state.is_skipped(&thumb.character_name),
-                                    ctx.font_renderer,
-                                ) {
-                                    tracing::warn!(window = *w, error = %e, "Failed to clear border for previous window");
-                                }
+                // Clear borders from ALL other windows (including minimized ones)
+                // This prevents stale active borders from appearing on wrong clients
+                for (w, thumb) in ctx.eve_clients.iter_mut() {
+                    if *w != window {
+                        // Only change state for non-minimized windows
+                        // Minimized windows should stay Minimized - calling border() on them causes
+                        // double-rendering. Instead, re-call minimized() to properly clear and re-render.
+                        if thumb.state.is_minimized() {
+                            if let Err(e) = thumb.minimized(ctx.display_config, ctx.font_renderer) {
+                                tracing::warn!(window = *w, error = %e, "Failed to re-render minimized window");
+                            }
+                        } else {
+                            thumb.state =
+                                crate::common::types::ThumbnailState::Normal { focused: false };
+                            if let Err(e) = thumb.border(
+                                ctx.display_config,
+                                false,
+                                ctx.cycle_state.is_skipped(&thumb.character_name),
+                                ctx.font_renderer,
+                            ) {
+                                tracing::warn!(window = *w, error = %e, "Failed to clear border for previous window");
                             }
                         }
                     }
-                } else {
-                    // Not focused, just draw inactive border
-                    if let Some(thumb) = ctx.eve_clients.get_mut(&window)
-                        && let Err(e) = thumb.border(
-                            ctx.display_config,
-                            false,
-                            ctx.cycle_state.is_skipped(&thumb.character_name),
-                            ctx.font_renderer,
-                        )
-                    {
-                        tracing::warn!(window = window, error = %e, "Failed to draw initial border for new window");
-                    }
+                }
+            } else {
+                // Not focused, just draw inactive border
+                if let Some(thumb) = ctx.eve_clients.get_mut(&window)
+                    && let Err(e) = thumb.border(
+                        ctx.display_config,
+                        false,
+                        ctx.cycle_state.is_skipped(&thumb.character_name),
+                        ctx.font_renderer,
+                    )
+                {
+                    tracing::warn!(window = window, error = %e, "Failed to draw initial border for new window");
                 }
             }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(
-                    window = window,
-                    error = %e,
-                    "Failed to create thumbnail"
-                );
-            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(
+                window = window,
+                error = %e,
+                "Failed to create thumbnail"
+            );
         }
     }
     Ok(())

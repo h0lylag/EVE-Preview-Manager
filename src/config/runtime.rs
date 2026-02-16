@@ -136,6 +136,7 @@ impl DaemonConfig {
                         override_text_color: rule.text_color.clone(),
                         preview_mode: rule.preview_mode.clone().unwrap_or_default(),
                         exempt_from_minimize: false,
+                        override_render_preview: None,
                     }
                 });
         }

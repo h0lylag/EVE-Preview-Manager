@@ -45,6 +45,18 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
 
     if ctx.display_config.hide_when_no_focus && ctx.eve_clients.values().any(|x| !x.is_visible()) {
         for thumbnail in ctx.eve_clients.values_mut() {
+            // Respect per-character override: don't reveal force-hidden thumbnails
+            let should_render = ctx
+                .display_config
+                .character_settings
+                .get(&thumbnail.character_name)
+                .and_then(|s| s.override_render_preview)
+                .unwrap_or(ctx.display_config.enabled);
+
+            if !should_render {
+                continue;
+            }
+
             debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
             thumbnail.visibility(true).context(format!(
                 "Failed to show thumbnail '{}' on focus",

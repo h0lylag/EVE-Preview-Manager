@@ -282,10 +282,24 @@ impl<'a> Thumbnail<'a> {
 
     /// Triggers a repaint of the thumbnail content and overlay.
     pub fn update(
-        &self,
+        &mut self,
         display_config: &DisplayConfig,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
+        // Resolve per-character preview visibility override against the global setting.
+        // override_render_preview: None = use global, Some(true) = force on, Some(false) = force off
+        let should_render = display_config
+            .character_settings
+            .get(&self.character_name)
+            .and_then(|s| s.override_render_preview)
+            .unwrap_or(display_config.enabled);
+
+        if !should_render {
+            // Unmap the entire thumbnail window so it fully disappears
+            self.visibility(false)?;
+            return Ok(());
+        }
+
         if !self.is_visible() {
             return Ok(());
         }

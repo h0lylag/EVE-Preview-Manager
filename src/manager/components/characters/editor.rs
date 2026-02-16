@@ -468,6 +468,49 @@ pub fn render_overrides_section(
                 *changed = true;
             }
         });
+
+        // Preview Visibility Override
+        ui.horizontal(|ui| {
+            ui.label("Preview Visibility:");
+
+            // Map Option<bool> to a display label
+            let current_label = match settings.override_render_preview {
+                None => "Default",
+                Some(true) => "Always Show",
+                Some(false) => "Always Hide",
+            };
+
+            egui::ComboBox::from_id_salt(format!("preview_vis_{}", character_name))
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_value(&mut settings.override_render_preview, None, "Default")
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                    if ui
+                        .selectable_value(
+                            &mut settings.override_render_preview,
+                            Some(true),
+                            "Always Show",
+                        )
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                    if ui
+                        .selectable_value(
+                            &mut settings.override_render_preview,
+                            Some(false),
+                            "Always Hide",
+                        )
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                });
+        });
     });
 
     ui.add_space(ITEM_SPACING);

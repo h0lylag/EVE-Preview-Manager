@@ -1096,15 +1096,22 @@ fn handle_cycle_command(
             );
 
             // Force visibility update for all known thumbnails
+            let display_config = resources.config.build_display_config();
             for thumbnail in resources.eve_clients.values_mut() {
-                if let Err(e) = thumbnail.visibility(!resources.config.runtime_hidden) {
+                // When revealing, respect per-character overrides: force-hidden thumbnails stay hidden
+                let should_render = display_config
+                    .character_settings
+                    .get(&thumbnail.character_name)
+                    .and_then(|s| s.override_render_preview)
+                    .unwrap_or(display_config.enabled);
+
+                let target_visible = !resources.config.runtime_hidden && should_render;
+
+                if let Err(e) = thumbnail.visibility(target_visible) {
                     warn!(character = %thumbnail.character_name, error = %e, "Failed to update visibility after toggle");
-                } else {
+                } else if target_visible {
                     // Force update to ensure content is drawn if revealed
-                    if !resources.config.runtime_hidden {
-                        let display_config = resources.config.build_display_config();
-                        let _ = thumbnail.update(&display_config, font_renderer);
-                    }
+                    let _ = thumbnail.update(&display_config, font_renderer);
                 }
             }
             None

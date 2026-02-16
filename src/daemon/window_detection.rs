@@ -361,13 +361,8 @@ pub fn check_and_create_window<'a>(
     // and `handle_create_notify` calls `identify_window` before calling this.
     // This function is strictly for determining if we should create a renderable thumbnail.
 
-    if !display_config.enabled {
-        return Ok(None);
-    }
-
     let character_name = identity.name;
 
-    // Get saved position and dimensions
     // Get saved position and dimensions
     // Determine which map to query based on identity type
     let settings_map = if identity.is_eve {
@@ -398,6 +393,20 @@ pub fn check_and_create_window<'a>(
             daemon_config.profile.thumbnail_preserve_position_on_swap,
         )
     };
+
+    // Determine effective settings for dimensions and mode
+    let effective_settings = settings_map
+        .get(&character_name)
+        .or_else(|| profile_map.get(&character_name));
+
+    // Check for "Always Show" override
+    let force_enable = effective_settings
+        .and_then(|s| s.override_render_preview)
+        .unwrap_or(false);
+
+    if !display_config.enabled && !force_enable {
+        return Ok(None);
+    }
 
     // Determine effective settings for dimensions and mode
     let effective_settings = settings_map
