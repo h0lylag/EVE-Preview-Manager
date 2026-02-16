@@ -1,0 +1,58 @@
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.job }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [fmt, clippy, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        if: matrix.job != 'fmt'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libdbus-1-dev \
+            libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcomposite-dev \
+            libxdamage-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.job == 'fmt'
+        with:
+          components: rustfmt
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.job == 'clippy'
+        with:
+          components: clippy
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.job == 'test'
+
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.job != 'fmt'
+
+      - name: cargo fmt (check)
+        if: matrix.job == 'fmt'
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (deny warnings)
+        if: matrix.job == 'clippy'
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        if: matrix.job == 'test'
+        run: cargo test --all-features
