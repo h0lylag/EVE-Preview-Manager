@@ -55,7 +55,12 @@ impl CaptureState {
 
     /// Update description based on current state
     pub fn update_description(&mut self) {
-        if self.key_code.is_none() {
+        if let Some(key_code) = self.key_code {
+            // Key captured, show full binding
+            let binding =
+                HotkeyBinding::new(key_code, self.ctrl, self.shift, self.alt, self.super_key);
+            self.description = binding.display_name();
+        } else {
             // Still waiting for main key
             let mut parts = Vec::new();
             if self.ctrl {
@@ -76,16 +81,6 @@ impl CaptureState {
             } else {
                 self.description = format!("{}+?", parts.join("+"));
             }
-        } else {
-            // Key captured, show full binding
-            let binding = HotkeyBinding::new(
-                self.key_code.unwrap(),
-                self.ctrl,
-                self.shift,
-                self.alt,
-                self.super_key,
-            );
-            self.description = binding.display_name();
         }
     }
 }
