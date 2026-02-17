@@ -1,5 +1,6 @@
 .github/*.md
 .agent/
+docs/
 CLAUDE.md
 target/
 dist/
