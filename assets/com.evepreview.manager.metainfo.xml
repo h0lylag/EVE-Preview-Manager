@@ -10,7 +10,8 @@
 
   <description>
     <p>
-      EVE Preview Manager is a lightweight utility designed to enhance the EVE Online multi-boxing experience.
+      EVE Preview Manager is a lightweight utility designed to enhance the EVE Online multi-boxing
+      experience.
     </p>
     <p>Key features include:</p>
     <ul>
@@ -51,18 +52,43 @@
   </screenshots>
 
   <releases>
+    <release version="1.7.0" date="2026-02-17">
+      <description>
+        <p>New:</p>
+        <ul>
+          <li>Minimize Client Override: Per-character control to exclude specific clients from being
+            minimized when using the "Minimize EVE Clients" feature.</li>
+          <li>Preview Render Override: Per-character control to prevent preview rendering or force
+            rendering when global preview rendering is disabled.</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>Fixed hotkey cycling when previews are disabled entirely by decoupling hotkey
+            authorization from thumbnail preview generation.</li>
+        </ul>
+        <p>Other:</p>
+        <ul>
+          <li>Improved layout and usability of the Character Manager tab.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.6.2" date="2026-01-15">
       <description>
         <p>Fixed:</p>
         <ul>
-          <li>Resolved mouse detection issues in recently focused EVE clients by forcing a cursor state refresh after window activation</li>
-          <li>Fixed previews flickering/redrawing when using the "Hide Thumbnails When EVE Loses Focus" option and cycling through clients</li>
+          <li>Resolved mouse detection issues in recently focused EVE clients by forcing a cursor
+            state refresh after window activation</li>
+          <li>Fixed previews flickering/redrawing when using the "Hide Thumbnails When EVE Loses
+            Focus" option and cycling through clients</li>
           <li>Resolved an issue causing the configuration file to be saved excessively</li>
-          <li>Improved window activation and focus reliability when using the "Minimize EVE Clients" option</li>
+          <li>Improved window activation and focus reliability when using the "Minimize EVE Clients"
+            option</li>
         </ul>
         <p>Other:</p>
         <ul>
-          <li>Optimized performance and stability with delta-based IPC for thumbnail updates and conditional font rebuilds, reducing input latency and focus thrashing when cycling clients at fast intervals</li>
+          <li>Optimized performance and stability with delta-based IPC for thumbnail updates and
+            conditional font rebuilds, reducing input latency and focus thrashing when cycling
+            clients at fast intervals</li>
         </ul>
       </description>
     </release>
@@ -71,7 +97,8 @@
         <p>Fixed:</p>
         <ul>
           <li>Fixed previewing custom sources launched via Steam/Proton that could cause crashes.</li>
-          <li>Fixed window re-detection for minimized clients to correctly preserve character settings, cycle group state, and preview rendering.</li>
+          <li>Fixed window re-detection for minimized clients to correctly preserve character
+            settings, cycle group state, and preview rendering.</li>
         </ul>
       </description>
     </release>
@@ -79,15 +106,22 @@
       <description>
         <p>New:</p>
         <ul>
-          <li>Automated Backups: EPM now automatically backs up your config. Backups are compressed (1-2Kb each) to keep storage impact minimal. Automatically prunes the oldest files. Manual backups are preserved indefinitely.</li>
-          <li>Custom Source Settings: Integrated sources into cycle groups, added per-source hotkeys, and per-source visual overrides.</li>
-          <li>Cycle Groups: Added new option (off by default) that resets the cycle order to the beginning of the list when swapping between separate cycle groups.</li>
-          <li>Logging: Added --debug flag for troubleshooting and reduced standard log verbosity to keep the output less cluttered.</li>
+          <li>Automated Backups: EPM now automatically backs up your config. Backups are compressed
+            (1-2Kb each) to keep storage impact minimal. Automatically prunes the oldest files.
+            Manual backups are preserved indefinitely.</li>
+          <li>Custom Source Settings: Integrated sources into cycle groups, added per-source
+            hotkeys, and per-source visual overrides.</li>
+          <li>Cycle Groups: Added new option (off by default) that resets the cycle order to the
+            beginning of the list when swapping between separate cycle groups.</li>
+          <li>Logging: Added --debug flag for troubleshooting and reduced standard log verbosity to
+            keep the output less cluttered.</li>
         </ul>
         <p>Fixed:</p>
         <ul>
-          <li>Custom Sources: Resolved issues with preview persistence, positioning, auto-detection logic, and borders not being applied.</li>
-          <li>Overrides: Fixed a bug where per-character override settings (like static backgrounds) would fail to persist after a character logged out and back in.</li>
+          <li>Custom Sources: Resolved issues with preview persistence, positioning, auto-detection
+            logic, and borders not being applied.</li>
+          <li>Overrides: Fixed a bug where per-character override settings (like static backgrounds)
+            would fail to persist after a character logged out and back in.</li>
         </ul>
       </description>
     </release>
@@ -95,9 +129,10 @@
       <description>
         <p>New Features:</p>
         <ul>
-            <li>Expanded cycle groups: Profiles now support multiple independent cycle groups, enabling cycling through multiple groups of characters with separate hotkeys.</li>
-            <li>Custom Sources: Experimental support for adding and previewing custom windows.</li>
-            <li>Preview Toggle: New hotkey to temporarily disable or enable thumbnail previews.</li>
+          <li>Expanded cycle groups: Profiles now support multiple independent cycle groups,
+            enabling cycling through multiple groups of characters with separate hotkeys.</li>
+          <li>Custom Sources: Experimental support for adding and previewing custom windows.</li>
+          <li>Preview Toggle: New hotkey to temporarily disable or enable thumbnail previews.</li>
         </ul>
       </description>
     </release>
@@ -105,14 +140,17 @@
       <description>
         <p>New Features:</p>
         <ul>
-          <li>Static Mode: A new per-character override that allows you to use a solid color for the thumbnail background instead of a live preview.</li>
+          <li>Static Mode: A new per-character override that allows you to use a solid color for the
+            thumbnail background instead of a live preview.</li>
         </ul>
         <ul>
-          <li>Added a setting to disable/enable the "MINIMIZED" overlay text when using the "Minimize EVE clients when switching focus" feature.</li>
+          <li>Added a setting to disable/enable the "MINIMIZED" overlay text when using the
+            "Minimize EVE clients when switching focus" feature.</li>
         </ul>
         <p>Fixed:</p>
         <ul>
-          <li>Fixed a bug where inactive client borders were not rendered until the client was focused at least once before.</li>
+          <li>Fixed a bug where inactive client borders were not rendered until the client was
+            focused at least once before.</li>
         </ul>
       </description>
     </release>
@@ -140,14 +178,18 @@
           <li>Inactive Client Borders: Customizable border color and thickness for inactive clients.</li>
           <li>Advanced Character Management:</li>
           <li>Aliases: Create custom names (e.g., "Main", "Super") for previews.</li>
-          <li>Visual Overrides: Configure border color, text color, and size on a per-character basis.</li>
+          <li>Visual Overrides: Configure border color, text color, and size on a per-character
+            basis.</li>
           <li>Load Profile Hotkey: Instantly load a specific profile via hotkey.</li>
-          <li>Temporary Cycle Skip: Hotkey to temporarily skip a character in the cycle group (resets on refresh/swap).</li>
+          <li>Temporary Cycle Skip: Hotkey to temporarily skip a character in the cycle group
+            (resets on refresh/swap).</li>
         </ul>
         <p>Tweaks:</p>
         <ul>
-          <li>Flexible Character Hotkeys: Per-character hotkeys now work even if not in the cycle group.</li>
-          <li>Enforced XWayland: The app now enforces X11/XWayland mode to ensure reliable hotkeys without the user being in the input group.</li>
+          <li>Flexible Character Hotkeys: Per-character hotkeys now work even if not in the cycle
+            group.</li>
+          <li>Enforced XWayland: The app now enforces X11/XWayland mode to ensure reliable hotkeys
+            without the user being in the input group.</li>
         </ul>
       </description>
     </release>
