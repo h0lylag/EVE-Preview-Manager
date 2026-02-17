@@ -415,12 +415,6 @@ impl<'a> ThumbnailRenderer<'a> {
     ///
     /// # Errors
     /// Returns an error if X11 composite operations fail.
-    /// Captures the current content of the source window and composites it into the thumbnail.
-    ///
-    /// This applies the necessary scaling transform to fit the source content into the thumbnail dimensions.
-    ///
-    /// # Errors
-    /// Returns an error if X11 composite operations fail.
     pub fn capture(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
         // Query attributes to check map state
         let attr_cookie = self.conn.get_window_attributes(self.src)?;

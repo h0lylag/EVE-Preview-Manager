@@ -62,9 +62,6 @@ pub fn log_system_info() {
                 "Memory: {:.2} GB (Total), {:.2} GB (Available)",
                 total, avail
             );
-        } else {
-            // Fallback for unexpected formats
-            // info!("Memory information found but could not be parsed");
         }
     }
 

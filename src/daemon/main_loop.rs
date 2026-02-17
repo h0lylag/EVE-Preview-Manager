@@ -99,9 +99,6 @@ fn initialize_state(
     SessionState,
     CycleState,
 )> {
-    // Load config with screen-aware defaults
-    // let daemon_config =
-    //    DaemonConfig::load_with_screen(screen.width_in_pixels, screen.height_in_pixels);
     let config = daemon_config.build_display_config();
     debug!("Loaded display configuration");
 
@@ -330,9 +327,8 @@ async fn run_event_loop(
     let x11_fd = AsyncFd::new(conn.stream().as_raw_fd())
         .context("Failed to create AsyncFd for X11 connection")?;
 
-    // Heartbeat timer (3s interval)
+    // Heartbeat timer (3s interval) - skip missed ticks to prevent backlog
     let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(3));
-    // Set the first tick to finish immediately? No, we can wait 3s for the first one.
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Timer for delayed thumbnail hiding (hysteresis)
@@ -674,8 +670,7 @@ async fn run_event_loop(
                             }
                         }
                     } else {
-                         // Simplify logging to avoid iterating all groups for a warn message
-                        warn!("No window to activate via hotkey (or command handled internally)");
+                        warn!("No window to activate via hotkey");
                     }
                 } else {
                     info!(hotkey_require_eve_focus = resources.config.profile.hotkey_require_eve_focus, "Hotkey ignored, EVE window not focused (hotkey_require_eve_focus enabled)");

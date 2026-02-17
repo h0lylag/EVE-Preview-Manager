@@ -358,8 +358,6 @@ impl CycleState {
             debug!(character = %character_name, "Setting current character (updated group indices)");
             true
         } else {
-            // Not in any group, but we still updated active_windows/current_window
-            // warn!(character = %character_name, "Character not in any cycle group");
             false
         }
     }
