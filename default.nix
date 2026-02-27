@@ -5,17 +5,16 @@
 let
   manifest = (pkgs.lib.importTOML ./Cargo.toml).package;
 
-  # Runtime libraries for eframe (glow backend) + wayland + X11
+  # Runtime libraries
   runtimeLibs = with pkgs; [
-    libGL # OpenGL for eframe/glow
-    libxkbcommon # Keyboard handling
-    wayland # Wayland backend
-    xorg.libX11 # X11 backend
-    xorg.libXcursor
-    xorg.libXrandr
-    xorg.libXi
-    fontconfig # Font discovery (fontconfig crate)
-    dbus # D-Bus for ksni system tray
+    libGL
+    libxkbcommon
+    wayland
+    libx11
+    libxcursor
+    libxrandr
+    libxi
+    fontconfig
   ];
 in
 
@@ -40,8 +39,8 @@ pkgs.rustPlatform.buildRustPackage rec {
   # Wrap binary with LD_LIBRARY_PATH for runtime-loaded libs (OpenGL, Wayland, X11)
   postInstall = ''
     install -Dm644 assets/com.evepreview.manager.desktop $out/share/applications/eve-preview-manager.desktop
-    install -Dm644 assets/com.evepreview.manager.svg $out/share/icons/hicolor/scalable/apps/eve-preview-manager.svg
-    substituteInPlace $out/share/applications/eve-preview-manager.desktop --replace "Icon=com.evepreview.manager" "Icon=eve-preview-manager"
+    install -Dm644 assets/com.evepreview.manager.svg $out/share/icons/hicolor/scalable/apps/com.evepreview.manager.svg
+    install -Dm644 assets/com.evepreview.manager.metainfo.xml $out/share/metainfo/com.evepreview.manager.metainfo.xml
     wrapProgram $out/bin/eve-preview-manager --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibs}"
   '';
 
