@@ -21,13 +21,20 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
     // it's likely an intermediate focus event during a transition (e.g., window manager
     // focusing intermediate windows during tabbing). Skip processing entirely to avoid
     // corrupting the cycle state.
+    //
+    // NOTE: Only filter UNTRACKED windows (WM internals, transient overlays, etc.).
+    // If this FocusIn is for a window we actually track, always allow it through.
+    // This prevents a stuck-filter scenario where a custom source redirects focus to
+    // an internal subwindow after activation — the tracked window's FocusIn never
+    // arrives, leaving current_window permanently set and blocking all future events.
     if let Some(expected) = expected_window
         && event.event != expected
+        && !ctx.eve_clients.contains_key(&event.event)
     {
         debug!(
             focusin_window = event.event,
             expected_window = expected,
-            "Ignoring FocusIn for unexpected window during transition"
+            "Ignoring FocusIn for untracked intermediate window during transition"
         );
         // Don't update cycle state or draw borders - wait for the correct window's FocusIn
         return Ok(());

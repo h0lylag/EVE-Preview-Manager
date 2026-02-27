@@ -502,18 +502,12 @@ pub fn scan_eve_windows<'a>(
 ) -> Result<HashMap<Window, Thumbnail<'a>>> {
     let mut eve_clients = HashMap::new();
 
-    // Get all windows
-    let windows = match ctx.conn.query_tree(ctx.screen.root) {
-        Ok(cookie) => match cookie.reply() {
-            Ok(reply) => reply.children,
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to get root window children: {}", e));
-            }
-        },
-        Err(e) => {
-            return Err(anyhow::anyhow!("Failed to query tree: {}", e));
-        }
-    };
+    // NOTE: Use _NET_CLIENT_LIST (EWMH) rather than query_tree(root) to get application
+    // window IDs. Under reparenting WMs (e.g. KWin), query_tree(root) returns WM frame
+    // windows whose properties (WM_CLASS, WM_NAME) don't match app rules, causing custom
+    // sources and EVE clients to go undetected on daemon startup.
+    let windows = crate::x11::get_client_list(ctx.conn, ctx.atoms)
+        .context("Failed to get window list via _NET_CLIENT_LIST")?;
 
     for w in windows {
         // 1. Identify valid windows (EVE or Custom Source)

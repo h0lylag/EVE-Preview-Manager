@@ -256,11 +256,10 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
             .iter()
             .filter(|(_, t)| t.src() != clicked_src)
             .filter(|(_, t)| {
-                // Check if this character is exempt from minimize
-                let is_exempt = ctx
-                    .daemon_config
-                    .character_thumbnails
+                let is_exempt = ctx.daemon_config
+                    .custom_source_thumbnails
                     .get(&t.character_name)
+                    .or_else(|| ctx.daemon_config.character_thumbnails.get(&t.character_name))
                     .map(|settings| settings.exempt_from_minimize)
                     .unwrap_or(false);
 

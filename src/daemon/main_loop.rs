@@ -613,10 +613,10 @@ async fn run_event_loop(
                                     .iter()
                                     .filter(|(w, _)| **w != window)
                                     .filter(|(_, t)| {
-                                        // Check if this character is exempt from minimize
                                         let is_exempt = resources.config
-                                            .character_thumbnails
+                                            .custom_source_thumbnails
                                             .get(&t.character_name)
+                                            .or_else(|| resources.config.character_thumbnails.get(&t.character_name))
                                             .map(|settings| settings.exempt_from_minimize)
                                             .unwrap_or(false);
 
