@@ -32,6 +32,7 @@ impl Default for SourcesTab {
                 text_x: None,
                 text_y: None,
                 preview_mode: None,
+                exempt_from_minimize: false,
                 hotkey: None,
             },
             running_apps: None,
@@ -448,6 +449,18 @@ impl SourcesTab {
                                                 });
                                             });
                                         }
+
+                                        // Minimize Exemption
+                                        ui.horizontal(|ui| {
+                                            ui.label("Minimize Exemption:");
+                                            if ui
+                                                .checkbox(&mut rule.exempt_from_minimize, "Enabled")
+                                                .on_hover_text("If enabled, this source will not be minimized when switching to another window.")
+                                                .changed()
+                                            {
+                                                changed = true;
+                                            }
+                                        });
                                     });
                                     ui.end_row();
 
@@ -770,6 +783,7 @@ impl SourcesTab {
                         self.new_rule.text_x = None;
                         self.new_rule.text_y = None;
                         self.new_rule.preview_mode = None;
+                        self.new_rule.exempt_from_minimize = false;
                         self.new_rule.hotkey = None;
                     }
                 });

@@ -608,19 +608,20 @@ async fn run_event_loop(
                                 // start changing other window states.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-                                // Minimize all other EVE clients after successful activation
+                                // Minimize all other EVE clients after successful activation.
+                                // NOTE: exempt_from_minimize for custom sources is stored in the
+                                // rule, not in daemon_config maps; build_display_config() is the
+                                // only place it is resolved into character_settings.
+                                let display_config = resources.config.build_display_config();
                                 let other_windows: Vec<Window> = resources.eve_clients
                                     .iter()
                                     .filter(|(w, _)| **w != window)
                                     .filter(|(_, t)| {
-                                        let is_exempt = resources.config
-                                            .custom_source_thumbnails
+                                        !display_config
+                                            .character_settings
                                             .get(&t.character_name)
-                                            .or_else(|| resources.config.character_thumbnails.get(&t.character_name))
-                                            .map(|settings| settings.exempt_from_minimize)
-                                            .unwrap_or(false);
-
-                                        !is_exempt
+                                            .map(|s| s.exempt_from_minimize)
+                                            .unwrap_or(false)
                                     })
                                     .map(|(w, _)| *w)
                                     .collect();
@@ -630,7 +631,6 @@ async fn run_event_loop(
                                     if let Some(thumb) = resources.eve_clients.get_mut(&other_window) {
                                         // Don't change state here - let the minimize handler set it to Minimized
                                         // Just clear the border for now
-                                        let display_config = resources.config.build_display_config();
                                         if let Err(e) = thumb.border(
                                             &display_config,
                                             false,
