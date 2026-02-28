@@ -118,6 +118,7 @@ impl DaemonConfig {
                         settings.preview_mode = rule.preview_mode.clone().unwrap_or_default();
                     }
                     settings.exempt_from_minimize = rule.exempt_from_minimize;
+                    settings.override_render_preview = rule.override_render_preview;
                 })
                 .or_insert_with(|| {
                     // Create minimal settings from rule
@@ -137,7 +138,7 @@ impl DaemonConfig {
                         override_text_color: rule.text_color.clone(),
                         preview_mode: rule.preview_mode.clone().unwrap_or_default(),
                         exempt_from_minimize: rule.exempt_from_minimize,
-                        override_render_preview: None,
+                        override_render_preview: rule.override_render_preview,
                     }
                 });
         }

@@ -138,6 +138,10 @@ pub struct CustomWindowRule {
     /// If true, this source is exempt from minimize-on-switch behavior
     #[serde(default)]
     pub exempt_from_minimize: bool,
+    /// Per-source override for preview rendering.
+    /// None = use global setting, Some(true) = always show, Some(false) = always hide
+    #[serde(default)]
+    pub override_render_preview: Option<bool>,
     /// Specific hotkey to activate this source directly
     pub hotkey: Option<crate::config::HotkeyBinding>,
 }

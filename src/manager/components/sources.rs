@@ -33,6 +33,7 @@ impl Default for SourcesTab {
                 text_y: None,
                 preview_mode: None,
                 exempt_from_minimize: false,
+                override_render_preview: None,
                 hotkey: None,
             },
             running_apps: None,
@@ -461,6 +462,53 @@ impl SourcesTab {
                                                 changed = true;
                                             }
                                         });
+
+                                        // Preview Visibility Override
+                                        ui.horizontal(|ui| {
+                                            ui.label("Preview Visibility:");
+                                            let current_label = match rule.override_render_preview {
+                                                None => "Default",
+                                                Some(true) => "Always Show",
+                                                Some(false) => "Always Hide",
+                                            };
+                                            egui::ComboBox::from_id_salt(format!(
+                                                "src_preview_vis_{}",
+                                                idx
+                                            ))
+                                            .selected_text(current_label)
+                                            .show_ui(ui, |ui| {
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut rule.override_render_preview,
+                                                        None,
+                                                        "Default",
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut rule.override_render_preview,
+                                                        Some(true),
+                                                        "Always Show",
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut rule.override_render_preview,
+                                                        Some(false),
+                                                        "Always Hide",
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                            });
+                                        });
                                     });
                                     ui.end_row();
 
@@ -784,6 +832,7 @@ impl SourcesTab {
                         self.new_rule.text_y = None;
                         self.new_rule.preview_mode = None;
                         self.new_rule.exempt_from_minimize = false;
+                        self.new_rule.override_render_preview = None;
                         self.new_rule.hotkey = None;
                     }
                 });

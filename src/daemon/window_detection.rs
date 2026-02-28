@@ -394,13 +394,11 @@ pub fn check_and_create_window<'a>(
         )
     };
 
-    // Determine effective settings for dimensions and mode
-    let effective_settings = settings_map
+    // NOTE: override_render_preview for custom sources is stored in the rule and resolved
+    // by build_display_config(); the raw daemon maps only hold position/size.
+    let force_enable = display_config
+        .character_settings
         .get(&character_name)
-        .or_else(|| profile_map.get(&character_name));
-
-    // Check for "Always Show" override
-    let force_enable = effective_settings
         .and_then(|s| s.override_render_preview)
         .unwrap_or(false);
 
