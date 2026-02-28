@@ -52,14 +52,14 @@
   </screenshots>
 
   <releases>
-    <release version="1.7.0" date="2026-02-17">
+    <release version="1.7.0" date="2026-02-27">
       <description>
         <p>New:</p>
         <ul>
-          <li>Minimize Client Override: Per-character control to exclude specific clients from being
-            minimized when using the "Minimize EVE Clients" feature.</li>
-          <li>Preview Render Override: Per-character control to prevent preview rendering or force
-            rendering when global preview rendering is disabled.</li>
+          <li>Minimize Client Override: Per-character and per-source control to exclude specific
+            clients from being minimized when using the "Minimize EVE Clients" feature.</li>
+          <li>Preview Render Override: Per-character and per-source control to force preview
+            rendering on or off, independent of the global preview rendering setting.</li>
         </ul>
         <p>Fixed:</p>
         <ul>
