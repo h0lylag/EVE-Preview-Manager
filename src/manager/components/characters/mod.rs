@@ -1,4 +1,3 @@
-use crate::common::constants::manager_ui::*;
 use crate::config::profile::Profile;
 use eframe::egui;
 
@@ -86,26 +85,24 @@ fn render_two_column_layout(
     hotkey_state: &mut crate::manager::components::hotkey_settings::HotkeySettingsState,
     changed: &mut bool,
 ) {
-    let available_width = ui.available_width();
-    let left_width = (available_width * 0.55).max(300.0);
+    let spacing = ui.spacing().item_spacing.x;
+    let total_width = ui.available_width() - spacing;
+    let left_width = total_width * 0.4;
+    let right_width = total_width * 0.6;
 
     ui.horizontal_top(|ui| {
-        ui.allocate_ui(egui::vec2(left_width, ui.available_height()), |ui| {
-            ui.vertical(|ui| {
-                editor::render_character_editor_column(ui, profile, state, hotkey_state, changed);
-            });
-        });
-
-        ui.add_space(ITEM_SPACING);
-        ui.separator();
-        ui.add_space(ITEM_SPACING);
-
-        ui.allocate_ui(
-            egui::vec2(ui.available_width(), ui.available_height()),
+        ui.allocate_ui_with_layout(
+            egui::vec2(left_width, ui.available_height()),
+            egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.vertical(|ui| {
-                    list::render_cycle_group_column(ui, profile, state, hotkey_state, changed);
-                });
+                editor::render_character_editor_column(ui, profile, state, hotkey_state, changed);
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(right_width, ui.available_height()),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                list::render_cycle_group_column(ui, profile, state, hotkey_state, changed);
             },
         );
     });

@@ -81,6 +81,11 @@ pub struct CharacterSettings {
     pub override_inactive_border_size: Option<u16>,
     pub override_text_color: Option<String>,
     pub preview_mode: PreviewMode,
+    /// If true, this character is exempt from minimize-on-switch behavior
+    pub exempt_from_minimize: bool,
+    /// Per-character override for preview rendering.
+    /// None = use global setting, Some(true) = always show, Some(false) = always hide
+    pub override_render_preview: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -107,6 +112,10 @@ struct CharacterSettingsProxy {
     override_text_color: Option<String>,
     #[serde(default)]
     preview_mode: PreviewMode,
+    #[serde(default)]
+    exempt_from_minimize: bool,
+    #[serde(default)]
+    override_render_preview: Option<bool>,
 }
 
 impl From<CharacterSettings> for CharacterSettingsProxy {
@@ -124,6 +133,8 @@ impl From<CharacterSettings> for CharacterSettingsProxy {
             override_inactive_border_size: settings.override_inactive_border_size,
             override_text_color: settings.override_text_color,
             preview_mode: settings.preview_mode,
+            exempt_from_minimize: settings.exempt_from_minimize,
+            override_render_preview: settings.override_render_preview,
         }
     }
 }
@@ -145,6 +156,8 @@ impl From<CharacterSettingsProxy> for CharacterSettings {
             override_inactive_border_size: proxy.override_inactive_border_size,
             override_text_color: proxy.override_text_color,
             preview_mode: proxy.preview_mode,
+            exempt_from_minimize: proxy.exempt_from_minimize,
+            override_render_preview: proxy.override_render_preview,
         }
     }
 }
@@ -163,6 +176,8 @@ impl CharacterSettings {
             override_inactive_border_size: None,
             override_text_color: None,
             preview_mode: PreviewMode::default(),
+            exempt_from_minimize: false,
+            override_render_preview: None,
         }
     }
 

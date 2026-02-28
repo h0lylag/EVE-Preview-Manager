@@ -14,6 +14,32 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
 
     debug!(window = event.event, "FocusIn received");
 
+    // Get the window we expect to be focused on (set by hotkey/click handlers)
+    let expected_window = ctx.cycle_state.get_current_window();
+
+    // If we have an expected window and this FocusIn is for a different window,
+    // it's likely an intermediate focus event during a transition (e.g., window manager
+    // focusing intermediate windows during tabbing). Skip processing entirely to avoid
+    // corrupting the cycle state.
+    //
+    // NOTE: Only filter UNTRACKED windows (WM internals, transient overlays, etc.).
+    // If this FocusIn is for a window we actually track, always allow it through.
+    // This prevents a stuck-filter scenario where a custom source redirects focus to
+    // an internal subwindow after activation — the tracked window's FocusIn never
+    // arrives, leaving current_window permanently set and blocking all future events.
+    if let Some(expected) = expected_window
+        && event.event != expected
+        && !ctx.eve_clients.contains_key(&event.event)
+    {
+        debug!(
+            focusin_window = event.event,
+            expected_window = expected,
+            "Ignoring FocusIn for untracked intermediate window during transition"
+        );
+        // Don't update cycle state or draw borders - wait for the correct window's FocusIn
+        return Ok(());
+    }
+
     if ctx.cycle_state.set_current_by_window(event.event) {
         debug!(window = event.event, "Synced cycle state to focused window");
     }
@@ -26,6 +52,18 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
 
     if ctx.display_config.hide_when_no_focus && ctx.eve_clients.values().any(|x| !x.is_visible()) {
         for thumbnail in ctx.eve_clients.values_mut() {
+            // Respect per-character override: don't reveal force-hidden thumbnails
+            let should_render = ctx
+                .display_config
+                .character_settings
+                .get(&thumbnail.character_name)
+                .and_then(|s| s.override_render_preview)
+                .unwrap_or(ctx.display_config.enabled);
+
+            if !should_render {
+                continue;
+            }
+
             debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
             thumbnail.visibility(true).context(format!(
                 "Failed to show thumbnail '{}' on focus",
@@ -56,19 +94,32 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
                         thumbnail.character_name
                     ))?;
             }
-        } else if thumbnail.state.is_focused() {
-            thumbnail.state = ThumbnailState::Normal { focused: false };
-            thumbnail
-                .border(
-                    ctx.display_config,
-                    false,
-                    ctx.cycle_state.is_skipped(&thumbnail.character_name),
-                    ctx.font_renderer,
-                )
-                .context(format!(
-                    "Failed to clear border for '{}' (focus moved to '{}')",
-                    thumbnail.character_name, event.event
-                ))?;
+        } else {
+            // Update ALL other clients to unfocused state
+            // This ensures borders stay in sync even when minimize-on-switch is active
+            // Only change state for non-minimized windows - minimized windows stay Minimized
+            // For minimized windows, calling border() causes double-rendering, so re-call minimized() instead
+            if thumbnail.state.is_minimized() {
+                thumbnail
+                    .minimized(ctx.display_config, ctx.font_renderer)
+                    .context(format!(
+                        "Failed to re-render minimized window '{}' (focus moved to '{}')",
+                        thumbnail.character_name, event.event
+                    ))?;
+            } else {
+                thumbnail.state = ThumbnailState::Normal { focused: false };
+                thumbnail
+                    .border(
+                        ctx.display_config,
+                        false,
+                        ctx.cycle_state.is_skipped(&thumbnail.character_name),
+                        ctx.font_renderer,
+                    )
+                    .context(format!(
+                        "Failed to clear border for '{}' (focus moved to '{}')",
+                        thumbnail.character_name, event.event
+                    ))?;
+            }
         }
     }
     Ok(())

@@ -99,9 +99,6 @@ fn initialize_state(
     SessionState,
     CycleState,
 )> {
-    // Load config with screen-aware defaults
-    // let daemon_config =
-    //    DaemonConfig::load_with_screen(screen.width_in_pixels, screen.height_in_pixels);
     let config = daemon_config.build_display_config();
     debug!("Loaded display configuration");
 
@@ -330,9 +327,8 @@ async fn run_event_loop(
     let x11_fd = AsyncFd::new(conn.stream().as_raw_fd())
         .context("Failed to create AsyncFd for X11 connection")?;
 
-    // Heartbeat timer (3s interval)
+    // Heartbeat timer (3s interval) - skip missed ticks to prevent backlog
     let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(3));
-    // Set the first tick to finish immediately? No, we can wait 3s for the first one.
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Timer for delayed thumbnail hiding (hysteresis)
@@ -387,9 +383,15 @@ async fn run_event_loop(
         {
             let mut current_windows: HashSet<u32> = HashSet::new();
 
-            for (src_window, thumbnail) in resources.eve_clients.iter() {
-                current_windows.insert(*src_window); // EVE client source window
-                current_windows.insert(thumbnail.window()); // Thumbnail overlay window
+            // allow hotkeys for all EVE client source windows known to the cycle state
+            // (including those without thumbnails/previews)
+            for src_window in resources.cycle.get_active_windows().values() {
+                current_windows.insert(*src_window);
+            }
+
+            // allow hotkeys for thumbnail overlay windows
+            for thumbnail in resources.eve_clients.values() {
+                current_windows.insert(thumbnail.window());
             }
 
             let need_update = {
@@ -449,7 +451,11 @@ async fn run_event_loop(
                 let should_process = if resources.config.profile.hotkey_require_eve_focus {
                     match crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms) {
                         Ok(Some(active_window)) => {
-                            if resources.eve_clients.contains_key(&active_window) {
+                            // Check if active window is a known EVE window (thumbnail OR just identified)
+                            let is_known = resources.eve_clients.contains_key(&active_window) ||
+                                         resources.cycle.get_active_windows().values().any(|&w| w == active_window);
+
+                            if is_known {
                                 true
                             } else {
                                 // NOTE: The active window might be a child (e.g. in Wine/Proton apps like Mod Organizer).
@@ -462,7 +468,8 @@ async fn run_event_loop(
                                     match ctx.conn.query_tree(current) {
                                         Ok(cookie) => {
                                             if let Ok(reply) = cookie.reply() {
-                                                if resources.eve_clients.contains_key(&reply.parent) {
+                                                if resources.eve_clients.contains_key(&reply.parent) ||
+                                                   resources.cycle.get_active_windows().values().any(|&w| w == reply.parent) {
                                                     found_ancestor = true;
                                                     debug!(
                                                         child = active_window,
@@ -545,6 +552,54 @@ async fn run_event_loop(
                         } else {
                             debug!(window = window, "activate_window completed successfully");
 
+                            // Set current window immediately after successful activation.
+                            // This ensures the border shows correctly during the 25ms delay before
+                            // FocusIn arrives. The FocusIn handler will confirm this later.
+                            resources.cycle.set_current_by_window(window);
+
+                            // Draw active border immediately to prevent flash during delay
+                            if let Some(thumb) = resources.eve_clients.get(&window) {
+                                let display_config = resources.config.build_display_config();
+                                if let Err(e) = thumb.border(
+                                    &display_config,
+                                    true,
+                                    resources.cycle.is_skipped(&thumb.character_name),
+                                    &font_renderer,
+                                ) {
+                                    warn!(window = window, error = %e, "Failed to draw initial active border");
+                                }
+                            }
+
+                            // Clear borders from ALL other windows immediately (including minimized ones)
+                            // This ensures we don't leave stale active borders on minimized windows
+                            for (w, thumb) in resources.eve_clients.iter_mut() {
+                                if *w != window {
+                                    let display_config = resources.config.build_display_config();
+                                    // Only change state for non-minimized windows
+                                    // Minimized windows should stay Minimized - calling border() on them causes
+                                    // double-rendering. Instead, re-call minimized() to properly clear and re-render.
+                                    if thumb.state.is_minimized() {
+                                        if let Err(e) = thumb.minimized(&display_config, &font_renderer) {
+                                            warn!(window = *w, error = %e, "Failed to re-render minimized window");
+                                        }
+                                    } else {
+                                        thumb.state = crate::common::types::ThumbnailState::Normal { focused: false };
+                                        if let Err(e) = thumb.border(
+                                            &display_config,
+                                            false,
+                                            resources.cycle.is_skipped(&thumb.character_name),
+                                            &font_renderer,
+                                        ) {
+                                            warn!(window = *w, error = %e, "Failed to clear border during switch");
+                                        }
+                                    }
+                                }
+                            }
+
+                            // CRITICAL: Flush X11 connection to ensure border updates are rendered
+                            // before the 25ms delay. Without this, borders may flash to wrong clients.
+                            let _ = ctx.conn.flush();
+
                             if resources.config.profile.client_minimize_on_switch {
                                 // NOTE: Critical delay to prevent KWin focus thrashing. Without this,
                                 // KWin repeatedly redirects focus to window 2097152 (internal KWin window)
@@ -553,13 +608,38 @@ async fn run_event_loop(
                                 // start changing other window states.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-                                // Minimize all other EVE clients after successful activation
+                                // Minimize all other EVE clients after successful activation.
+                                // NOTE: exempt_from_minimize for custom sources is stored in the
+                                // rule, not in daemon_config maps; build_display_config() is the
+                                // only place it is resolved into character_settings.
+                                let display_config = resources.config.build_display_config();
                                 let other_windows: Vec<Window> = resources.eve_clients
-                                    .keys()
-                                    .copied()
-                                    .filter(|w| *w != window)
+                                    .iter()
+                                    .filter(|(w, _)| **w != window)
+                                    .filter(|(_, t)| {
+                                        !display_config
+                                            .character_settings
+                                            .get(&t.character_name)
+                                            .map(|s| s.exempt_from_minimize)
+                                            .unwrap_or(false)
+                                    })
+                                    .map(|(w, _)| *w)
                                     .collect();
                                 for other_window in other_windows {
+                                    // Clear border on the window BEFORE minimizing it
+                                    // This prevents leaving stale active borders on minimized windows
+                                    if let Some(thumb) = resources.eve_clients.get_mut(&other_window) {
+                                        // Don't change state here - let the minimize handler set it to Minimized
+                                        // Just clear the border for now
+                                        if let Err(e) = thumb.border(
+                                            &display_config,
+                                            false,
+                                            resources.cycle.is_skipped(&thumb.character_name),
+                                            &font_renderer,
+                                        ) {
+                                            warn!(window = other_window, error = %e, "Failed to clear border before minimize");
+                                        }
+                                    }
                                     if let Err(e) = minimize_window(ctx.conn, ctx.screen, ctx.atoms, other_window) {
                                         debug!(window = other_window, error = %e, "Failed to minimize window via hotkey");
                                     }
@@ -590,8 +670,7 @@ async fn run_event_loop(
                             }
                         }
                     } else {
-                         // Simplify logging to avoid iterating all groups for a warn message
-                        warn!("No window to activate via hotkey (or command handled internally)");
+                        warn!("No window to activate via hotkey");
                     }
                 } else {
                     info!(hotkey_require_eve_focus = resources.config.profile.hotkey_require_eve_focus, "Hotkey ignored, EVE window not focused (hotkey_require_eve_focus enabled)");
@@ -838,25 +917,17 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
             formats: &formats,
         };
 
+        // Initial scan for existing EVE windows
+        // Now populates cycle_state directly during scan
         eve_clients = super::window_detection::scan_eve_windows(
             &ctx,
             &config,
             &font_renderer,
             &mut daemon_config,
             &mut session_state,
+            &mut cycle_state,
         )
         .context("Failed to get initial list of EVE windows")?;
-    }
-
-    // Register initial windows with cycle state
-    if config.enabled {
-        for (window, thumbnail) in eve_clients.iter() {
-            cycle_state.add_window(thumbnail.character_name.clone(), *window);
-        }
-    } else {
-        for (window, character_name) in session_state.window_last_character.iter() {
-            cycle_state.add_window(character_name.clone(), *window);
-        }
     }
 
     // Initialize border state for all windows (defaults to inactive/cleared)
@@ -1023,15 +1094,22 @@ fn handle_cycle_command(
             );
 
             // Force visibility update for all known thumbnails
+            let display_config = resources.config.build_display_config();
             for thumbnail in resources.eve_clients.values_mut() {
-                if let Err(e) = thumbnail.visibility(!resources.config.runtime_hidden) {
+                // When revealing, respect per-character overrides: force-hidden thumbnails stay hidden
+                let should_render = display_config
+                    .character_settings
+                    .get(&thumbnail.character_name)
+                    .and_then(|s| s.override_render_preview)
+                    .unwrap_or(display_config.enabled);
+
+                let target_visible = !resources.config.runtime_hidden && should_render;
+
+                if let Err(e) = thumbnail.visibility(target_visible) {
                     warn!(character = %thumbnail.character_name, error = %e, "Failed to update visibility after toggle");
-                } else {
+                } else if target_visible {
                     // Force update to ensure content is drawn if revealed
-                    if !resources.config.runtime_hidden {
-                        let display_config = resources.config.build_display_config();
-                        let _ = thumbnail.update(&display_config, font_renderer);
-                    }
+                    let _ = thumbnail.update(&display_config, font_renderer);
                 }
             }
             None

@@ -361,13 +361,8 @@ pub fn check_and_create_window<'a>(
     // and `handle_create_notify` calls `identify_window` before calling this.
     // This function is strictly for determining if we should create a renderable thumbnail.
 
-    if !display_config.enabled {
-        return Ok(None);
-    }
-
     let character_name = identity.name;
 
-    // Get saved position and dimensions
     // Get saved position and dimensions
     // Determine which map to query based on identity type
     let settings_map = if identity.is_eve {
@@ -398,6 +393,18 @@ pub fn check_and_create_window<'a>(
             daemon_config.profile.thumbnail_preserve_position_on_swap,
         )
     };
+
+    // NOTE: override_render_preview for custom sources is stored in the rule and resolved
+    // by build_display_config(); the raw daemon maps only hold position/size.
+    let force_enable = display_config
+        .character_settings
+        .get(&character_name)
+        .and_then(|s| s.override_render_preview)
+        .unwrap_or(false);
+
+    if !display_config.enabled && !force_enable {
+        return Ok(None);
+    }
 
     // Determine effective settings for dimensions and mode
     let effective_settings = settings_map
@@ -481,36 +488,41 @@ pub fn check_and_create_window<'a>(
 }
 
 /// Initial scan for existing EVE windows to populate thumbnails
+use super::cycle_state::CycleState;
+
 pub fn scan_eve_windows<'a>(
     ctx: &AppContext<'a>,
     display_config: &DisplayConfig,
     font_renderer: &crate::daemon::font::FontRenderer,
     daemon_config: &mut DaemonConfig,
     state: &mut SessionState,
+    cycle_state: &mut CycleState,
 ) -> Result<HashMap<Window, Thumbnail<'a>>> {
-    let net_client_list = ctx.atoms.net_client_list;
-    let prop = ctx
-        .conn
-        .get_property(
-            false,
-            ctx.screen.root,
-            net_client_list,
-            AtomEnum::WINDOW,
-            0,
-            u32::MAX,
-        )
-        .context("Failed to query _NET_CLIENT_LIST property")?
-        .reply()
-        .context("Failed to get window list from X11 server")?;
-    let windows: Vec<u32> = prop
-        .value32()
-        .ok_or_else(|| anyhow::anyhow!("Invalid return from _NET_CLIENT_LIST"))?
-        .collect();
-
     let mut eve_clients = HashMap::new();
+
+    // NOTE: Use _NET_CLIENT_LIST (EWMH) rather than query_tree(root) to get application
+    // window IDs. Under reparenting WMs (e.g. KWin), query_tree(root) returns WM frame
+    // windows whose properties (WM_CLASS, WM_NAME) don't match app rules, causing custom
+    // sources and EVE clients to go undetected on daemon startup.
+    let windows = crate::x11::get_client_list(ctx.conn, ctx.atoms)
+        .context("Failed to get window list via _NET_CLIENT_LIST")?;
+
     for w in windows {
-        // Use the map we are building as the "existing_thumbnails" context for limit checks
-        // We handle errors gracefully here so one bad window doesn't prevent the daemon from starting
+        // 1. Identify valid windows (EVE or Custom Source)
+        // We use identify_window directly so we can track them even if no thumbnail is created
+        let identity = match identify_window(ctx, w, state, &daemon_config.profile.custom_windows) {
+            Ok(Some(id)) => id,
+            Ok(None) => continue, // Not a relevant window
+            Err(e) => {
+                tracing::warn!("Failed to identify window {} during scan: {}", w, e);
+                continue;
+            }
+        };
+
+        // Register identified window with CycleState
+        cycle_state.add_window(identity.name.clone(), w);
+
+        // 2. Try to create thumbnail
         match check_and_create_window(
             ctx,
             daemon_config,
@@ -519,7 +531,7 @@ pub fn scan_eve_windows<'a>(
             font_renderer,
             state,
             &eve_clients,
-            None,
+            Some(identity.clone()),
         ) {
             Ok(Some(eve)) => {
                 // Save initial position and dimensions (important for first-time characters)
@@ -592,10 +604,16 @@ pub fn scan_eve_windows<'a>(
                 eve_clients.insert(w, eve);
             }
             Ok(None) => {
-                // Window ignored / not matched
+                // Window ignored / not matched for thumbnail creation (e.g. global disabled)
+                // BUT it was already added to identified_windows above
+                // (actually it was added to CycleState above)
             }
             Err(e) => {
-                tracing::warn!("Failed to process window {} during initial scan: {}", w, e);
+                tracing::warn!(
+                    "Failed to create thumbnail for window {} during scan: {}",
+                    w,
+                    e
+                );
             }
         }
     }

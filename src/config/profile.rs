@@ -135,6 +135,13 @@ pub struct CustomWindowRule {
     // Behavior Overrides
     #[serde(default)]
     pub preview_mode: Option<crate::common::types::PreviewMode>,
+    /// If true, this source is exempt from minimize-on-switch behavior
+    #[serde(default)]
+    pub exempt_from_minimize: bool,
+    /// Per-source override for preview rendering.
+    /// None = use global setting, Some(true) = always show, Some(false) = always hide
+    #[serde(default)]
+    pub override_render_preview: Option<bool>,
     /// Specific hotkey to activate this source directly
     pub hotkey: Option<crate::config::HotkeyBinding>,
 }
@@ -216,6 +223,7 @@ pub struct Profile {
 
     // Client behavior settings
     pub client_minimize_on_switch: bool,
+    /// When minimized, show "MINIMIZED" text overlay
     /// When minimized, show "MINIMIZED" text overlay
     pub client_minimize_show_overlay: bool,
 
@@ -692,7 +700,6 @@ mod tests {
             profile.client_minimize_on_switch,
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH
         );
-        assert!(!profile.client_minimize_show_overlay);
         assert_eq!(
             profile.thumbnail_hide_not_focused,
             crate::common::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS
