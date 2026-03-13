@@ -1,5 +1,5 @@
 {
-  description = "EVE Preview Manager — EVE Online Window Switcher and Preview Manager for Linux";
+  description = "Utility for EVE Online multiboxing with real-time previews and hotkeys";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
