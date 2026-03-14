@@ -254,7 +254,69 @@ pub fn process_detected_window(
                 }
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            // NOTE: Even with rendering disabled, new characters must reach the Manager via
+            // PositionChanged so they appear in the character manager for configuration.
+            if !ctx.display_config.enabled && !identity.name.is_empty() {
+                let is_new = if identity.is_eve {
+                    !ctx.daemon_config.character_thumbnails.contains_key(&identity.name)
+                        && !ctx.daemon_config
+                            .profile
+                            .character_thumbnails
+                            .contains_key(&identity.name)
+                } else {
+                    !ctx.daemon_config
+                        .custom_source_thumbnails
+                        .contains_key(&identity.name)
+                        && !ctx.daemon_config
+                            .profile
+                            .custom_source_thumbnails
+                            .contains_key(&identity.name)
+                };
+
+                if is_new {
+                    let (w, h) = (
+                        ctx.daemon_config.profile.thumbnail_default_width,
+                        ctx.daemon_config.profile.thumbnail_default_height,
+                    );
+                    // Use source window position + spawn offset so re-enabling rendering
+                    // places the thumbnail in a sensible location rather than (0, 0).
+                    let offset = crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                    let (spawn_x, spawn_y) = ctx
+                        .app_ctx
+                        .conn
+                        .get_geometry(window)
+                        .ok()
+                        .and_then(|cookie| cookie.reply().ok())
+                        .map(|geom| (geom.x + offset, geom.y + offset))
+                        .unwrap_or((0, 0));
+
+                    let settings =
+                        crate::common::types::CharacterSettings::new(spawn_x, spawn_y, w, h);
+                    if identity.is_eve {
+                        ctx.daemon_config
+                            .character_thumbnails
+                            .insert(identity.name.clone(), settings);
+                    } else {
+                        ctx.daemon_config
+                            .custom_source_thumbnails
+                            .insert(identity.name.clone(), settings);
+                    }
+                    let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
+                        name: identity.name.clone(),
+                        x: spawn_x,
+                        y: spawn_y,
+                        width: w,
+                        height: h,
+                        is_custom: !identity.is_eve,
+                    });
+                    let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected {
+                        name: identity.name.clone(),
+                        is_custom: !identity.is_eve,
+                    });
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!(
                 window = window,

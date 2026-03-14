@@ -1,11 +1,13 @@
 //! EVE window detection and thumbnail creation logic
 
 use anyhow::{Context, Result};
+use ipc_channel::ipc::IpcSender;
 use tracing::debug;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
 use crate::common::constants;
+use crate::common::ipc::DaemonMessage;
 use crate::common::types::Dimensions;
 use crate::config::DaemonConfig;
 use crate::config::DisplayConfig;
@@ -497,6 +499,7 @@ pub fn scan_eve_windows<'a>(
     daemon_config: &mut DaemonConfig,
     state: &mut SessionState,
     cycle_state: &mut CycleState,
+    status_tx: &IpcSender<DaemonMessage>,
 ) -> Result<HashMap<Window, Thumbnail<'a>>> {
     let mut eve_clients = HashMap::new();
 
@@ -604,9 +607,67 @@ pub fn scan_eve_windows<'a>(
                 eve_clients.insert(w, eve);
             }
             Ok(None) => {
-                // Window ignored / not matched for thumbnail creation (e.g. global disabled)
-                // BUT it was already added to identified_windows above
-                // (actually it was added to CycleState above)
+                // NOTE: Even with rendering disabled, new characters must reach the Manager via
+                // PositionChanged so they appear in the character manager for configuration.
+                if !display_config.enabled && !identity.name.is_empty() {
+                    let is_new = if identity.is_eve {
+                        !daemon_config.character_thumbnails.contains_key(&identity.name)
+                            && !daemon_config
+                                .profile
+                                .character_thumbnails
+                                .contains_key(&identity.name)
+                    } else {
+                        !daemon_config
+                            .custom_source_thumbnails
+                            .contains_key(&identity.name)
+                            && !daemon_config
+                                .profile
+                                .custom_source_thumbnails
+                                .contains_key(&identity.name)
+                    };
+
+                    if is_new {
+                        let (ww, hh) = (
+                            daemon_config.profile.thumbnail_default_width,
+                            daemon_config.profile.thumbnail_default_height,
+                        );
+                        // Use source window position + spawn offset so re-enabling rendering
+                        // places the thumbnail in a sensible location rather than (0, 0).
+                        let offset = crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                        let (spawn_x, spawn_y) = ctx
+                            .conn
+                            .get_geometry(w)
+                            .ok()
+                            .and_then(|cookie| cookie.reply().ok())
+                            .map(|geom| (geom.x + offset, geom.y + offset))
+                            .unwrap_or((0, 0));
+
+                        let settings = crate::common::types::CharacterSettings::new(
+                            spawn_x, spawn_y, ww, hh,
+                        );
+                        if identity.is_eve {
+                            daemon_config
+                                .character_thumbnails
+                                .insert(identity.name.clone(), settings);
+                        } else {
+                            daemon_config
+                                .custom_source_thumbnails
+                                .insert(identity.name.clone(), settings);
+                        }
+                        let _ = status_tx.send(DaemonMessage::PositionChanged {
+                            name: identity.name.clone(),
+                            x: spawn_x,
+                            y: spawn_y,
+                            width: ww,
+                            height: hh,
+                            is_custom: !identity.is_eve,
+                        });
+                        let _ = status_tx.send(DaemonMessage::CharacterDetected {
+                            name: identity.name.clone(),
+                            is_custom: !identity.is_eve,
+                        });
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(

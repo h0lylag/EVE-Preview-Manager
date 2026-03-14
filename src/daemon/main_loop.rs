@@ -926,6 +926,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
             &mut daemon_config,
             &mut session_state,
             &mut cycle_state,
+            &status_tx,
         )
         .context("Failed to get initial list of EVE windows")?;
     }
