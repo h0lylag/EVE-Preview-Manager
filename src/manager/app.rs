@@ -37,6 +37,7 @@ struct ManagerApp {
     update_signal: std::sync::Arc<tokio::sync::Notify>,
 
     active_tab: ManagerTab,
+    window_visible: bool,
 }
 
 impl ManagerApp {
@@ -167,6 +168,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
+            window_visible: true,
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -179,6 +181,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
+            window_visible: true,
         };
 
         app
@@ -210,6 +213,28 @@ impl eframe::App for ManagerApp {
         // Track window geometry changes and update config
         // Clone viewport info to avoid lifetime issues
         let viewport_info = ctx.input(|i| i.viewport().clone());
+
+        // Handle minimize-to-tray functionality
+        // Check if window was just minimized by detecting the minimize event
+        if state.config.global.minimize_to_tray && self.window_visible {
+            let is_minimized = viewport_info.minimized.unwrap_or(false);
+            
+            if is_minimized {
+                // Immediately hide the window and restore it from minimized state
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_visible = false;
+            }
+        }
+        
+        // Track when window becomes visible again (e.g., from tray icon click)
+        // Check if we're not minimized and not hidden
+        if !self.window_visible {
+            let is_minimized = viewport_info.minimized.unwrap_or(false);
+            if !is_minimized {
+                self.window_visible = true;
+            }
+        }
 
         // Try to get window size from viewport inner_rect first, fall back to content_rect
         let (new_width, new_height) = if let Some(inner_rect) = viewport_info.inner_rect {

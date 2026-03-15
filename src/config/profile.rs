@@ -180,6 +180,8 @@ pub struct GlobalSettings {
     pub backup_interval_days: u32,
     #[serde(default = "default_backup_retention_count")]
     pub backup_retention_count: u32,
+    #[serde(default)]
+    pub minimize_to_tray: bool,
 }
 
 /// Profile - A complete set of visual and behavioral settings
@@ -414,6 +416,7 @@ impl Default for GlobalSettings {
             backup_enabled: default_backup_enabled(),
             backup_interval_days: default_backup_interval_days(),
             backup_retention_count: default_backup_retention_count(),
+            minimize_to_tray: false,
         }
     }
 }
