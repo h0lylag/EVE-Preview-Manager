@@ -47,7 +47,7 @@ pub fn activate_window(
         "Failed to send _NET_ACTIVE_WINDOW event for window {}",
         window
     ))?;
-
+    
     // Inject a synthetic motion event to wake up the client's input handling
     // This fixes "stuck mouse" issues on XWayland where hover states don't activate
     refresh_pointer_state(conn, window, timestamp).context("Failed to refresh pointer state")?;
@@ -185,20 +185,27 @@ pub fn unminimize_window(
 fn refresh_pointer_state(conn: &RustConnection, window: Window, timestamp: u32) -> Result<()> {
     // Construct a synthetic MotionNotify event
     // The goal is to tell the client "the mouse is right here" without moving it physically.
+
+    let pointer = conn
+        .query_pointer(window)
+        .context("Failed to query pointer for refresh_pointer_state")?
+        .reply()
+        .context("Failed to get QueryPointer reply for refresh_pointer_state")?;
+
     let motion_event = MotionNotifyEvent {
         response_type: MOTION_NOTIFY_EVENT,
         detail: Motion::NORMAL,
         sequence: 0,
         time: timestamp,
-        root: 0, // Not needed for this hack
+        root: pointer.root,
         event: window,
-        child: window,
-        root_x: 0,  // Not needed
-        root_y: 0,  // Not needed
-        event_x: 0, // Not needed, client usually re-polls or just seeing the event is enough
-        event_y: 0, // Not needed
-        state: KeyButMask::default(),
-        same_screen: true,
+        child: pointer.child,
+        root_x: pointer.root_x,
+        root_y: pointer.root_y,
+        event_x: pointer.win_x,
+        event_y: pointer.win_y,
+        state: pointer.mask,
+        same_screen: pointer.same_screen,
     };
 
     // Send the event directly to the window
