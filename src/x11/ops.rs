@@ -47,13 +47,23 @@ pub fn activate_window(
         "Failed to send _NET_ACTIVE_WINDOW event for window {}",
         window
     ))?;
-    
+
     // Inject a synthetic motion event to wake up the client's input handling
     // This fixes "stuck mouse" issues on XWayland where hover states don't activate
     refresh_pointer_state(conn, window, timestamp).context("Failed to refresh pointer state")?;
 
     conn.flush()
         .context("Failed to flush X11 connection after window activation")?;
+    Ok(())
+}
+
+
+// Create a wrapper function for for the syntehic moition even so it can be called else where
+pub fn force_pointer_refresh(conn: &RustConnection, window: Window, timestamp: u32) -> Result<()> {
+    
+    refresh_pointer_state(conn, window, timestamp).context("Failed to refresh pointer state")?;
+    conn.flush()
+        .context("Failed to flush X11 connection after pointer refresh")?;
     Ok(())
 }
 
@@ -191,12 +201,13 @@ fn refresh_pointer_state(conn: &RustConnection, window: Window, timestamp: u32) 
         sequence: 0,
         time: timestamp,
         root: 0, // Not needed for this hack
+        root: 0, // Not needed for this hack
         event: window,
         child: window,
-        root_x: -1,  // Not needed
-        root_y: -1,  // Not needed
-        event_x: -1, // Not needed, client usually re-polls or just seeing the event is enough
-        event_y: -1, // Not needed
+        root_x: 0,  // Not needed
+        root_y: 0,  // Not needed
+        event_x: 0, // Not needed, client usually re-polls or just seeing the event is enough
+        event_y: 0, // Not needed
         state: KeyButMask::default(),
         same_screen: true,
     };
