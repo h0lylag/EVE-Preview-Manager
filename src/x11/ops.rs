@@ -193,36 +193,47 @@ pub fn unminimize_window(
 ///
 /// Use this instead of WarpPointer on Wayland sessions.
 fn refresh_pointer_state(conn: &RustConnection, window: Window, timestamp: u32) -> Result<()> {
-    // Construct a synthetic MotionNotify event
-    // The goal is to tell the client "the mouse is right here" without moving it physically.
+    let pointer = conn
+        .query_pointer(window)
+        .context("Failed to query pointer for refresh_pointer_state")?
+        .reply()
+        .context("Failed to get QueryPointer reply for refresh_pointer_state")?;
+
+    // Determine jitter direction to avoid going out of bounds (0,0)
+    // If we are at the very top/left, move +1, otherwise move -1.
+    let jitter_x = if pointer.root_x > 0 { -1 } else { 1 };
+    let jitter_y = if pointer.root_y > 0 { -1 } else { 1 };
+
     let motion_event = MotionNotifyEvent {
         response_type: MOTION_NOTIFY_EVENT,
         detail: Motion::NORMAL,
         sequence: 0,
         time: timestamp,
-        root: 0, // Not needed for this hack
-        root: 0, // Not needed for this hack
+        root: pointer.root,
         event: window,
-        child: window,
-        root_x: 0,  // Not needed
-        root_y: 0,  // Not needed
-        event_x: 0, // Not needed, client usually re-polls or just seeing the event is enough
-        event_y: 0, // Not needed
-        state: KeyButMask::default(),
-        same_screen: true,
+        child: pointer.child,
+        root_x: pointer.root_x + jitter_x,
+        root_y: pointer.root_y + jitter_y,
+        event_x: pointer.win_x + jitter_x,
+        event_y: pointer.win_y + jitter_y,
+        // Use default to ensure we don't accidentally trigger "Drag" logic 
+        // if a mouse button was physically held during this call.
+        state: KeyButMask::default(), 
+        same_screen: true, // Force the client to treat it as a local event
     };
 
-    // Send the event directly to the window
     conn.send_event(
-        false,                     // propagate
-        window,                    // destination
-        EventMask::POINTER_MOTION, // event mask
-        motion_event,              // event content
+        false,                     
+        window,                    
+        EventMask::POINTER_MOTION, 
+        motion_event,              
     )?;
 
     tracing::debug!(
         window = window,
-        "Injected synthetic MotionNotify to refresh pointer state"
+        x = pointer.root_x + jitter_x,
+        y = pointer.root_y + jitter_y,
+        "Injected synthetic MotionNotify with default mask and same_screen: true"
     );
 
     Ok(())
