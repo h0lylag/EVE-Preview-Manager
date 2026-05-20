@@ -37,7 +37,7 @@ struct ManagerApp {
     update_signal: std::sync::Arc<tokio::sync::Notify>,
 
     active_tab: ManagerTab,
-    window_visible: bool,
+    minimize_to_tray_handled: bool,
 }
 
 impl ManagerApp {
@@ -168,7 +168,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
-            window_visible: true,
+            minimize_to_tray_handled: false,
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -181,7 +181,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
-            window_visible: true,
+            minimize_to_tray_handled: false,
         };
 
         app
@@ -214,26 +214,16 @@ impl eframe::App for ManagerApp {
         // Clone viewport info to avoid lifetime issues
         let viewport_info = ctx.input(|i| i.viewport().clone());
 
-        // Handle minimize-to-tray functionality
-        // Check if window was just minimized by detecting the minimize event
-        if state.config.global.minimize_to_tray && self.window_visible {
-            let is_minimized = viewport_info.minimized.unwrap_or(false);
-            
-            if is_minimized {
-                // Immediately hide the window and restore it from minimized state
+        let is_minimized = viewport_info.minimized.unwrap_or(false);
+
+        if state.config.global.minimize_to_tray && is_minimized {
+            if !self.minimize_to_tray_handled {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.window_visible = false;
+                self.minimize_to_tray_handled = true;
             }
-        }
-        
-        // Track when window becomes visible again (e.g., from tray icon click)
-        // Check if we're not minimized and not hidden
-        if !self.window_visible {
-            let is_minimized = viewport_info.minimized.unwrap_or(false);
-            if !is_minimized {
-                self.window_visible = true;
-            }
+        } else if !is_minimized {
+            self.minimize_to_tray_handled = false;
         }
 
         // Try to get window size from viewport inner_rect first, fall back to content_rect

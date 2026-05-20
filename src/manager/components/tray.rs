@@ -16,6 +16,18 @@ pub struct AppTray {
 }
 
 #[cfg(target_os = "linux")]
+impl AppTray {
+    fn show_window(&self) {
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.ctx.request_repaint();
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl ksni::Tray for AppTray {
     fn id(&self) -> String {
         if self.is_flatpak {
@@ -44,10 +56,7 @@ impl ksni::Tray for AppTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        // Left-click on tray icon shows the window
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        self.ctx.request_repaint();
+        self.show_window();
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -74,9 +83,7 @@ impl ksni::Tray for AppTray {
             StandardItem {
                 label: "Show Window".into(),
                 activate: Box::new(|this: &mut AppTray| {
-                    this.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    this.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    this.ctx.request_repaint();
+                    this.show_window();
                 }),
                 ..Default::default()
             }
