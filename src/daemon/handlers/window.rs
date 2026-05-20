@@ -259,8 +259,11 @@ pub fn process_detected_window(
             // PositionChanged so they appear in the character manager for configuration.
             if !ctx.display_config.enabled && !identity.name.is_empty() {
                 let is_new = if identity.is_eve {
-                    !ctx.daemon_config.character_thumbnails.contains_key(&identity.name)
-                        && !ctx.daemon_config
+                    !ctx.daemon_config
+                        .character_thumbnails
+                        .contains_key(&identity.name)
+                        && !ctx
+                            .daemon_config
                             .profile
                             .character_thumbnails
                             .contains_key(&identity.name)
@@ -268,7 +271,8 @@ pub fn process_detected_window(
                     !ctx.daemon_config
                         .custom_source_thumbnails
                         .contains_key(&identity.name)
-                        && !ctx.daemon_config
+                        && !ctx
+                            .daemon_config
                             .profile
                             .custom_source_thumbnails
                             .contains_key(&identity.name)

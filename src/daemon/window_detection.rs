@@ -611,7 +611,9 @@ pub fn scan_eve_windows<'a>(
                 // PositionChanged so they appear in the character manager for configuration.
                 if !display_config.enabled && !identity.name.is_empty() {
                     let is_new = if identity.is_eve {
-                        !daemon_config.character_thumbnails.contains_key(&identity.name)
+                        !daemon_config
+                            .character_thumbnails
+                            .contains_key(&identity.name)
                             && !daemon_config
                                 .profile
                                 .character_thumbnails
@@ -642,9 +644,8 @@ pub fn scan_eve_windows<'a>(
                             .map(|geom| (geom.x + offset, geom.y + offset))
                             .unwrap_or((0, 0));
 
-                        let settings = crate::common::types::CharacterSettings::new(
-                            spawn_x, spawn_y, ww, hh,
-                        );
+                        let settings =
+                            crate::common::types::CharacterSettings::new(spawn_x, spawn_y, ww, hh);
                         if identity.is_eve {
                             daemon_config
                                 .character_thumbnails
