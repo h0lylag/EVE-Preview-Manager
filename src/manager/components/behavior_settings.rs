@@ -115,6 +115,19 @@ pub fn ui(
 
             ui.add_space(ITEM_SPACING);
 
+            // Minimize to tray
+            if ui.checkbox(&mut global.minimize_to_tray,
+                "Minimize to system tray").changed() {
+                action = BehaviorSettingsAction::SettingsChanged;
+            }
+
+            ui.label(egui::RichText::new(
+                "When enabled, minimizing the window hides it to the system tray")
+                .small()
+                .weak());
+
+            ui.add_space(ITEM_SPACING);
+
             // Hide when no focus
             if ui.checkbox(&mut profile.thumbnail_hide_not_focused,
                 "Hide thumbnails when EVE loses focus").changed() {

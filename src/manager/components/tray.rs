@@ -43,6 +43,13 @@ impl ksni::Tray for AppTray {
             .unwrap_or_default()
     }
 
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // Left-click on tray icon shows the window
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.ctx.request_repaint();
+    }
+
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
 
@@ -63,6 +70,19 @@ impl ksni::Tray for AppTray {
         };
 
         vec![
+            // Show Window item
+            StandardItem {
+                label: "Show Window".into(),
+                activate: Box::new(|this: &mut AppTray| {
+                    this.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    this.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    this.ctx.request_repaint();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            // Separator
+            MenuItem::Separator,
             // Refresh item
             StandardItem {
                 label: "Refresh".into(),
