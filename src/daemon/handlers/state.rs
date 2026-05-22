@@ -1,5 +1,5 @@
+use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
-use crate::common::types::ThumbnailState;
 use anyhow::{Context, Result};
 use tracing::debug;
 use x11rb::protocol::xproto::*;
@@ -78,50 +78,15 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
         }
     }
 
-    for (window, thumbnail) in ctx.eve_clients.iter_mut() {
-        if *window == event.event {
-            if !thumbnail.state.is_focused() {
-                thumbnail.state = ThumbnailState::Normal { focused: true };
-                thumbnail
-                    .border(
-                        ctx.display_config,
-                        true,
-                        ctx.cycle_state.is_skipped(&thumbnail.character_name),
-                        ctx.font_renderer,
-                    )
-                    .context(format!(
-                        "Failed to update border on focus for '{}'",
-                        thumbnail.character_name
-                    ))?;
-            }
-        } else {
-            // Update ALL other clients to unfocused state
-            // This ensures borders stay in sync even when minimize-on-switch is active
-            // Only change state for non-minimized windows - minimized windows stay Minimized
-            // For minimized windows, calling border() causes double-rendering, so re-call minimized() instead
-            if thumbnail.state.is_minimized() {
-                thumbnail
-                    .minimized(ctx.display_config, ctx.font_renderer)
-                    .context(format!(
-                        "Failed to re-render minimized window '{}' (focus moved to '{}')",
-                        thumbnail.character_name, event.event
-                    ))?;
-            } else {
-                thumbnail.state = ThumbnailState::Normal { focused: false };
-                thumbnail
-                    .border(
-                        ctx.display_config,
-                        false,
-                        ctx.cycle_state.is_skipped(&thumbnail.character_name),
-                        ctx.font_renderer,
-                    )
-                    .context(format!(
-                        "Failed to clear border for '{}' (focus moved to '{}')",
-                        thumbnail.character_name, event.event
-                    ))?;
-            }
-        }
-    }
+    sync_focused_borders(
+        ctx.eve_clients,
+        ctx.cycle_state,
+        ctx.display_config,
+        ctx.font_renderer,
+        event.event,
+        "focus in",
+    );
+
     Ok(())
 }
 

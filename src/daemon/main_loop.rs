@@ -20,6 +20,7 @@ use crate::x11::{
 };
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 
+use super::border_update::sync_focused_borders;
 use super::cycle_state::CycleState;
 use super::dispatcher::{EventContext, handle_event};
 use super::font;
@@ -560,44 +561,16 @@ async fn run_event_loop(
                             // FocusIn arrives. The FocusIn handler will confirm this later.
                             resources.cycle.set_current_by_window(window);
 
-                            // Draw active border immediately to prevent flash during delay
-                            if let Some(thumb) = resources.eve_clients.get(&window) {
-                                let display_config = resources.config.build_display_config();
-                                if let Err(e) = thumb.border(
-                                    &display_config,
-                                    true,
-                                    resources.cycle.is_skipped(&thumb.character_name),
-                                    &font_renderer,
-                                ) {
-                                    warn!(window = window, error = %e, "Failed to draw initial active border");
-                                }
-                            }
+                            let display_config = resources.config.build_display_config();
+                            sync_focused_borders(
+                                &mut resources.eve_clients,
+                                &resources.cycle,
+                                &display_config,
+                                &font_renderer,
+                                window,
+                                "hotkey activation",
+                            );
 
-                            // Clear borders from ALL other windows immediately (including minimized ones)
-                            // This ensures we don't leave stale active borders on minimized windows
-                            for (w, thumb) in resources.eve_clients.iter_mut() {
-                                if *w != window {
-                                    let display_config = resources.config.build_display_config();
-                                    // Only change state for non-minimized windows
-                                    // Minimized windows should stay Minimized - calling border() on them causes
-                                    // double-rendering. Instead, re-call minimized() to properly clear and re-render.
-                                    if thumb.state.is_minimized() {
-                                        if let Err(e) = thumb.minimized(&display_config, &font_renderer) {
-                                            warn!(window = *w, error = %e, "Failed to re-render minimized window");
-                                        }
-                                    } else {
-                                        thumb.state = crate::common::types::ThumbnailState::Normal { focused: false };
-                                        if let Err(e) = thumb.border(
-                                            &display_config,
-                                            false,
-                                            resources.cycle.is_skipped(&thumb.character_name),
-                                            &font_renderer,
-                                        ) {
-                                            warn!(window = *w, error = %e, "Failed to clear border during switch");
-                                        }
-                                    }
-                                }
-                            }
                             // Refresh pointer state after the immediate border redraw work. This
                             // keeps the final synthetic mouse event near the real cursor instead
                             // of the legacy activation-time (0,0) coordinate.
@@ -621,7 +594,6 @@ async fn run_event_loop(
                                 // NOTE: exempt_from_minimize for custom sources is stored in the
                                 // rule, not in daemon_config maps; build_display_config() is the
                                 // only place it is resolved into character_settings.
-                                let display_config = resources.config.build_display_config();
                                 let other_windows: Vec<Window> = resources.eve_clients
                                     .iter()
                                     .filter(|(w, _)| **w != window)

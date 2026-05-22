@@ -3,6 +3,7 @@ use tracing::{debug, warn};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
+use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
 use super::super::snapping::{self, Rect};
 use super::super::thumbnail::Thumbnail;
@@ -204,43 +205,14 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
 
     // After dropping the thumbnail borrow, update borders for left-clicks
     if is_left_click {
-        if let Some(thumb) = ctx.eve_clients.get_mut(&clicked_key) {
-            // Set active border on clicked window
-            thumb.state = crate::common::types::ThumbnailState::Normal { focused: true };
-            if let Err(e) = thumb.border(
-                ctx.display_config,
-                true,
-                ctx.cycle_state.is_skipped(&thumb.character_name),
-                ctx.font_renderer,
-            ) {
-                warn!(window = clicked_key, error = %e, "Failed to draw active border after click");
-            }
-        }
-
-        // Clear borders from ALL other windows (including minimized ones)
-        // This ensures we don't leave stale active borders on minimized windows
-        for (w, thumb) in ctx.eve_clients.iter_mut() {
-            if *w != clicked_key {
-                // Only change state for non-minimized windows
-                // Minimized windows should stay Minimized - calling border() on them causes
-                // double-rendering. Instead, re-call minimized() to properly clear and re-render.
-                if thumb.state.is_minimized() {
-                    if let Err(e) = thumb.minimized(ctx.display_config, ctx.font_renderer) {
-                        warn!(window = *w, error = %e, "Failed to re-render minimized window");
-                    }
-                } else {
-                    thumb.state = crate::common::types::ThumbnailState::Normal { focused: false };
-                    if let Err(e) = thumb.border(
-                        ctx.display_config,
-                        false,
-                        ctx.cycle_state.is_skipped(&thumb.character_name),
-                        ctx.font_renderer,
-                    ) {
-                        warn!(window = *w, error = %e, "Failed to clear border during click switch");
-                    }
-                }
-            }
-        }
+        sync_focused_borders(
+            ctx.eve_clients,
+            ctx.cycle_state,
+            ctx.display_config,
+            ctx.font_renderer,
+            clicked_key,
+            "thumbnail click",
+        );
 
         // Flush X11 connection to ensure border updates are rendered immediately
         let _ = ctx.app_ctx.conn.flush();

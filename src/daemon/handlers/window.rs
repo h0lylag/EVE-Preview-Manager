@@ -4,6 +4,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::damage::ConnectionExt as DamageExt;
 use x11rb::protocol::xproto::*;
 
+use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
 use crate::common::types::Position;
 
@@ -202,44 +203,14 @@ pub fn process_detected_window(
             .unwrap_or(false);
 
             if is_actually_focused {
-                // Update this window to focused
-                if let Some(thumb) = ctx.eve_clients.get_mut(&window) {
-                    thumb.state = crate::common::types::ThumbnailState::Normal { focused: true };
-                    if let Err(e) = thumb.border(
-                        ctx.display_config,
-                        true,
-                        ctx.cycle_state.is_skipped(&thumb.character_name),
-                        ctx.font_renderer,
-                    ) {
-                        tracing::warn!(window = window, error = %e, "Failed to draw active border for restored window");
-                    }
-                }
-
-                // Clear borders from ALL other windows (including minimized ones)
-                // This prevents stale active borders from appearing on wrong clients
-                for (w, thumb) in ctx.eve_clients.iter_mut() {
-                    if *w != window {
-                        // Only change state for non-minimized windows
-                        // Minimized windows should stay Minimized - calling border() on them causes
-                        // double-rendering. Instead, re-call minimized() to properly clear and re-render.
-                        if thumb.state.is_minimized() {
-                            if let Err(e) = thumb.minimized(ctx.display_config, ctx.font_renderer) {
-                                tracing::warn!(window = *w, error = %e, "Failed to re-render minimized window");
-                            }
-                        } else {
-                            thumb.state =
-                                crate::common::types::ThumbnailState::Normal { focused: false };
-                            if let Err(e) = thumb.border(
-                                ctx.display_config,
-                                false,
-                                ctx.cycle_state.is_skipped(&thumb.character_name),
-                                ctx.font_renderer,
-                            ) {
-                                tracing::warn!(window = *w, error = %e, "Failed to clear border for previous window");
-                            }
-                        }
-                    }
-                }
+                sync_focused_borders(
+                    ctx.eve_clients,
+                    ctx.cycle_state,
+                    ctx.display_config,
+                    ctx.font_renderer,
+                    window,
+                    "restored focused window",
+                );
             } else {
                 // Not focused, just draw inactive border
                 if let Some(thumb) = ctx.eve_clients.get_mut(&window)
