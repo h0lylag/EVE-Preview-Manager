@@ -19,6 +19,7 @@ pub struct AppContext<'a> {
 #[derive(Debug)]
 pub struct CachedAtoms {
     pub wm_name: Atom,
+    pub utf8_string: Atom,
     pub net_wm_pid: Atom,
     pub net_wm_state: Atom,
     pub net_wm_state_hidden: Atom,
@@ -54,6 +55,12 @@ impl CachedAtoms {
                 .context("Failed to intern WM_NAME atom")?
                 .reply()
                 .context("Failed to get reply for WM_NAME atom")?
+                .atom,
+            utf8_string: conn
+                .intern_atom(false, b"UTF8_STRING")
+                .context("Failed to intern UTF8_STRING atom")?
+                .reply()
+                .context("Failed to get reply for UTF8_STRING atom")?
                 .atom,
             net_wm_pid: conn
                 .intern_atom(false, b"_NET_WM_PID")

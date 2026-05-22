@@ -17,7 +17,7 @@ use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::common::constants::x11;
 use crate::common::types::Dimensions;
-use crate::x11::{to_fixed, AppContext};
+use crate::x11::{AppContext, to_fixed};
 
 use super::font::FontRenderer;
 use super::overlay::OverlayRenderer;
@@ -101,7 +101,39 @@ impl<'a> ThumbnailRenderer<'a> {
         Ok(window)
     }
 
-    /// Setup window properties (opacity, WM_CLASS, always-on-top, PID)
+    fn set_window_title(
+        conn: &RustConnection,
+        atoms: &crate::x11::CachedAtoms,
+        window: Window,
+        character_name: &str,
+    ) -> Result<()> {
+        let title = format!("EPM Thumbnail - {}", character_name);
+
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            atoms.net_wm_name,
+            atoms.utf8_string,
+            title.as_bytes(),
+        )
+        .context(format!(
+            "Failed to update _NET_WM_NAME for '{}'",
+            character_name
+        ))?;
+
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            atoms.wm_name,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        )
+        .context(format!("Failed to update WM_NAME for '{}'", character_name))?;
+
+        Ok(())
+    }
+
+    /// Setup window properties (title, opacity, WM_CLASS, always-on-top, PID)
     fn setup_window_properties(
         ctx: &AppContext,
         window: Window,
@@ -147,6 +179,8 @@ impl<'a> ThumbnailRenderer<'a> {
                 b"eve-preview-thumbnail\0eve-preview-thumbnail\0",
             )
             .context(format!("Failed to set WM_CLASS for '{}'", character_name))?;
+
+        Self::set_window_title(ctx.conn, ctx.atoms, window, character_name)?;
 
         // Set always-on-top
         ctx.conn
@@ -600,18 +634,7 @@ impl<'a> ThumbnailRenderer<'a> {
                 character_name
             ))?;
 
-        self.conn
-            .change_property8(
-                PropMode::REPLACE,
-                self.window,
-                self.atoms.net_wm_name,
-                AtomEnum::STRING,
-                format!("EVE Thumbnail - {}", character_name).as_bytes(),
-            )
-            .context(format!(
-                "Failed to update _NET_WM_NAME for '{}'",
-                character_name
-            ))?;
+        Self::set_window_title(self.conn, self.atoms, self.window, character_name)?;
 
         self.overlay.update_name(
             display_config,
