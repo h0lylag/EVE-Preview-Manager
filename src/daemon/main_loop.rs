@@ -14,7 +14,7 @@ use crate::common::constants::eve;
 use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
 use crate::config::DaemonConfig;
 use crate::input::listener::{self, CycleCommand, TimestampedCommand};
-use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window, unminimize_window};
+use crate::x11::{AppContext, CachedAtoms, activate_window, minimize_window, unminimize_window, force_pointer_refresh};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 
 use super::cycle_state::CycleState;
@@ -595,7 +595,9 @@ async fn run_event_loop(
                                     }
                                 }
                             }
-
+                            
+                            // Inject synthetic motion event to fix "stuck mouse" issues on XWayland where hover states don't activate after focus changes.
+                            force_pointer_refresh(ctx.conn, window, timestamp).context("Failed to refresh pointer state after hotkey activation")?;
                             // CRITICAL: Flush X11 connection to ensure border updates are rendered
                             // before the 25ms delay. Without this, borders may flash to wrong clients.
                             let _ = ctx.conn.flush();
