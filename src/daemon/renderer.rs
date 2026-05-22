@@ -17,7 +17,7 @@ use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::common::constants::x11;
 use crate::common::types::Dimensions;
-use crate::x11::{AppContext, to_fixed};
+use crate::x11::{to_fixed, AppContext};
 
 use super::font::FontRenderer;
 use super::overlay::OverlayRenderer;
@@ -597,6 +597,19 @@ impl<'a> ThumbnailRenderer<'a> {
             .clear_content_area(dimensions, border_size)
             .context(format!(
                 "Failed to clear content area for '{}'",
+                character_name
+            ))?;
+
+        self.conn
+            .change_property8(
+                PropMode::REPLACE,
+                self.window,
+                self.atoms.net_wm_name,
+                AtomEnum::STRING,
+                format!("EVE Thumbnail - {}", character_name).as_bytes(),
+            )
+            .context(format!(
+                "Failed to update _NET_WM_NAME for '{}'",
                 character_name
             ))?;
 
