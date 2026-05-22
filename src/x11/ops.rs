@@ -48,22 +48,8 @@ pub fn activate_window(
         window
     ))?;
 
-    // Inject a synthetic motion event to wake up the client's input handling
-    // This fixes "stuck mouse" issues on XWayland where hover states don't activate
-    refresh_pointer_state(conn, window, timestamp).context("Failed to refresh pointer state")?;
-
     conn.flush()
         .context("Failed to flush X11 connection after window activation")?;
-    Ok(())
-}
-
-
-// Create a wrapper function for for the syntehic moition even so it can be called else where
-pub fn force_pointer_refresh(conn: &RustConnection, window: Window, timestamp: u32) -> Result<()> {
-    
-    refresh_pointer_state(conn, window, timestamp).context("Failed to refresh pointer state")?;
-    conn.flush()
-        .context("Failed to flush X11 connection after pointer refresh")?;
     Ok(())
 }
 
@@ -192,17 +178,29 @@ pub fn unminimize_window(
 /// often fail to detect that the mouse is hovering them after being programmatically activated.
 ///
 /// Use this instead of WarpPointer on Wayland sessions.
-fn refresh_pointer_state(conn: &RustConnection, window: Window, timestamp: u32) -> Result<()> {
+pub(crate) fn refresh_pointer_state(
+    conn: &RustConnection,
+    window: Window,
+    timestamp: u32,
+) -> Result<()> {
     let pointer = conn
         .query_pointer(window)
         .context("Failed to query pointer for refresh_pointer_state")?
         .reply()
         .context("Failed to get QueryPointer reply for refresh_pointer_state")?;
 
-    // Determine jitter direction to avoid going out of bounds (0,0)
-    // If we are at the very top/left, move +1, otherwise move -1.
-    let jitter_x = if pointer.root_x > 0 { -1 } else { 1 };
-    let jitter_y = if pointer.root_y > 0 { -1 } else { 1 };
+    if !pointer.same_screen {
+        tracing::debug!(
+            window = window,
+            "Skipping pointer refresh because pointer is not on the same screen"
+        );
+        return Ok(());
+    }
+
+    // Use a tiny synthetic nudge so Wine/EVE observes a motion transition without
+    // poisoning cursor state with the legacy (0,0) coordinates.
+    let jitter_x = if pointer.win_x > 0 { -1 } else { 1 };
+    let jitter_y = if pointer.win_y > 0 { -1 } else { 1 };
 
     let motion_event = MotionNotifyEvent {
         response_type: MOTION_NOTIFY_EVENT,
@@ -211,29 +209,24 @@ fn refresh_pointer_state(conn: &RustConnection, window: Window, timestamp: u32) 
         time: timestamp,
         root: pointer.root,
         event: window,
-        child: pointer.child,
-        root_x: pointer.root_x + jitter_x,
-        root_y: pointer.root_y + jitter_y,
-        event_x: pointer.win_x + jitter_x,
-        event_y: pointer.win_y + jitter_y,
-        // Use default to ensure we don't accidentally trigger "Drag" logic 
+        child: window,
+        root_x: pointer.root_x.saturating_add(jitter_x),
+        root_y: pointer.root_y.saturating_add(jitter_y),
+        event_x: pointer.win_x.saturating_add(jitter_x),
+        event_y: pointer.win_y.saturating_add(jitter_y),
+        // Use default to ensure we don't accidentally trigger "Drag" logic
         // if a mouse button was physically held during this call.
-        state: KeyButMask::default(), 
+        state: KeyButMask::default(),
         same_screen: true, // Force the client to treat it as a local event
     };
 
-    conn.send_event(
-        false,                     
-        window,                    
-        EventMask::POINTER_MOTION, 
-        motion_event,              
-    )?;
+    conn.send_event(false, window, EventMask::POINTER_MOTION, motion_event)?;
 
     tracing::debug!(
         window = window,
-        x = pointer.root_x + jitter_x,
-        y = pointer.root_y + jitter_y,
-        "Injected synthetic MotionNotify with default mask and same_screen: true"
+        event_x = motion_event.event_x,
+        event_y = motion_event.event_y,
+        "Injected synthetic MotionNotify nudge to refresh pointer state"
     );
 
     Ok(())
