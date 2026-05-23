@@ -1,9 +1,18 @@
 {
   pkgs ? import <nixpkgs> { },
+  rustToolchain ? null,
 }:
 
 let
   manifest = (pkgs.lib.importTOML ./Cargo.toml).package;
+  rustPlatform =
+    if rustToolchain == null then
+      pkgs.rustPlatform
+    else
+      pkgs.makeRustPlatform {
+        cargo = rustToolchain;
+        rustc = rustToolchain;
+      };
 
   runtimeLibs = with pkgs; [
     stdenv.cc.cc.lib
@@ -17,7 +26,7 @@ let
   ];
 in
 
-pkgs.rustPlatform.buildRustPackage rec {
+rustPlatform.buildRustPackage rec {
   pname = manifest.name;
   version = manifest.version;
 
