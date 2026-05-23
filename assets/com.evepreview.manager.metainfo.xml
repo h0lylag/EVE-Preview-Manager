@@ -52,6 +52,25 @@
   </screenshots>
 
   <releases>
+    <release version="1.8.0-beta.1" date="2026-05-23">
+      <description>
+        <p>New:</p>
+        <ul>
+          <li>Added options to minimize the manager to the system tray and start the application
+            minimized to the tray.</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>Fixed an issue where the mouse could jump to 0,0 over the NeoCom while rapidly
+            cycling between clients.</li>
+        </ul>
+        <p>Other:</p>
+        <ul>
+          <li>Added window titles to thumbnail previews for window manager rule support, using the
+            format "EPM Thumbnail - {Character Name}".</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.0" date="2026-02-27">
       <description>
         <p>New:</p>
