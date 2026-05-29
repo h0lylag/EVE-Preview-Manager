@@ -22,6 +22,10 @@ pub fn activate_window(
     window: Window,
     timestamp: u32,
 ) -> Result<()> {
+    // Explicitly raise the window to the front.
+    // Some clients (like RuneLite/Java) or Window Managers (especially under Xwayland)
+    // require an explicit StackMode::ABOVE request to actually bring the window
+    // to the foreground, even when _NET_ACTIVE_WINDOW is sent.
     conn.configure_window(
         window,
         &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),

@@ -693,57 +693,6 @@ impl<'a> ThumbnailRenderer<'a> {
         Ok(())
     }
 
-    /// Sends a request to the Window Manager to focus the source window.
-    ///
-    /// # Arguments
-    /// * `timestamp` - X11 timestamp from the input event that triggered this action.
-    pub fn focus(&self, character_name: &str, timestamp: u32) -> Result<()> {
-        // Explicitly raise the window to the front.
-        // Some clients (like RuneLite/Java) or Window Managers (especially under Xwayland)
-        // require an explicit StackMode::ABOVE request to actually bring the window
-        // to the foreground, even when _NET_ACTIVE_WINDOW is sent.
-        self.conn
-            .configure_window(
-                self.src,
-                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-            )
-            .context(format!(
-                "Failed to raise window for '{}' to top of stack",
-                character_name
-            ))?;
-
-        let ev = ClientMessageEvent {
-            response_type: CLIENT_MESSAGE_EVENT,
-            format: 32,
-            sequence: 0,
-            window: self.src,
-            type_: self.atoms.net_active_window,
-            data: ClientMessageData::from([x11::ACTIVE_WINDOW_SOURCE_PAGER, timestamp, 0, 0, 0]),
-        };
-
-        self.conn
-            .send_event(
-                false,
-                self.root,
-                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-                ev,
-            )
-            .context(format!(
-                "Failed to send focus event for '{}'",
-                character_name
-            ))?;
-        self.conn
-            .flush()
-            .context("Failed to flush X11 connection after focus event")?;
-        info!(
-            window = self.window,
-            character = %character_name,
-            timestamp = timestamp,
-            "Activating window via click"
-        );
-        Ok(())
-    }
-
     /// Moves the thumbnail window to a new position.
     pub fn reposition(&mut self, character_name: &str, x: i16, y: i16) -> Result<()> {
         self.conn

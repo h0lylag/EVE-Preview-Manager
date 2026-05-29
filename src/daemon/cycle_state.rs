@@ -23,8 +23,9 @@ pub struct CycleState {
     /// Used to resolve starting position for cycling, especially for detached characters
     current_window: Option<Window>,
 
-    /// Active windows: character_name → window_id
-    /// Only includes characters that currently have windows
+    /// Active windows: character_name -> window_id.
+    /// Logged-out windows share the empty name, so exact logged-out selection is
+    /// tracked by current_window plus SessionState's last-character map.
     active_windows: HashMap<String, Window>,
 
     /// Characters temporarily skipped from cycling
@@ -84,7 +85,7 @@ impl CycleState {
             debug!(character = %name, window = window, "Removing window for character");
             self.active_windows.remove(&name);
 
-            // If we removed the current character, clamp indices in all groups
+            // If a tracked window disappeared, keep group indices in range.
             self.clamp_indices();
 
             // Clear current_window if it matches
@@ -337,12 +338,9 @@ impl CycleState {
         None
     }
 
-    /// Set current character (called when clicking thumbnail)
-    /// Returns true if character exists in config order
-    pub fn set_current(&mut self, character_name: &str) -> bool {
-        // Resolve window for this character if possible to update current_window
-        if let Some(&window) = self.active_windows.get(character_name) {
-            self.current_window = Some(window);
+    fn set_current_group_index(&mut self, character_name: &str) -> bool {
+        if character_name.is_empty() {
+            return false;
         }
 
         let mut found_in_any_group = false;
@@ -355,7 +353,7 @@ impl CycleState {
         }
 
         if found_in_any_group {
-            debug!(character = %character_name, "Setting current character (updated group indices)");
+            debug!(character = %character_name, "Updated current cycle group index");
             true
         } else {
             false
@@ -371,12 +369,39 @@ impl CycleState {
         if let Some((character_name, _)) = self.active_windows.iter().find(|&(_, &w)| w == window) {
             let character_name = character_name.clone();
             // This will try to update current_index if in group, but we return true regardless if found
-            self.set_current(&character_name);
+            self.set_current_group_index(&character_name);
             return true; // Found the window
         }
 
         // Window not known (not an EVE client?)
         false
+    }
+
+    /// Set current cycle position by exact window ID, with an optional character name for
+    /// logged-out windows whose live thumbnail name is empty.
+    pub fn set_current_by_window_with_character(
+        &mut self,
+        window: Window,
+        character_name: Option<&str>,
+    ) -> bool {
+        self.current_window = Some(window);
+
+        if let Some((active_name, _)) = self.active_windows.iter().find(|&(_, &w)| w == window) {
+            let active_name = active_name.clone();
+            if !active_name.is_empty() {
+                self.set_current_group_index(&active_name);
+                return true;
+            }
+
+            if let Some(name) = character_name {
+                self.set_current_group_index(name);
+            }
+            return true;
+        }
+
+        character_name
+            .map(|name| self.set_current_group_index(name))
+            .unwrap_or(false)
     }
 
     /// Clamp index to valid range in all groups after removing characters
@@ -506,11 +531,6 @@ impl CycleState {
 mod tests {
     use super::*;
 
-    // Tests have been removed or need significant refactoring for multi-group logic.
-    // Since I'm in execution mode and tests are not critical for functionality provided I trust my valid logic changes,
-    // I will comment them out to prevent compilation errors and save time.
-    // I'll leave a minimal test case.
-
     #[test]
     fn test_cycle_forward_multi_group() {
         use crate::config::profile::CycleGroup;
@@ -600,6 +620,38 @@ mod tests {
         assert_eq!(
             state.cycle_forward("G1", None, true),
             Some((100, "A".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_logged_out_click_preserves_clicked_window() {
+        use crate::config::profile::{CycleGroup, CycleSlot};
+        use std::collections::HashMap;
+
+        let group = CycleGroup {
+            name: "G1".to_string(),
+            cycle_list: vec![
+                CycleSlot::Eve("A".to_string()),
+                CycleSlot::Eve("B".to_string()),
+            ],
+            hotkey_forward: None,
+            hotkey_backward: None,
+        };
+        let mut state = CycleState::new(vec![group]);
+
+        // Multiple logged-out thumbnails all have an empty live character name. The
+        // active map can only hold one empty key, so clicking another logged-out
+        // preview must still anchor current_window to the exact clicked window.
+        state.add_window("".to_string(), 222);
+
+        assert!(state.set_current_by_window_with_character(111, Some("A")));
+        assert_eq!(state.get_current_window(), Some(111));
+        assert_eq!(state.groups.get("G1").unwrap().current_index, 0);
+
+        let logged_out = HashMap::from([(111, "A".to_string()), (222, "B".to_string())]);
+        assert_eq!(
+            state.cycle_forward("G1", Some(&logged_out), false),
+            Some((222, "B".to_string()))
         );
     }
 }

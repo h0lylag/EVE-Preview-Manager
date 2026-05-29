@@ -6,7 +6,7 @@ use x11rb::protocol::xproto::*;
 
 use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
-use crate::common::types::Position;
+use crate::common::types::{CharacterSettings, Position, ThumbnailState};
 
 /// Handle DamageNotify events - update damaged thumbnail
 pub fn handle_damage_notify(
@@ -61,6 +61,13 @@ pub fn process_detected_window(
     debug!(?identity, "Identity details");
 
     ctx.cycle_state.add_window(identity.name.clone(), window);
+
+    // MapNotify/PropertyNotify can re-detect a source window that already has a
+    // thumbnail, especially around minimize/restore. Refresh in place so the
+    // thumbnail keeps its current screen position instead of being recreated.
+    if refresh_tracked_window(ctx, window, &identity)? {
+        return Ok(());
+    }
 
     match check_and_create_window(
         ctx.app_ctx,
@@ -190,9 +197,8 @@ pub fn process_detected_window(
 
             ctx.eve_clients.insert(window, thumbnail);
 
-            // Check if this newly detected/mapped window is actually the focused window
-            // This handles cases like unminimizing where MapNotify might race with FocusIn,
-            // or where we overwrote the focused state by re-inserting the thumbnail.
+            // Check whether this newly created thumbnail belongs to the active source
+            // window. Detection can arrive after activation but before FocusIn.
             let is_actually_focused = crate::x11::get_active_window(
                 ctx.app_ctx.conn,
                 ctx.app_ctx.screen,
@@ -301,6 +307,183 @@ pub fn process_detected_window(
         }
     }
     Ok(())
+}
+
+fn upsert_spatial_settings(
+    map: &mut std::collections::HashMap<String, CharacterSettings>,
+    name: &str,
+    settings: CharacterSettings,
+) -> bool {
+    if let Some(existing) = map.get_mut(name) {
+        let changed = existing.x != settings.x
+            || existing.y != settings.y
+            || existing.dimensions != settings.dimensions;
+
+        existing.x = settings.x;
+        existing.y = settings.y;
+        existing.dimensions = settings.dimensions;
+
+        changed
+    } else {
+        map.insert(name.to_string(), settings);
+        true
+    }
+}
+
+fn refresh_tracked_window(
+    ctx: &mut EventContext,
+    window: Window,
+    identity: &crate::daemon::window_detection::WindowIdentity,
+) -> Result<bool> {
+    use crate::common::ipc::DaemonMessage;
+    use crate::x11::{get_active_window, is_window_minimized};
+
+    if !ctx.eve_clients.contains_key(&window) {
+        return Ok(false);
+    }
+
+    let is_actually_focused =
+        get_active_window(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms)
+            .unwrap_or(None)
+            .map(|active| active == window)
+            .unwrap_or(false);
+    let is_minimized =
+        is_window_minimized(ctx.app_ctx.conn, window, ctx.app_ctx.atoms).unwrap_or(false);
+
+    let mut position_changed = None;
+
+    if let Some(thumbnail) = ctx.eve_clients.get_mut(&window) {
+        if thumbnail.character_name != identity.name {
+            debug!(
+                window = window,
+                current = %thumbnail.character_name,
+                detected = %identity.name,
+                "Tracked window identity changed during detection; waiting for property handler"
+            );
+        }
+
+        if !thumbnail.character_name.is_empty() {
+            let mut settings = if identity.is_eve {
+                ctx.daemon_config
+                    .character_thumbnails
+                    .get(&thumbnail.character_name)
+                    .or_else(|| {
+                        ctx.daemon_config
+                            .profile
+                            .character_thumbnails
+                            .get(&thumbnail.character_name)
+                    })
+                    .cloned()
+            } else {
+                ctx.daemon_config
+                    .custom_source_thumbnails
+                    .get(&thumbnail.character_name)
+                    .or_else(|| {
+                        ctx.daemon_config
+                            .profile
+                            .custom_source_thumbnails
+                            .get(&thumbnail.character_name)
+                    })
+                    .cloned()
+            }
+            .or_else(|| {
+                ctx.display_config
+                    .character_settings
+                    .get(&thumbnail.character_name)
+                    .cloned()
+            })
+            .unwrap_or_else(|| {
+                let mut settings = CharacterSettings::new(
+                    thumbnail.current_position.x,
+                    thumbnail.current_position.y,
+                    thumbnail.dimensions.width,
+                    thumbnail.dimensions.height,
+                );
+                settings.preview_mode = thumbnail.preview_mode.clone();
+                settings
+            });
+
+            settings.x = thumbnail.current_position.x;
+            settings.y = thumbnail.current_position.y;
+            settings.dimensions = thumbnail.dimensions;
+
+            let changed = if identity.is_eve {
+                upsert_spatial_settings(
+                    &mut ctx.daemon_config.character_thumbnails,
+                    &thumbnail.character_name,
+                    settings.clone(),
+                )
+            } else {
+                upsert_spatial_settings(
+                    &mut ctx.daemon_config.custom_source_thumbnails,
+                    &thumbnail.character_name,
+                    settings.clone(),
+                )
+            };
+
+            if changed {
+                position_changed = Some((
+                    thumbnail.character_name.clone(),
+                    settings.x,
+                    settings.y,
+                    settings.dimensions.width,
+                    settings.dimensions.height,
+                    !identity.is_eve,
+                ));
+            }
+        }
+
+        if is_minimized {
+            thumbnail
+                .minimized(ctx.display_config, ctx.font_renderer)
+                .context(format!(
+                    "Failed to refresh minimized state for '{}'",
+                    thumbnail.character_name
+                ))?;
+        } else {
+            thumbnail.state = ThumbnailState::Normal { focused: false };
+            thumbnail
+                .update(ctx.display_config, ctx.font_renderer)
+                .context(format!(
+                    "Failed to refresh restored thumbnail for '{}'",
+                    thumbnail.character_name
+                ))?;
+        }
+    }
+
+    if let Some((name, x, y, width, height, is_custom)) = position_changed {
+        let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
+            name,
+            x,
+            y,
+            width,
+            height,
+            is_custom,
+        });
+    }
+
+    if is_actually_focused {
+        sync_focused_borders(
+            ctx.eve_clients,
+            ctx.cycle_state,
+            ctx.display_config,
+            ctx.font_renderer,
+            window,
+            "tracked window refreshed",
+        );
+    } else if !is_minimized
+        && let Some(thumb) = ctx.eve_clients.get_mut(&window)
+        && let Err(e) = thumb.border(
+            ctx.display_config,
+            false,
+            ctx.cycle_state.is_skipped(&thumb.character_name),
+            ctx.font_renderer,
+        )
+    {
+        tracing::warn!(window = window, error = %e, "Failed to draw inactive border for refreshed window");
+    }
+
+    Ok(true)
 }
 
 /// Handle CreateNotify events - create thumbnail for new EVE window

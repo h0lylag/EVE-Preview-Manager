@@ -10,7 +10,32 @@ use super::super::thumbnail::Thumbnail;
 use crate::common::constants::mouse;
 use crate::common::types::Position;
 
-/// Handle ButtonPress events - start dragging or set current character
+fn set_clicked_cycle_target(
+    ctx: &mut EventContext<'_, '_>,
+    window: Window,
+    character_name: Option<&str>,
+) {
+    let cycle_character_name = character_name
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            ctx.session_state
+                .window_last_character
+                .get(&window)
+                .cloned()
+        });
+
+    ctx.cycle_state
+        .set_current_by_window_with_character(window, cycle_character_name.as_deref());
+
+    debug!(
+        window = window,
+        character = %cycle_character_name.as_deref().unwrap_or(""),
+        "Set current window via thumbnail click"
+    );
+}
+
+/// Handle ButtonPress events - start dragging or prime the clicked cycle target
 #[tracing::instrument(skip(ctx), fields(window = event.event))]
 pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> Result<()> {
     debug!(
@@ -54,6 +79,8 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
         Vec::new() // No snap targets needed for left-click
     };
 
+    let mut clicked_character_name = None;
+
     // Now get mutable reference to the clicked thumbnail
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_window) {
         debug!(window = thumbnail.window(), character = %thumbnail.character_name, "ButtonPress on thumbnail");
@@ -81,19 +108,24 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
                 "Started dragging thumbnail with cached snap targets"
             );
         }
-        // Left-click sets current character for cycling
+        // Left-click primes the exact source window for subsequent cycling. Logged-out
+        // thumbnails have empty live names, so the helper resolves their last character.
         if event.detail == mouse::BUTTON_LEFT {
-            ctx.cycle_state.set_current(&thumbnail.character_name);
-            debug!(character = %thumbnail.character_name, "Set current character via click");
+            clicked_character_name = Some(thumbnail.character_name.clone());
         }
     }
+
+    if event.detail == mouse::BUTTON_LEFT {
+        set_clicked_cycle_target(ctx, clicked_window, clicked_character_name.as_deref());
+    }
+
     Ok(())
 }
 
-/// Handle ButtonRelease events - focus window and save position after drag
+/// Handle ButtonRelease events - activate source window and save position after drag
 pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> Result<()> {
     use crate::common::ipc::DaemonMessage;
-    use crate::x11::minimize_window;
+    use crate::x11::{activate_window, minimize_window, unminimize_window};
 
     debug!(
         x = event.root_x,
@@ -120,23 +152,42 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
     };
 
     let mut clicked_src: Option<Window> = None;
+    let mut clicked_character_name = None;
     let is_left_click = event.detail == mouse::BUTTON_LEFT;
 
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_key) {
         debug!(window = thumbnail.window(), character = %thumbnail.character_name, "ButtonRelease on thumbnail");
-        clicked_src = Some(thumbnail.src());
+        let src = thumbnail.src();
+        clicked_src = Some(src);
 
         // Collect data we need for border updates before the mutable borrow
         let character_name = thumbnail.character_name.clone();
+        clicked_character_name = Some(character_name.clone());
 
         // Left-click focuses the window (dragging is right-click only)
         if is_left_click {
-            thumbnail
-                .focus(event.time)
-                .context(format!("Failed to focus window for '{}'", character_name))?;
+            if ctx.daemon_config.profile.client_minimize_on_switch
+                && let Err(e) =
+                    unminimize_window(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms, src)
+            {
+                debug!(
+                    window = src,
+                    error = ?e,
+                    "Failed to unminimize window before click activation"
+                );
+            }
 
-            // Update cycle state and borders immediately to prevent flash
-            ctx.cycle_state.set_current(&character_name);
+            activate_window(
+                ctx.app_ctx.conn,
+                ctx.app_ctx.screen,
+                ctx.app_ctx.atoms,
+                src,
+                event.time,
+            )
+            .context(format!(
+                "Failed to activate window for '{}'",
+                character_name
+            ))?;
         }
 
         // Save position after drag ends (right-click release)
@@ -203,8 +254,10 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         thumbnail.input_state.snap_targets.clear();
     }
 
-    // After dropping the thumbnail borrow, update borders for left-clicks
+    // After dropping the thumbnail borrow, update cycle state and borders for left-clicks.
     if is_left_click {
+        set_clicked_cycle_target(ctx, clicked_key, clicked_character_name.as_deref());
+
         sync_focused_borders(
             ctx.eve_clients,
             ctx.cycle_state,
@@ -222,6 +275,10 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         && ctx.daemon_config.profile.client_minimize_on_switch
         && let Some(clicked_src) = clicked_src
     {
+        // Match the hotkey activation path: let focus settle before minimizing
+        // other clients, otherwise some WMs can redirect focus during restore.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+
         // Collect windows to minimize and clear their borders first
         let windows_to_minimize: Vec<Window> = ctx
             .eve_clients
