@@ -1,12 +1,21 @@
 {
   pkgs ? import <nixpkgs> { },
+  rustToolchain ? null,
 }:
 
 let
   manifest = (pkgs.lib.importTOML ./Cargo.toml).package;
+  rustPlatform =
+    if rustToolchain == null then
+      pkgs.rustPlatform
+    else
+      pkgs.makeRustPlatform {
+        cargo = rustToolchain;
+        rustc = rustToolchain;
+      };
 
-  # Runtime libraries
   runtimeLibs = with pkgs; [
+    stdenv.cc.cc.lib
     libGL
     libxkbcommon
     wayland
@@ -14,15 +23,14 @@ let
     libxcursor
     libxrandr
     libxi
-    fontconfig
   ];
 in
 
-pkgs.rustPlatform.buildRustPackage rec {
+rustPlatform.buildRustPackage rec {
   pname = manifest.name;
   version = manifest.version;
 
-  cargoLock.lockFile = ./Cargo.lock;
+  cargoHash = "sha256-ox9TM0O+u2PsAsBpNlf8xMZkp4L8rACBUKvZOwecZ5U=";
 
   src = pkgs.lib.cleanSource ./.;
 
@@ -30,18 +38,18 @@ pkgs.rustPlatform.buildRustPackage rec {
   doCheck = false;
 
   nativeBuildInputs = with pkgs; [
-    makeWrapper
     pkg-config
+    autoPatchelfHook
   ];
 
-  buildInputs = runtimeLibs;
+  buildInputs = runtimeLibs ++ [ pkgs.fontconfig ];
 
-  # Wrap binary with LD_LIBRARY_PATH for runtime-loaded libs (OpenGL, Wayland, X11)
+  runtimeDependencies = runtimeLibs;
+
   postInstall = ''
     install -Dm644 assets/com.evepreview.manager.desktop $out/share/applications/eve-preview-manager.desktop
     install -Dm644 assets/com.evepreview.manager.svg $out/share/icons/hicolor/scalable/apps/com.evepreview.manager.svg
     install -Dm644 assets/com.evepreview.manager.metainfo.xml $out/share/metainfo/com.evepreview.manager.metainfo.xml
-    wrapProgram $out/bin/eve-preview-manager --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibs}"
   '';
 
   # Expose runtimeLibs for shell.nix to reuse
@@ -50,10 +58,12 @@ pkgs.rustPlatform.buildRustPackage rec {
   };
 
   meta = with pkgs.lib; {
-    description = "EVE Preview Manager — EVE Online Window Switcher and Preview Manager for Linux";
+    description = "Utility for EVE Online multiboxing with real-time previews and hotkeys";
     homepage = "https://github.com/h0lylag/EVE-Preview-Manager";
+    changelog = "https://github.com/h0lylag/EVE-Preview-Manager/releases/tag/v${manifest.version}";
     license = licenses.mit;
-    platforms = [ "x86_64-linux" ];
+    maintainers = with maintainers; [ h0lylag ];
+    platforms = platforms.linux;
     mainProgram = "eve-preview-manager";
   };
 

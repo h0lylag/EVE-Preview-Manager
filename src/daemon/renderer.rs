@@ -17,7 +17,7 @@ use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::common::constants::x11;
 use crate::common::types::Dimensions;
-use crate::x11::{to_fixed, AppContext};
+use crate::x11::{AppContext, to_fixed};
 
 use super::font::FontRenderer;
 use super::overlay::OverlayRenderer;
@@ -101,7 +101,39 @@ impl<'a> ThumbnailRenderer<'a> {
         Ok(window)
     }
 
-    /// Setup window properties (opacity, WM_CLASS, always-on-top, PID)
+    fn set_window_title(
+        conn: &RustConnection,
+        atoms: &crate::x11::CachedAtoms,
+        window: Window,
+        character_name: &str,
+    ) -> Result<()> {
+        let title = format!("EPM Thumbnail - {}", character_name);
+
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            atoms.net_wm_name,
+            atoms.utf8_string,
+            title.as_bytes(),
+        )
+        .context(format!(
+            "Failed to update _NET_WM_NAME for '{}'",
+            character_name
+        ))?;
+
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            atoms.wm_name,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        )
+        .context(format!("Failed to update WM_NAME for '{}'", character_name))?;
+
+        Ok(())
+    }
+
+    /// Setup window properties (title, opacity, WM_CLASS, always-on-top, PID)
     fn setup_window_properties(
         ctx: &AppContext,
         window: Window,
@@ -147,6 +179,8 @@ impl<'a> ThumbnailRenderer<'a> {
                 b"eve-preview-thumbnail\0eve-preview-thumbnail\0",
             )
             .context(format!("Failed to set WM_CLASS for '{}'", character_name))?;
+
+        Self::set_window_title(ctx.conn, ctx.atoms, window, character_name)?;
 
         // Set always-on-top
         ctx.conn
@@ -600,18 +634,7 @@ impl<'a> ThumbnailRenderer<'a> {
                 character_name
             ))?;
 
-        self.conn
-            .change_property8(
-                PropMode::REPLACE,
-                self.window,
-                self.atoms.net_wm_name,
-                AtomEnum::STRING,
-                format!("EVE Thumbnail - {}", character_name).as_bytes(),
-            )
-            .context(format!(
-                "Failed to update _NET_WM_NAME for '{}'",
-                character_name
-            ))?;
+        Self::set_window_title(self.conn, self.atoms, self.window, character_name)?;
 
         self.overlay.update_name(
             display_config,
@@ -667,57 +690,6 @@ impl<'a> ThumbnailRenderer<'a> {
         self.fill_static(character_name, dimensions, color)?;
         self.overlay(character_name, dimensions)
             .context(format!("Failed to apply overlay for '{}'", character_name))?;
-        Ok(())
-    }
-
-    /// Sends a request to the Window Manager to focus the source window.
-    ///
-    /// # Arguments
-    /// * `timestamp` - X11 timestamp from the input event that triggered this action.
-    pub fn focus(&self, character_name: &str, timestamp: u32) -> Result<()> {
-        // Explicitly raise the window to the front.
-        // Some clients (like RuneLite/Java) or Window Managers (especially under Xwayland)
-        // require an explicit StackMode::ABOVE request to actually bring the window
-        // to the foreground, even when _NET_ACTIVE_WINDOW is sent.
-        self.conn
-            .configure_window(
-                self.src,
-                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-            )
-            .context(format!(
-                "Failed to raise window for '{}' to top of stack",
-                character_name
-            ))?;
-
-        let ev = ClientMessageEvent {
-            response_type: CLIENT_MESSAGE_EVENT,
-            format: 32,
-            sequence: 0,
-            window: self.src,
-            type_: self.atoms.net_active_window,
-            data: ClientMessageData::from([x11::ACTIVE_WINDOW_SOURCE_PAGER, timestamp, 0, 0, 0]),
-        };
-
-        self.conn
-            .send_event(
-                false,
-                self.root,
-                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
-                ev,
-            )
-            .context(format!(
-                "Failed to send focus event for '{}'",
-                character_name
-            ))?;
-        self.conn
-            .flush()
-            .context("Failed to flush X11 connection after focus event")?;
-        info!(
-            window = self.window,
-            character = %character_name,
-            timestamp = timestamp,
-            "Activating window via click"
-        );
         Ok(())
     }
 

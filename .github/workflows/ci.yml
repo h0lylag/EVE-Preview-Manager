@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   check:
     name: ${{ matrix.job }}
@@ -30,18 +33,10 @@ jobs:
             libxdamage-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
             libegl1-mesa-dev libgl1-mesa-dev
 
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.job == 'fmt'
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: rustfmt
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.job == 'clippy'
-        with:
-          components: clippy
-
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.job == 'test'
+          cache: false
+          rustflags: ""
 
       - uses: Swatinem/rust-cache@v2
         if: matrix.job != 'fmt'
@@ -52,8 +47,8 @@ jobs:
 
       - name: cargo clippy (deny warnings)
         if: matrix.job == 'clippy'
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: cargo test
         if: matrix.job == 'test'
-        run: cargo test --all-features
+        run: cargo test --locked --all-features

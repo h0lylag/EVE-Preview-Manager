@@ -2,7 +2,7 @@
 
 [Website](https://epm.sh) | [Discord](https://discord.gg/MxdW5NCjwV) | [Flathub](https://flathub.org/apps/com.evepreview.manager) | [AUR](https://aur.archlinux.org/packages/eve-preview-manager) | [FlakeHub](https://flakehub.com/flake/h0lylag/EVE-Preview-Manager)
 
-EVE Preview Manager - Yet another EVE-O-Preview clone for Linux, written in Rust. A reimplementation of my older [EVE-L_Preview](https://github.com/h0lylag/EVE-L_Preview). Inspired by [EVE-O-Preview](https://github.com/Proopai/eve-o-preview), [EVE-X-Preview](https://github.com/g0nzo83/EVE-X-Preview), [Nicotine](https://github.com/isomerc/nicotine), and [eve-l-preview](https://github.com/ilveth/eve-l-preview).
+EVE Preview Manager is a Linux-native tool for managing multiple EVE Online clients, with live window previews, configurable hotkeys, and quick-swap profiles built for multiboxing.
 
 <br>
 
@@ -13,17 +13,20 @@ EVE Preview Manager - Yet another EVE-O-Preview clone for Linux, written in Rust
 - Customizable thumbnail appearance including size, opacity, fonts, colors, and borders
 - Profile-based configuration system for managing multiple setups
 - One-click character import for cycle groups
-- Optional features: cycle through logged-off clients, auto-minimize inactive windows, position inheritance for new characters, disable thumbnails altogether
+- Optional cycling through logged-off clients
+- Auto-minimize inactive windows and inherit positions for new characters
+- Option to disable thumbnails altogether
 
 <br>
 
 ## Screenshots
+
 <p align="center">
-  <a href="https://i.imgur.com/ztw7B1Q.png">
-    <img src="https://i.imgur.com/ztw7B1Q.png" alt="EVE Preview Manager in action" width="400">
+  <a href="https://epm.sh/assets/images/gh-main.png">
+    <img src="https://epm.sh/assets/images/gh-main.png" alt="EVE Preview Manager in action" width="400">
   </a>
-  <a href="https://i.imgur.com/tfztoAt.png">
-    <img src="https://i.imgur.com/tfztoAt.png" alt="EVE Preview Manager Settings" width="400">
+  <a href="https://epm.sh/assets/images/gh-previews.png">
+    <img src="https://epm.sh/assets/images/gh-previews.png" alt="EVE Preview Manager Settings" width="400">
   </a>
 </p>
 
@@ -47,6 +50,7 @@ EVE Preview Manager - Yet another EVE-O-Preview clone for Linux, written in Rust
 <br>
 
 ## System Requirements
+
 - **Required:** OpenGL, fontconfig, dbus, libxkbcommon, libxcb (standard on most distros).
 - **Recommended:** Wayland (via XWayland). Native X11 environments are supported but users may experience issues with preview overlays fighting for Z-order and incorrect image offsets.
 - **Optional:** If using evdev instead of x11 hotkeys, you will need to add your user to the `input` group. Not recommended unless you know what you're doing.
@@ -55,7 +59,7 @@ EVE Preview Manager - Yet another EVE-O-Preview clone for Linux, written in Rust
 
 ## Installation
 
-### Flatpak (Recommended)
+### Flatpak
 
 Install from [Flathub](https://flathub.org/apps/com.evepreview.manager):
 
@@ -65,10 +69,10 @@ flatpak install flathub com.evepreview.manager
 
 ### Arch Linux (AUR)
 
-Install from the [AUR](https://aur.archlinux.org/packages/eve-preview-manager) using your preferred AUR helper (e.g., `yay`, `paru`, `pikaur`, etc):
+Install from the [AUR](https://aur.archlinux.org/packages/eve-preview-manager) using your preferred AUR helper (e.g., `paru`, `yay`, `pamac`, `pikaur`, etc):
 
 ```bash
-yay -S eve-preview-manager
+paru -S eve-preview-manager
 ```
 
 ### NixOS
@@ -125,4 +129,3 @@ Contributions are welcome! If you find a bug or have a feature request, please o
 ## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
-

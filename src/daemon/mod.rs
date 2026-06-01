@@ -1,5 +1,6 @@
 //! Daemon main loop and runtime initialization
 
+mod border_update;
 mod cycle_state;
 mod dispatcher;
 pub mod font;

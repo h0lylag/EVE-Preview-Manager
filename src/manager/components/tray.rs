@@ -16,6 +16,18 @@ pub struct AppTray {
 }
 
 #[cfg(target_os = "linux")]
+impl AppTray {
+    fn show_window(&self) {
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.ctx.request_repaint();
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl ksni::Tray for AppTray {
     fn id(&self) -> String {
         if self.is_flatpak {
@@ -43,6 +55,10 @@ impl ksni::Tray for AppTray {
             .unwrap_or_default()
     }
 
+    fn activate(&mut self, _x: i32, _y: i32) {
+        self.show_window();
+    }
+
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
 
@@ -63,6 +79,17 @@ impl ksni::Tray for AppTray {
         };
 
         vec![
+            // Show Window item
+            StandardItem {
+                label: "Show Window".into(),
+                activate: Box::new(|this: &mut AppTray| {
+                    this.show_window();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            // Separator
+            MenuItem::Separator,
             // Refresh item
             StandardItem {
                 label: "Refresh".into(),

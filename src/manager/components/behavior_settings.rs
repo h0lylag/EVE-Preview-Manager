@@ -93,6 +93,28 @@ pub fn ui(
             ui.label(egui::RichText::new("Behavior Settings").strong());
             ui.add_space(ITEM_SPACING);
 
+            // Minimize to tray
+            if ui.checkbox(&mut global.minimize_to_tray,
+                "Minimize to system tray").changed() {
+                action = BehaviorSettingsAction::SettingsChanged;
+            }
+
+            if global.minimize_to_tray {
+                ui.indent("start_minimized_to_tray_indent", |ui| {
+                    if ui.checkbox(&mut global.start_minimized_to_tray,
+                        "Start minimized to system tray").changed() {
+                        action = BehaviorSettingsAction::SettingsChanged;
+                    }
+                });
+            }
+
+            ui.label(egui::RichText::new(
+                "When enabled, minimizing the window hides it to the system tray")
+                .small()
+                .weak());
+
+            ui.add_space(ITEM_SPACING);
+
             // Minimize clients on switch
             if ui.checkbox(&mut profile.client_minimize_on_switch,
                 "Minimize EVE clients when switching focus").changed() {

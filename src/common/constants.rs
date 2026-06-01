@@ -159,7 +159,7 @@ pub mod defaults {
         pub const WINDOW_WIDTH: u16 = 700;
 
         /// Default Manager window height in pixels
-        pub const WINDOW_HEIGHT: u16 = 450;
+        pub const WINDOW_HEIGHT: u16 = 470;
     }
 
     /// Thumbnail window settings

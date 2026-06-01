@@ -11,55 +11,69 @@ jobs:
     name: Check & Lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y pkg-config libfontconfig1-dev libdbus-1-dev \
-          libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcomposite-dev \
-          libxdamage-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
-          libegl1-mesa-dev libgl1-mesa-dev
+      - uses: actions/checkout@v4
 
-    - name: Setup Rust Cache
-      uses: Swatinem/rust-cache@v2
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libdbus-1-dev \
+            libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcomposite-dev \
+            libxdamage-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev
 
-    - name: Check Formatting
-      run: cargo fmt --check
-      
-    - name: Clippy Lint
-      run: cargo clippy -- -D warnings
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   build:
     name: Build & Test
     runs-on: ubuntu-latest
     needs: check
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y pkg-config libfontconfig1-dev libdbus-1-dev \
-          libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcomposite-dev \
-          libxdamage-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
-          libegl1-mesa-dev libgl1-mesa-dev
+      - uses: actions/checkout@v4
 
-    - name: Setup Rust Cache
-      uses: Swatinem/rust-cache@v2
-      
-    - name: Build (Release)
-      run: cargo build --release --verbose
-      
-    - name: Run Tests
-      run: cargo test --verbose
-      
-    - name: Get Version
-      id: version
-      run: echo "version=$(grep -m1 'version =' Cargo.toml | cut -d '"' -f2)" >> $GITHUB_OUTPUT
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libdbus-1-dev \
+            libx11-dev libxext-dev libxrender-dev libxrandr-dev libxcomposite-dev \
+            libxdamage-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev
 
-    - name: Upload Binary
-      uses: actions/upload-artifact@v4
-      with:
-        name: eve-preview-manager-v${{ steps.version.outputs.version }}
-        path: target/release/eve-preview-manager
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (Release)
+        run: cargo build --locked --release --verbose
+
+      - name: Run Tests
+        run: cargo test --locked --all-features --verbose
+
+      - name: Get Version
+        id: version
+        run: |
+          version="$(grep -m1 'version =' Cargo.toml | cut -d '"' -f2)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: eve-preview-manager-v${{ steps.version.outputs.version }}
+          path: target/release/eve-preview-manager

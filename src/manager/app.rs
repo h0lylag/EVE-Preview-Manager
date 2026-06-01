@@ -1,5 +1,7 @@
 //! Application manager - primary interface for configuration and daemon control
 
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,8 +37,13 @@ struct ManagerApp {
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
     #[cfg(target_os = "linux")]
     update_signal: std::sync::Arc<tokio::sync::Notify>,
+    #[cfg(target_os = "linux")]
+    tray_ready: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    start_minimized_to_tray_pending: bool,
 
     active_tab: ManagerTab,
+    minimize_to_tray_handled: bool,
 }
 
 impl ManagerApp {
@@ -89,6 +96,10 @@ impl ManagerApp {
         #[cfg(target_os = "linux")]
         let update_clone = update_signal.clone();
         #[cfg(target_os = "linux")]
+        let tray_ready = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "linux")]
+        let tray_ready_clone = tray_ready.clone();
+        #[cfg(target_os = "linux")]
         let ctx = cc.egui_ctx.clone();
 
         #[cfg(target_os = "linux")]
@@ -115,6 +126,7 @@ impl ManagerApp {
 
                 match result {
                     Ok(handle) => {
+                        tray_ready_clone.store(true, Ordering::Release);
                         debug!("Tray icon created via ksni/D-Bus");
                         // Event loop for tray management
                         // We use select! to handle both shutdown and update requests
@@ -160,6 +172,9 @@ impl ManagerApp {
             state,
             shutdown_signal,
             update_signal,
+            tray_ready,
+            start_minimized_to_tray_pending: config.global.minimize_to_tray
+                && config.global.start_minimized_to_tray,
             profile_selector: ProfileSelector::new(),
             behavior_settings_state,
             hotkey_settings_state,
@@ -167,6 +182,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
+            minimize_to_tray_handled: false,
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -179,6 +195,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
+            minimize_to_tray_handled: false,
         };
 
         app
@@ -210,6 +227,30 @@ impl eframe::App for ManagerApp {
         // Track window geometry changes and update config
         // Clone viewport info to avoid lifetime issues
         let viewport_info = ctx.input(|i| i.viewport().clone());
+
+        let is_minimized = viewport_info.minimized.unwrap_or(false);
+
+        if state.config.global.minimize_to_tray && is_minimized {
+            if !self.minimize_to_tray_handled {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.minimize_to_tray_handled = true;
+            }
+        } else if !is_minimized {
+            self.minimize_to_tray_handled = false;
+        }
+
+        #[cfg(target_os = "linux")]
+        if self.start_minimized_to_tray_pending {
+            if !state.config.global.minimize_to_tray || !state.config.global.start_minimized_to_tray
+            {
+                self.start_minimized_to_tray_pending = false;
+            } else if self.tray_ready.load(Ordering::Acquire) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.start_minimized_to_tray_pending = false;
+            }
+        }
 
         // Try to get window size from viewport inner_rect first, fall back to content_rect
         let (new_width, new_height) = if let Some(inner_rect) = viewport_info.inner_rect {
