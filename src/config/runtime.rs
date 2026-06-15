@@ -23,6 +23,7 @@ pub struct DisplayConfig {
     pub text_color: u32,
     pub hide_when_no_focus: bool,
     pub inactive_border_enabled: bool,
+    pub show_logged_out_character_name: bool,
 
     /// Map of character name -> settings (overrides, aliases, etc)
     pub character_settings:
@@ -158,6 +159,7 @@ impl DaemonConfig {
             ),
             text_color,
             hide_when_no_focus: self.profile.thumbnail_hide_not_focused,
+            show_logged_out_character_name: self.profile.thumbnail_show_logged_out_character_name,
             inactive_border_enabled: self.profile.thumbnail_inactive_border,
             inactive_border_color,
             inactive_border_size: if self.profile.thumbnail_inactive_border {
@@ -296,6 +298,7 @@ mod tests {
                 thumbnail_snap_threshold: snap_threshold,
                 thumbnail_hide_not_focused: hide_when_no_focus,
                 thumbnail_preserve_position_on_swap: false,
+                thumbnail_show_logged_out_character_name: false,
                 client_minimize_on_switch: false,
                 hotkey_input_device: None,
                 hotkey_logged_out_cycle: false,

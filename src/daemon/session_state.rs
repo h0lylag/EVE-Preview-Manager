@@ -279,4 +279,18 @@ mod tests {
             Some(&Position::new(100, 200))
         );
     }
+
+    #[test]
+    fn test_update_last_character_refreshes_non_empty_swaps() {
+        let mut state = SessionState::new();
+
+        state.update_last_character(123, "A");
+        state.update_last_character(123, "B");
+        state.update_last_character(123, "");
+
+        assert_eq!(
+            state.window_last_character.get(&123).map(String::as_str),
+            Some("B")
+        );
+    }
 }

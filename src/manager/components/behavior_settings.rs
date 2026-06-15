@@ -193,6 +193,21 @@ pub fn ui(
 
             ui.add_space(ITEM_SPACING);
 
+            // Logged-out thumbnail labels
+            if ui.checkbox(
+                &mut profile.thumbnail_show_logged_out_character_name,
+                "Show last character name after logout"
+            ).changed() {
+                action = BehaviorSettingsAction::SettingsChanged;
+            }
+
+            ui.label(egui::RichText::new(
+                "Logged-out previews can keep showing the last character detected during this session")
+                .small()
+                .weak());
+
+            ui.add_space(ITEM_SPACING);
+
             // Snap threshold
             ui.horizontal(|ui| {
                 ui.label("Thumbnail Snap Distance:");

@@ -389,7 +389,7 @@ async fn run_event_loop(
 
             // allow hotkeys for all EVE client source windows known to the cycle state
             // (including those without thumbnails/previews)
-            for src_window in resources.cycle.get_active_windows().values() {
+            for src_window in resources.cycle.get_active_windows().keys() {
                 current_windows.insert(*src_window);
             }
 
@@ -457,7 +457,7 @@ async fn run_event_loop(
                         Ok(Some(active_window)) => {
                             // Check if active window is a known EVE window (thumbnail OR just identified)
                             let is_known = resources.eve_clients.contains_key(&active_window) ||
-                                         resources.cycle.get_active_windows().values().any(|&w| w == active_window);
+                                         resources.cycle.get_active_windows().contains_key(&active_window);
 
                             if is_known {
                                 true
@@ -473,7 +473,7 @@ async fn run_event_loop(
                                         Ok(cookie) => {
                                             if let Ok(reply) = cookie.reply() {
                                                 if resources.eve_clients.contains_key(&reply.parent) ||
-                                                   resources.cycle.get_active_windows().values().any(|&w| w == reply.parent) {
+                                                   resources.cycle.get_active_windows().contains_key(&reply.parent) {
                                                     found_ancestor = true;
                                                     debug!(
                                                         child = active_window,
@@ -559,7 +559,9 @@ async fn run_event_loop(
                             // Set current window immediately after successful activation.
                             // This ensures the border shows correctly during the 25ms delay before
                             // FocusIn arrives. The FocusIn handler will confirm this later.
-                            resources.cycle.set_current_by_window(window);
+                            resources
+                                .cycle
+                                .set_current_by_window_with_character(window, Some(&character_name));
 
                             let display_config = resources.config.build_display_config();
                             sync_focused_borders(
@@ -600,7 +602,7 @@ async fn run_event_loop(
                                     .filter(|(_, t)| {
                                         !display_config
                                             .character_settings
-                                            .get(&t.character_name)
+                                            .get(t.effective_character_name())
                                             .map(|s| s.exempt_from_minimize)
                                             .unwrap_or(false)
                                     })
@@ -615,7 +617,7 @@ async fn run_event_loop(
                                         if let Err(e) = thumb.border(
                                             &display_config,
                                             false,
-                                            resources.cycle.is_skipped(&thumb.character_name),
+                                            resources.cycle.is_skipped(thumb.effective_character_name()),
                                             &font_renderer,
                                         ) {
                                             warn!(window = other_window, error = %e, "Failed to clear border before minimize");
@@ -748,6 +750,7 @@ async fn run_event_loop(
                         // Force redraw of all thumbnails with new settings
                         display_config = resources.config.build_display_config();
                         for thumbnail in resources.eve_clients.values_mut() {
+                             let _ = thumbnail.refresh_name_overlay(&display_config, &font_renderer);
                              let _ = thumbnail.update(&display_config, &font_renderer);
                         }
 
@@ -767,7 +770,7 @@ async fn run_event_loop(
 
                         // Find the specific thumbnail by character name AND type (EVE vs custom source)
                         let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
-                            if t.character_name != name {
+                            if t.effective_character_name() != name {
                                 return false;
                             }
 
@@ -929,7 +932,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         if let Err(e) = thumbnail.border(
             &config,
             is_focused,
-            cycle_state.is_skipped(&thumbnail.character_name),
+            cycle_state.is_skipped(thumbnail.effective_character_name()),
             &font_renderer,
         ) {
             // Log warning but continue
@@ -1048,7 +1051,11 @@ fn handle_cycle_command(
 
             if let Some(window) = active_window {
                 if let Some(thumbnail) = resources.eve_clients.get_mut(&window) {
-                    let char_name = thumbnail.character_name.clone();
+                    let char_name = thumbnail.effective_character_name().to_string();
+                    if char_name.is_empty() {
+                        warn!("Cannot toggle skip: Focused EVE window has no character identity");
+                        return None;
+                    }
                     let is_skipped = resources.cycle.toggle_skip(&char_name);
                     info!(character = %char_name, skipped = is_skipped, "Toggled skip status");
 
@@ -1081,7 +1088,7 @@ fn handle_cycle_command(
                 // When revealing, respect per-character overrides: force-hidden thumbnails stay hidden
                 let should_render = display_config
                     .character_settings
-                    .get(&thumbnail.character_name)
+                    .get(thumbnail.effective_character_name())
                     .and_then(|s| s.override_render_preview)
                     .unwrap_or(display_config.enabled);
 

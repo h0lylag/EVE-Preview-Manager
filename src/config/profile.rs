@@ -187,7 +187,6 @@ pub struct GlobalSettings {
 }
 
 /// Profile - A complete set of visual and behavioral settings
-/// Profile - A complete set of visual and behavioral settings
 #[derive(Debug, Clone, Serialize)]
 pub struct Profile {
     pub profile_name: String,
@@ -224,10 +223,11 @@ pub struct Profile {
     /// When a new character logs in without saved coordinates, inherit the previous character's thumbnail position
     /// This keeps thumbnails in place when swapping characters on the same EVE client
     pub thumbnail_preserve_position_on_swap: bool,
+    /// When an EVE client logs out, keep showing the last known character name in its thumbnail label
+    pub thumbnail_show_logged_out_character_name: bool,
 
     // Client behavior settings
     pub client_minimize_on_switch: bool,
-    /// When minimized, show "MINIMIZED" text overlay
     /// When minimized, show "MINIMIZED" text overlay
     pub client_minimize_show_overlay: bool,
 
@@ -241,7 +241,6 @@ pub struct Profile {
 
     // REMOVED LEGACY FIELDS in favor of cycle_groups
     // hotkey_cycle_forward, hotkey_cycle_backward, hotkey_cycle_group are now inside CycleGroup
-    /// Multiple cycle groups, each with its own character list and hotkeys
     /// Multiple cycle groups, each with its own character list and hotkeys
     pub cycle_groups: Vec<CycleGroup>,
 
@@ -278,7 +277,6 @@ pub struct Profile {
     pub custom_windows: Vec<CustomWindowRule>,
 }
 
-// Default value functions
 // Default value functions
 pub(crate) fn default_border_size() -> u16 {
     crate::common::constants::defaults::border::SIZE
@@ -318,6 +316,10 @@ pub(crate) fn default_snap_threshold() -> u16 {
 
 pub(crate) fn default_preserve_thumbnail_position_on_swap() -> bool {
     crate::common::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
+}
+
+pub(crate) fn default_show_logged_out_character_name() -> bool {
+    false
 }
 
 pub(crate) fn default_thumbnail_width() -> u16 {
@@ -389,6 +391,7 @@ fn default_profiles() -> Vec<Profile> {
         thumbnail_hide_not_focused:
             crate::common::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS,
         thumbnail_preserve_position_on_swap: default_preserve_thumbnail_position_on_swap(),
+        thumbnail_show_logged_out_character_name: default_show_logged_out_character_name(),
         client_minimize_on_switch:
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH,
         client_minimize_show_overlay: false, // Default: off (clean minimized look)
@@ -696,6 +699,7 @@ mod tests {
             profile.thumbnail_preserve_position_on_swap,
             crate::common::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
         );
+        assert!(!profile.thumbnail_show_logged_out_character_name);
         assert_eq!(
             profile.thumbnail_default_width,
             crate::common::constants::defaults::thumbnail::WIDTH

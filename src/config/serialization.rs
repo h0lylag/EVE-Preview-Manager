@@ -6,9 +6,9 @@ use crate::config::profile::{
     CustomWindowRule, CycleGroup, HotkeyBackendType, Profile,
     default_auto_save_thumbnail_positions, default_border_enabled, default_border_size,
     default_hotkey_backend, default_inactive_border_color, default_inactive_border_enabled,
-    default_preserve_thumbnail_position_on_swap, default_profile_name, default_snap_threshold,
-    default_text_font_family, default_thumbnail_enabled, default_thumbnail_height,
-    default_thumbnail_width,
+    default_preserve_thumbnail_position_on_swap, default_profile_name,
+    default_show_logged_out_character_name, default_snap_threshold, default_text_font_family,
+    default_thumbnail_enabled, default_thumbnail_height, default_thumbnail_width,
 };
 
 /// Helper struct for migration during deserialization
@@ -54,6 +54,8 @@ struct ProfileHelper {
     thumbnail_hide_not_focused: bool,
     #[serde(default = "default_preserve_thumbnail_position_on_swap")]
     thumbnail_preserve_position_on_swap: bool,
+    #[serde(default = "default_show_logged_out_character_name")]
+    thumbnail_show_logged_out_character_name: bool,
     #[serde(default)]
     client_minimize_on_switch: bool,
     #[serde(default)]
@@ -188,6 +190,8 @@ impl From<ProfileHelper> for Profile {
             thumbnail_snap_threshold: helper.thumbnail_snap_threshold,
             thumbnail_hide_not_focused: helper.thumbnail_hide_not_focused,
             thumbnail_preserve_position_on_swap: helper.thumbnail_preserve_position_on_swap,
+            thumbnail_show_logged_out_character_name: helper
+                .thumbnail_show_logged_out_character_name,
             client_minimize_on_switch: helper.client_minimize_on_switch,
             client_minimize_show_overlay: helper.client_minimize_show_overlay,
             hotkey_backend: helper.hotkey_backend,
@@ -259,6 +263,8 @@ impl<'de> Deserialize<'de> for Profile {
                 pub thumbnail_hide_not_focused: bool,
                 #[serde(default = "default_preserve_thumbnail_position_on_swap")]
                 pub thumbnail_preserve_position_on_swap: bool,
+                #[serde(default = "default_show_logged_out_character_name")]
+                pub thumbnail_show_logged_out_character_name: bool,
                 #[serde(default)]
                 pub client_minimize_on_switch: bool,
                 #[serde(default)]
@@ -350,6 +356,8 @@ impl<'de> Deserialize<'de> for Profile {
                 thumbnail_snap_threshold: p.thumbnail_snap_threshold,
                 thumbnail_hide_not_focused: p.thumbnail_hide_not_focused,
                 thumbnail_preserve_position_on_swap: p.thumbnail_preserve_position_on_swap,
+                thumbnail_show_logged_out_character_name: p
+                    .thumbnail_show_logged_out_character_name,
                 client_minimize_on_switch: p.client_minimize_on_switch,
                 client_minimize_show_overlay: p.client_minimize_show_overlay,
                 hotkey_backend: p.hotkey_backend,

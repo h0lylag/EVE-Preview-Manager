@@ -20,7 +20,7 @@ use crate::common::types::Dimensions;
 use crate::x11::{AppContext, to_fixed};
 
 use super::font::FontRenderer;
-use super::overlay::OverlayRenderer;
+use super::overlay::{OverlayIdentity, OverlayRenderer};
 use crate::config::DisplayConfig;
 
 #[derive(Debug)]
@@ -105,9 +105,9 @@ impl<'a> ThumbnailRenderer<'a> {
         conn: &RustConnection,
         atoms: &crate::x11::CachedAtoms,
         window: Window,
-        character_name: &str,
+        display_character_name: &str,
     ) -> Result<()> {
-        let title = format!("EPM Thumbnail - {}", character_name);
+        let title = format!("EPM Thumbnail - {}", display_character_name);
 
         conn.change_property8(
             PropMode::REPLACE,
@@ -118,7 +118,7 @@ impl<'a> ThumbnailRenderer<'a> {
         )
         .context(format!(
             "Failed to update _NET_WM_NAME for '{}'",
-            character_name
+            display_character_name
         ))?;
 
         conn.change_property8(
@@ -128,7 +128,10 @@ impl<'a> ThumbnailRenderer<'a> {
             AtomEnum::STRING,
             title.as_bytes(),
         )
-        .context(format!("Failed to update WM_NAME for '{}'", character_name))?;
+        .context(format!(
+            "Failed to update WM_NAME for '{}'",
+            display_character_name
+        ))?;
 
         Ok(())
     }
@@ -139,6 +142,7 @@ impl<'a> ThumbnailRenderer<'a> {
         window: Window,
         opacity: u32,
         character_name: &str,
+        display_character_name: &str,
     ) -> Result<()> {
         // Set PID so we can identify our own thumbnail windows
         let pid = std::process::id();
@@ -180,7 +184,7 @@ impl<'a> ThumbnailRenderer<'a> {
             )
             .context(format!("Failed to set WM_CLASS for '{}'", character_name))?;
 
-        Self::set_window_title(ctx.conn, ctx.atoms, window, character_name)?;
+        Self::set_window_title(ctx.conn, ctx.atoms, window, display_character_name)?;
 
         // Set always-on-top
         ctx.conn
@@ -302,7 +306,7 @@ impl<'a> ThumbnailRenderer<'a> {
     ///
     /// # Arguments
     /// * `ctx` - The application context containing X11 connection and config.
-    /// * `character_name` - Name of the character (for logging and window titles).
+    /// * `character_name` - Effective character name for logging and styling.
     /// * `src` - The source window ID to render as a thumbnail.
     /// * `src_depth` - The depth of the source window (to select correct Render format).
     /// * `font_renderer` - Renderer for text overlays.
@@ -315,6 +319,7 @@ impl<'a> ThumbnailRenderer<'a> {
     pub fn new(
         ctx: &AppContext<'a>,
         character_name: &str,
+        display_character_name: &str,
         src: Window,
         src_depth: u8,
         display_config: &crate::config::DisplayConfig,
@@ -359,7 +364,13 @@ impl<'a> ThumbnailRenderer<'a> {
             should_cleanup: true,
         };
 
-        Self::setup_window_properties(ctx, window, display_config.opacity, character_name)?;
+        Self::setup_window_properties(
+            ctx,
+            window,
+            display_config.opacity,
+            character_name,
+            display_character_name,
+        )?;
 
         // Create rendering resources
         let (src_picture, dst_picture) =
@@ -373,7 +384,10 @@ impl<'a> ThumbnailRenderer<'a> {
             font_renderer,
             ctx.screen.root,
             dimensions,
-            character_name,
+            OverlayIdentity {
+                style: character_name,
+                display: display_character_name,
+            },
         )?;
 
         // Setup damage tracking
@@ -560,7 +574,7 @@ impl<'a> ThumbnailRenderer<'a> {
     pub fn border(
         &self,
         display_config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         focused: bool,
         skipped: bool,
@@ -568,15 +582,15 @@ impl<'a> ThumbnailRenderer<'a> {
     ) -> Result<()> {
         self.overlay.draw_border(
             display_config,
-            character_name,
+            identity,
             dimensions,
             focused,
             skipped,
             font_renderer,
         )?;
 
-        self.overlay(character_name, dimensions)
-            .context(format!("Failed to apply overlay for '{}'", character_name))
+        self.overlay(identity.style, dimensions)
+            .context(format!("Failed to apply overlay for '{}'", identity.style))
     }
 
     /// Renders the "MINIMIZED" state overlay.
@@ -585,12 +599,12 @@ impl<'a> ThumbnailRenderer<'a> {
     pub fn minimized(
         &self,
         display_config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.overlay
-            .draw_minimized(display_config, character_name, dimensions, font_renderer)?;
+            .draw_minimized(display_config, identity, dimensions, font_renderer)?;
 
         // Explicitly clear background to black using fill_static.
         // We cannot use self.update() here because it calls capture(), which correctly skips
@@ -602,11 +616,11 @@ impl<'a> ThumbnailRenderer<'a> {
             blue: 0,
             alpha: 0xffff,
         };
-        self.fill_static(character_name, dimensions, black)?;
+        self.fill_static(identity.style, dimensions, black)?;
 
-        self.overlay(character_name, dimensions).context(format!(
+        self.overlay(identity.style, dimensions).context(format!(
             "Failed to update minimized display for '{}'",
-            character_name
+            identity.style
         ))?;
         Ok(())
     }
@@ -615,7 +629,7 @@ impl<'a> ThumbnailRenderer<'a> {
     pub fn update_name(
         &self,
         display_config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
@@ -624,21 +638,21 @@ impl<'a> ThumbnailRenderer<'a> {
         // However, if we are focused, the next border() call will correct it.
         let border_size = self
             .overlay
-            .calculate_border_size(display_config, character_name, false);
+            .calculate_border_size(display_config, identity.style, false);
 
         // Must clear content area explicitly now
         self.overlay
             .clear_content_area(dimensions, border_size)
             .context(format!(
                 "Failed to clear content area for '{}'",
-                character_name
+                identity.style
             ))?;
 
-        Self::set_window_title(self.conn, self.atoms, self.window, character_name)?;
+        Self::set_window_title(self.conn, self.atoms, self.window, identity.display)?;
 
         self.overlay.update_name(
             display_config,
-            character_name,
+            identity,
             dimensions,
             border_size,
             font_renderer,

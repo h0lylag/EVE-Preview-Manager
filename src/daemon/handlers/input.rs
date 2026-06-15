@@ -204,9 +204,10 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
                 ))?;
 
             ctx.session_state
-                .update_window_position(thumbnail.window(), geom.x, geom.y);
+                .update_window_position(clicked_key, geom.x, geom.y);
 
-            if !thumbnail.character_name.is_empty() {
+            let effective_character_name = thumbnail.effective_character_name().to_string();
+            if !effective_character_name.is_empty() {
                 let settings = crate::common::types::CharacterSettings::new(
                     geom.x,
                     geom.y,
@@ -220,20 +221,20 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
                     .profile
                     .custom_windows
                     .iter()
-                    .any(|rule| rule.alias == thumbnail.character_name);
+                    .any(|rule| rule.alias == effective_character_name);
 
                 if is_custom_source {
                     ctx.daemon_config
                         .custom_source_thumbnails
-                        .insert(thumbnail.character_name.clone(), settings);
+                        .insert(effective_character_name.clone(), settings);
                 } else {
                     ctx.daemon_config
                         .character_thumbnails
-                        .insert(thumbnail.character_name.clone(), settings);
+                        .insert(effective_character_name.clone(), settings);
                 }
 
                 let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                    name: thumbnail.character_name.clone(),
+                    name: effective_character_name,
                     x: geom.x,
                     y: geom.y,
                     width: thumbnail.dimensions.width,
@@ -290,7 +291,7 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
                 // only holds position/size.
                 !ctx.display_config
                     .character_settings
-                    .get(&t.character_name)
+                    .get(t.effective_character_name())
                     .map(|s| s.exempt_from_minimize)
                     .unwrap_or(false)
             })
@@ -305,7 +306,7 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
                 if let Err(e) = thumb.border(
                     ctx.display_config,
                     false,
-                    ctx.cycle_state.is_skipped(&thumb.character_name),
+                    ctx.cycle_state.is_skipped(thumb.effective_character_name()),
                     ctx.font_renderer,
                 ) {
                     warn!(window = window, error = %e, "Failed to clear border before minimize");

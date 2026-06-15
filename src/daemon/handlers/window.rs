@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use tracing::{debug, info};
 use x11rb::connection::Connection;
+use x11rb::errors::ReplyError;
+use x11rb::protocol::ErrorKind;
 use x11rb::protocol::damage::ConnectionExt as DamageExt;
 use x11rb::protocol::xproto::*;
 
@@ -17,17 +19,46 @@ pub fn handle_damage_notify(
     // some thumbnails might have per-character "Always Show" overrides.
     // Instead, we check the override status for the specific thumbnail below.
 
-    if let Some(thumbnail) = ctx
+    if let Some(source_window) = ctx
         .eve_clients
-        .values_mut()
-        .find(|thumbnail| thumbnail.damage() == event.damage)
+        .iter()
+        .find(|(_, thumbnail)| thumbnail.damage() == event.damage)
+        .map(|(source_window, _)| *source_window)
     {
-        thumbnail
-            .update(ctx.display_config, ctx.font_renderer)
-            .context(format!(
+        let update_result = ctx
+            .eve_clients
+            .get_mut(&source_window)
+            .expect("damage lookup returned an existing thumbnail")
+            .update(ctx.display_config, ctx.font_renderer);
+
+        if let Err(error) = update_result {
+            if is_stale_x11_window_error(&error) {
+                let character = ctx
+                    .eve_clients
+                    .get(&source_window)
+                    .map(|thumbnail| thumbnail.effective_character_name().to_string())
+                    .unwrap_or_default();
+
+                debug!(
+                    damage = event.damage,
+                    source_window = source_window,
+                    character = %character,
+                    error = %error,
+                    "Ignoring damage event for destroyed source window"
+                );
+
+                ctx.cycle_state.remove_window(source_window);
+                ctx.session_state.remove_window(source_window);
+                ctx.eve_clients.remove(&source_window);
+                return Ok(());
+            }
+
+            return Err(error).context(format!(
                 "Failed to update thumbnail for damage event (damage={})",
                 event.damage
-            ))?;
+            ));
+        }
+
         ctx.app_ctx
             .conn
             .damage_subtract(event.damage, 0u32, 0u32)
@@ -41,6 +72,15 @@ pub fn handle_damage_notify(
             .context("Failed to flush X11 connection after damage update")?;
     }
     Ok(())
+}
+
+fn is_stale_x11_window_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<ReplyError>(),
+            Some(ReplyError::X11Error(x11_error)) if x11_error.error_kind == ErrorKind::Window
+        )
+    })
 }
 
 /// Helper to process a window once it has been identified (used by Create, Map, and Property handlers)
@@ -89,7 +129,8 @@ pub fn process_detected_window(
 
             match geom_result {
                 Ok(geom) => {
-                    if !thumbnail.character_name.is_empty() {
+                    let effective_character_name = thumbnail.effective_character_name().to_string();
+                    if !effective_character_name.is_empty() {
                         let settings = crate::common::types::CharacterSettings::new(
                             geom.x,
                             geom.y,
@@ -104,7 +145,7 @@ pub fn process_detected_window(
                             if let Some(existing) = ctx
                                 .daemon_config
                                 .character_thumbnails
-                                .get_mut(&thumbnail.character_name)
+                                .get_mut(&effective_character_name)
                             {
                                 existing.x = settings.x;
                                 existing.y = settings.y;
@@ -112,16 +153,16 @@ pub fn process_detected_window(
                             } else {
                                 ctx.daemon_config
                                     .character_thumbnails
-                                    .insert(thumbnail.character_name.clone(), settings.clone());
+                                    .insert(effective_character_name.clone(), settings.clone());
                             }
                         } else {
                             ctx.daemon_config
                                 .custom_source_thumbnails
-                                .insert(thumbnail.character_name.clone(), settings.clone());
+                                .insert(effective_character_name.clone(), settings.clone());
                         }
 
                         let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                            name: thumbnail.character_name.clone(),
+                            name: effective_character_name.clone(),
                             x: settings.x,
                             y: settings.y,
                             width: settings.dimensions.width,
@@ -132,7 +173,7 @@ pub fn process_detected_window(
                         // Only send CharacterDetected if this is a new window (avoid spam from Create+Map)
                         if !ctx.eve_clients.contains_key(&window) {
                             let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected {
-                                name: thumbnail.character_name.clone(),
+                                name: effective_character_name,
                                 is_custom: !identity.is_eve,
                             });
                         }
@@ -223,7 +264,7 @@ pub fn process_detected_window(
                     && let Err(e) = thumb.border(
                         ctx.display_config,
                         false,
-                        ctx.cycle_state.is_skipped(&thumb.character_name),
+                        ctx.cycle_state.is_skipped(thumb.effective_character_name()),
                         ctx.font_renderer,
                     )
                 {
@@ -353,6 +394,15 @@ fn refresh_tracked_window(
     let mut position_changed = None;
 
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&window) {
+        if identity.is_eve {
+            thumbnail.sync_remembered_character_name(
+                ctx.session_state
+                    .window_last_character
+                    .get(&window)
+                    .cloned(),
+            );
+        }
+
         if thumbnail.character_name != identity.name {
             debug!(
                 window = window,
@@ -362,34 +412,35 @@ fn refresh_tracked_window(
             );
         }
 
-        if !thumbnail.character_name.is_empty() {
+        let effective_character_name = thumbnail.effective_character_name().to_string();
+        if !effective_character_name.is_empty() {
             let mut settings = if identity.is_eve {
                 ctx.daemon_config
                     .character_thumbnails
-                    .get(&thumbnail.character_name)
+                    .get(&effective_character_name)
                     .or_else(|| {
                         ctx.daemon_config
                             .profile
                             .character_thumbnails
-                            .get(&thumbnail.character_name)
+                            .get(&effective_character_name)
                     })
                     .cloned()
             } else {
                 ctx.daemon_config
                     .custom_source_thumbnails
-                    .get(&thumbnail.character_name)
+                    .get(&effective_character_name)
                     .or_else(|| {
                         ctx.daemon_config
                             .profile
                             .custom_source_thumbnails
-                            .get(&thumbnail.character_name)
+                            .get(&effective_character_name)
                     })
                     .cloned()
             }
             .or_else(|| {
                 ctx.display_config
                     .character_settings
-                    .get(&thumbnail.character_name)
+                    .get(&effective_character_name)
                     .cloned()
             })
             .unwrap_or_else(|| {
@@ -410,20 +461,20 @@ fn refresh_tracked_window(
             let changed = if identity.is_eve {
                 upsert_spatial_settings(
                     &mut ctx.daemon_config.character_thumbnails,
-                    &thumbnail.character_name,
+                    &effective_character_name,
                     settings.clone(),
                 )
             } else {
                 upsert_spatial_settings(
                     &mut ctx.daemon_config.custom_source_thumbnails,
-                    &thumbnail.character_name,
+                    &effective_character_name,
                     settings.clone(),
                 )
             };
 
             if changed {
                 position_changed = Some((
-                    thumbnail.character_name.clone(),
+                    effective_character_name,
                     settings.x,
                     settings.y,
                     settings.dimensions.width,
@@ -476,7 +527,7 @@ fn refresh_tracked_window(
         && let Err(e) = thumb.border(
             ctx.display_config,
             false,
-            ctx.cycle_state.is_skipped(&thumb.character_name),
+            ctx.cycle_state.is_skipped(thumb.effective_character_name()),
             ctx.font_renderer,
         )
     {
@@ -582,6 +633,25 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                 .expect("Checked contains_key");
             let old_name = thumbnail.character_name.clone();
             let new_character_name = eve_window.character_name();
+
+            if !new_character_name.is_empty() {
+                ctx.session_state
+                    .update_last_character(window, new_character_name);
+                thumbnail.sync_remembered_character_name(
+                    ctx.session_state
+                        .window_last_character
+                        .get(&window)
+                        .cloned(),
+                );
+            } else if !old_name.is_empty() {
+                ctx.session_state.update_last_character(window, &old_name);
+                thumbnail.sync_remembered_character_name(
+                    ctx.session_state
+                        .window_last_character
+                        .get(&window)
+                        .cloned(),
+                );
+            }
 
             // Optimization: If name hasn't changed, we can exit early.
             if old_name == new_character_name {
@@ -697,7 +767,8 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                         .border(
                             ctx.display_config,
                             thumbnail.state.is_focused(),
-                            ctx.cycle_state.is_skipped(&thumbnail.character_name),
+                            ctx.cycle_state
+                                .is_skipped(thumbnail.effective_character_name()),
                             ctx.font_renderer,
                         )
                         .context("Failed to restore border after character change")?;

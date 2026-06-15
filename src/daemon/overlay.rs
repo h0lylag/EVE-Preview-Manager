@@ -15,6 +15,12 @@ use crate::config::DisplayConfig;
 
 use super::font::FontRenderer;
 
+#[derive(Clone, Copy)]
+pub struct OverlayIdentity<'a> {
+    pub style: &'a str,
+    pub display: &'a str,
+}
+
 #[derive(Debug)]
 /// Handles text and border overlay rendering for thumbnails.
 ///
@@ -48,7 +54,7 @@ impl<'a> OverlayRenderer<'a> {
     /// * `font_renderer` - System for rendering text glyphs (used for initial render).
     /// * `root` - Root window ID (for pixmap creation).
     /// * `dimensions` - Initial size of the overlay.
-    /// * `character_name` - Debug name for error logging.
+    /// * `identity` - Effective styling key and label text for the thumbnail.
     pub fn new<'b>(
         conn: &'a RustConnection,
         config: &'b DisplayConfig,
@@ -56,10 +62,8 @@ impl<'a> OverlayRenderer<'a> {
         font_renderer: &FontRenderer,
         root: u32,
         dimensions: Dimensions,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
     ) -> Result<Self> {
-        // ... (implementation of new)
-        // Create overlay pixmap
         let overlay_pixmap = conn
             .generate_id()
             .context("Failed to generate ID for overlay pixmap")?;
@@ -72,7 +76,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create overlay pixmap for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create overlay picture
@@ -87,7 +91,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create overlay picture for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create overlay GC
@@ -101,7 +105,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create graphics context for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create skipped indicator GC (Red)
@@ -117,7 +121,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create skipped indicator GC for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create active border fill
@@ -127,7 +131,7 @@ impl<'a> OverlayRenderer<'a> {
         conn.render_create_solid_fill(active_border_fill, config.active_border_color)
             .context(format!(
                 "Failed to create active border fill for '{}'",
-                character_name
+                identity.style
             ))?;
 
         // Create inactive border fill
@@ -137,7 +141,7 @@ impl<'a> OverlayRenderer<'a> {
         conn.render_create_solid_fill(inactive_border_fill, config.inactive_border_color)
             .context(format!(
                 "Failed to create inactive border fill for '{}'",
-                character_name
+                identity.style
             ))?;
 
         let renderer = Self {
@@ -152,25 +156,25 @@ impl<'a> OverlayRenderer<'a> {
         };
 
         // Render initial name
-        let initial_border_size = renderer.calculate_border_size(config, character_name, false);
+        let initial_border_size = renderer.calculate_border_size(config, identity.style, false);
         renderer
             .clear_content_area(dimensions, initial_border_size)
             .context(format!(
                 "Failed to clear content area for initial render of '{}'",
-                character_name
+                identity.style
             ))?;
 
         renderer
             .update_name(
                 config,
-                character_name,
+                identity,
                 dimensions,
                 initial_border_size,
                 font_renderer,
             )
             .context(format!(
                 "Failed to render initial name for '{}'",
-                character_name
+                identity.style
             ))?;
 
         Ok(renderer)
@@ -200,8 +204,6 @@ impl<'a> OverlayRenderer<'a> {
 
         Ok(())
     }
-
-    // ... (calculate_border_size unused here, implementation below)
 
     /// Draws the skipped indicator (diagonal red lines)
     pub fn draw_skipped_indicator(&self, dimensions: Dimensions) -> Result<()> {
@@ -283,26 +285,26 @@ impl<'a> OverlayRenderer<'a> {
     pub fn update_name(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         _dimensions: Dimensions,
         _border_size: u16,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         // Resolve settings overrides
-        let (display_name, text_color) =
-            if let Some(settings) = config.character_settings.get(character_name) {
-                let name = settings.alias.as_deref().unwrap_or(character_name);
-                let color = if let Some(hex_color) = &settings.override_text_color {
-                    crate::common::color::HexColor::parse(hex_color)
-                        .map(|c| c.argb32())
-                        .unwrap_or(config.text_color)
-                } else {
-                    config.text_color
-                };
-                (name, color)
-            } else {
-                (character_name, config.text_color)
-            };
+        let (display_name, text_color) = if identity.display.is_empty() {
+            ("", config.text_color)
+        } else if let Some(settings) = config.character_settings.get(identity.style) {
+            let display_name = settings.alias.as_deref().unwrap_or(identity.display);
+            let text_color = settings
+                .override_text_color
+                .as_deref()
+                .and_then(crate::common::color::HexColor::parse)
+                .map(|c| c.argb32())
+                .unwrap_or(config.text_color);
+            (display_name, text_color)
+        } else {
+            (identity.display, config.text_color)
+        };
 
         // Render text based on font renderer type
         if font_renderer.requires_direct_rendering() {
@@ -325,7 +327,7 @@ impl<'a> OverlayRenderer<'a> {
                     )
                     .context(format!(
                         "Failed to create GC for X11 text rendering for '{}'",
-                        character_name
+                        identity.style
                     ))?;
 
                 // ImageText8 renders directly to drawable
@@ -339,7 +341,7 @@ impl<'a> OverlayRenderer<'a> {
                     )
                     .context(format!(
                         "Failed to render text via X11 for '{}'",
-                        character_name
+                        identity.style
                     ))?;
 
                 self.conn.free_gc(gc)?;
@@ -350,7 +352,7 @@ impl<'a> OverlayRenderer<'a> {
                 .render_text(display_name, text_color)
                 .context(format!(
                     "Failed to render text '{}' with font renderer",
-                    character_name
+                    identity.style
                 ))?;
 
             if rendered.width > 0 && rendered.height > 0 {
@@ -370,7 +372,7 @@ impl<'a> OverlayRenderer<'a> {
                     )
                     .context(format!(
                         "Failed to create text pixmap for '{}'",
-                        character_name
+                        identity.style
                     ))?;
 
                 self.conn
@@ -388,7 +390,7 @@ impl<'a> OverlayRenderer<'a> {
                     )
                     .context(format!(
                         "Failed to upload text image for '{}'",
-                        character_name
+                        identity.style
                     ))?;
 
                 // Create picture for the text pixmap
@@ -405,7 +407,7 @@ impl<'a> OverlayRenderer<'a> {
                     )
                     .context(format!(
                         "Failed to create text picture for '{}'",
-                        character_name
+                        identity.style
                     ))?;
 
                 // Composite text onto overlay
@@ -426,7 +428,7 @@ impl<'a> OverlayRenderer<'a> {
                     )
                     .context(format!(
                         "Failed to composite text onto overlay for '{}'",
-                        character_name
+                        identity.style
                     ))?;
 
                 // Cleanup
@@ -449,7 +451,7 @@ impl<'a> OverlayRenderer<'a> {
     pub fn draw_border(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         focused: bool,
         skipped: bool,
@@ -480,22 +482,16 @@ impl<'a> OverlayRenderer<'a> {
         }
 
         // Determine effective border size and color source
-        let effective_size = self.calculate_border_size(config, character_name, focused);
+        let effective_size = self.calculate_border_size(config, identity.style, focused);
 
         // 3. Draw Text
         // We pass effective_size mainly if text positioning depended on it,
         // but currently text is positioned by config offset.
-        self.update_name(
-            config,
-            character_name,
-            dimensions,
-            effective_size,
-            font_renderer,
-        )
-        .context(format!(
-            "Failed to update name overlay for '{}'",
-            character_name
-        ))?;
+        self.update_name(config, identity, dimensions, effective_size, font_renderer)
+            .context(format!(
+                "Failed to update name overlay for '{}'",
+                identity.style
+            ))?;
 
         // 4. Draw Border (Top Layer)
         // Only if size > 0 and enabled
@@ -507,7 +503,7 @@ impl<'a> OverlayRenderer<'a> {
 
         if should_draw_border {
             let (fill_picture, temp_fill_id) =
-                if let Some(settings) = config.character_settings.get(character_name) {
+                if let Some(settings) = config.character_settings.get(identity.style) {
                     let override_color_hex = if focused {
                         settings.override_active_border_color.as_ref()
                     } else {
@@ -616,22 +612,15 @@ impl<'a> OverlayRenderer<'a> {
     pub fn draw_minimized(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
-        self.draw_border(
-            config,
-            character_name,
-            dimensions,
-            false,
-            false,
-            font_renderer,
-        )
-        .context(format!(
-            "Failed to clear border for minimized window '{}'",
-            character_name
-        ))?;
+        self.draw_border(config, identity, dimensions, false, false, font_renderer)
+            .context(format!(
+                "Failed to clear border for minimized window '{}'",
+                identity.style
+            ))?;
 
         if !config.minimized_overlay_enabled {
             return Ok(());
@@ -660,7 +649,7 @@ impl<'a> OverlayRenderer<'a> {
             )
             .context(format!(
                 "Failed to render MINIMIZED text for '{}'",
-                character_name
+                identity.style
             ))?;
         Ok(())
     }

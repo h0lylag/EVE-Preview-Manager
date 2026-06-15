@@ -363,7 +363,17 @@ pub fn check_and_create_window<'a>(
     // and `handle_create_notify` calls `identify_window` before calling this.
     // This function is strictly for determining if we should create a renderable thumbnail.
 
+    let remembered_character_name = if identity.is_eve {
+        state.window_last_character.get(&window).cloned()
+    } else {
+        None
+    };
     let character_name = identity.name;
+    let effective_character_name = if character_name.is_empty() {
+        remembered_character_name.as_deref().unwrap_or("")
+    } else {
+        character_name.as_str()
+    };
 
     // Get saved position and dimensions
     // Determine which map to query based on identity type
@@ -382,12 +392,12 @@ pub fn check_and_create_window<'a>(
     // Priority 1: Runtime Settings (active session changes)
     // Priority 2: Profile Settings (saved on disk)
     // Priority 3: Inheritance / Session State
-    let position = if let Some(settings) = settings_map.get(&character_name) {
+    let position = if let Some(settings) = settings_map.get(effective_character_name) {
         Some(settings.position())
-    } else if let Some(settings) = profile_map.get(&character_name) {
+    } else if let Some(settings) = profile_map.get(effective_character_name) {
         Some(settings.position())
     } else {
-        // Pass empty map to enforce inheritance/fallback logic only
+        // Pass the live name to preserve logged-out source-window fallback logic.
         state.get_position(
             &character_name,
             window,
@@ -400,7 +410,7 @@ pub fn check_and_create_window<'a>(
     // by build_display_config(); the raw daemon maps only hold position/size.
     let force_enable = display_config
         .character_settings
-        .get(&character_name)
+        .get(effective_character_name)
         .and_then(|s| s.override_render_preview)
         .unwrap_or(false);
 
@@ -410,8 +420,8 @@ pub fn check_and_create_window<'a>(
 
     // Determine effective settings for dimensions and mode
     let effective_settings = settings_map
-        .get(&character_name)
-        .or_else(|| profile_map.get(&character_name));
+        .get(effective_character_name)
+        .or_else(|| profile_map.get(effective_character_name));
 
     // Get dimensions: From settings, OR from Rule (if custom), OR default
     let (dimensions, preview_mode) = if let Some(settings) = effective_settings {
@@ -457,6 +467,7 @@ pub fn check_and_create_window<'a>(
     let mut thumbnail = Thumbnail::new(
         ctx,
         character_name.clone(),
+        remembered_character_name,
         window,
         display_config,
         font_renderer,
@@ -469,7 +480,6 @@ pub fn check_and_create_window<'a>(
         character_name, window
     ))?;
 
-    // Check minimized state
     // Check minimized state
     let is_minimized = is_window_minimized(ctx.conn, window, ctx.atoms).unwrap_or(false);
 
@@ -549,7 +559,8 @@ pub fn scan_eve_windows<'a>(
                 match geom_result {
                     Ok(geom) => {
                         // Update character_thumbnails in memory (skip logged-out clients with empty name)
-                        if !eve.character_name.is_empty() {
+                        let effective_character_name = eve.effective_character_name().to_string();
+                        if !effective_character_name.is_empty() {
                             let settings = crate::common::types::CharacterSettings::new(
                                 geom.x,
                                 geom.y,
@@ -563,14 +574,14 @@ pub fn scan_eve_windows<'a>(
                                 .profile
                                 .custom_windows
                                 .iter()
-                                .any(|r| r.alias == eve.character_name);
+                                .any(|r| r.alias == effective_character_name);
 
                             if is_custom_alias {
                                 // NOTE: specific check to preserve existing overrides (like preview_mode)
                                 // if they were already loaded from the profile config key.
                                 if let Some(existing) = daemon_config
                                     .custom_source_thumbnails
-                                    .get_mut(&eve.character_name)
+                                    .get_mut(&effective_character_name)
                                 {
                                     existing.x = settings.x;
                                     existing.y = settings.y;
@@ -578,11 +589,11 @@ pub fn scan_eve_windows<'a>(
                                 } else {
                                     daemon_config
                                         .custom_source_thumbnails
-                                        .insert(eve.character_name.clone(), settings);
+                                        .insert(effective_character_name.clone(), settings);
                                 }
                             } else if let Some(existing) = daemon_config
                                 .character_thumbnails
-                                .get_mut(&eve.character_name)
+                                .get_mut(&effective_character_name)
                             {
                                 existing.x = settings.x;
                                 existing.y = settings.y;
@@ -590,7 +601,7 @@ pub fn scan_eve_windows<'a>(
                             } else {
                                 daemon_config
                                     .character_thumbnails
-                                    .insert(eve.character_name.clone(), settings);
+                                    .insert(effective_character_name, settings);
                             }
                         }
                     }

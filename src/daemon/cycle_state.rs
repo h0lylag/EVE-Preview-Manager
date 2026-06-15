@@ -1,7 +1,7 @@
 //! Hotkey cycle state management
 //!
 //! Tracks active EVE windows and their cycle order for hotkey-based navigation.
-//! Only characters listed in the profile's cycle_group are included in cycling.
+//! Only characters listed in configured cycle groups are included in cycling.
 
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
@@ -14,7 +14,7 @@ struct GroupState {
     current_index: usize,
 }
 
-/// Maps character names to their window IDs and positions in cycle order
+/// Tracks source windows and their live character names for cycle order
 pub struct CycleState {
     /// Active cycle groups: group_name -> GroupState
     groups: HashMap<String, GroupState>,
@@ -23,10 +23,10 @@ pub struct CycleState {
     /// Used to resolve starting position for cycling, especially for detached characters
     current_window: Option<Window>,
 
-    /// Active windows: character_name -> window_id.
-    /// Logged-out windows share the empty name, so exact logged-out selection is
-    /// tracked by current_window plus SessionState's last-character map.
-    active_windows: HashMap<String, Window>,
+    /// Active windows: source_window_id -> live_character_name.
+    /// Logged-out windows keep an empty live name, while remembered identity is
+    /// resolved from SessionState by source window id when needed.
+    active_windows: HashMap<Window, String>,
 
     /// Characters temporarily skipped from cycling
     skipped_characters: HashSet<String>,
@@ -67,23 +67,15 @@ impl CycleState {
     /// Register a new EVE window (called from CreateNotify)
     pub fn add_window(&mut self, character_name: String, window: Window) {
         debug!(character = %character_name, window = window, "Adding window for character");
-        self.active_windows.insert(character_name.clone(), window);
+        self.active_windows.insert(window, character_name);
 
-        // Note: Only characters listed in the profile's `cycle_group` will be included in the cycle order.
-        // We track all windows here, but `cycle_forward/backward` logic filters internally based on the config.
+        // Cycle commands filter this superset against the configured group order.
     }
 
     /// Remove window (called from DestroyNotify)
     pub fn remove_window(&mut self, window: Window) {
-        // Find and remove from active_windows
-        if let Some((name, _)) = self
-            .active_windows
-            .iter()
-            .find(|&(_, &w)| w == window)
-            .map(|(k, v)| (k.clone(), *v))
-        {
+        if let Some(name) = self.active_windows.remove(&window) {
             debug!(character = %name, window = window, "Removing window for character");
-            self.active_windows.remove(&name);
 
             // If a tracked window disappeared, keep group indices in range.
             self.clamp_indices();
@@ -97,18 +89,46 @@ impl CycleState {
 
     /// Update character name (called on login/logout)
     pub fn update_character(&mut self, window: Window, new_name: String) {
-        // Remove old entry
-        if let Some((old_name, _)) = self
-            .active_windows
+        self.add_window(new_name, window);
+    }
+
+    fn active_window_for_character(
+        active_windows: &HashMap<Window, String>,
+        character_name: &str,
+    ) -> Option<Window> {
+        active_windows
             .iter()
-            .find(|&(_, &w)| w == window)
-            .map(|(k, v)| (k.clone(), *v))
-        {
-            self.active_windows.remove(&old_name);
+            .find_map(|(&window, live_name)| (live_name == character_name).then_some(window))
+    }
+
+    fn logged_out_window_for_character(
+        active_windows: &HashMap<Window, String>,
+        character_name: &str,
+        logged_out_map: Option<&HashMap<Window, String>>,
+    ) -> Option<Window> {
+        let map = logged_out_map?;
+
+        active_windows
+            .iter()
+            .filter(|(_, live_name)| live_name.is_empty())
+            .find_map(|(&window, _)| {
+                map.get(&window)
+                    .is_some_and(|last_char| last_char == character_name)
+                    .then_some(window)
+            })
+    }
+
+    fn character_for_window<'a>(
+        &'a self,
+        window: Window,
+        logged_out_map: Option<&'a HashMap<Window, String>>,
+    ) -> Option<&'a str> {
+        let live_name = self.active_windows.get(&window)?;
+        if !live_name.is_empty() {
+            return Some(live_name.as_str());
         }
 
-        // Add new entry
-        self.add_window(new_name, window);
+        logged_out_map.and_then(|map| map.get(&window).map(String::as_str))
     }
 
     /// Toggle skip status for a character
@@ -190,17 +210,19 @@ impl CycleState {
                     }
 
                     // Check active windows first
-                    if let Some(&window) = self.active_windows.get(character_name) {
+                    if let Some(window) =
+                        Self::active_window_for_character(&self.active_windows, character_name)
+                    {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, "Cycling forward to logged-in character");
                         return Some((window, character_name.clone()));
                     }
 
                     // Check logged-out windows
-                    if let Some(map) = logged_out_map
-                        && let Some((&window, _)) = map
-                            .iter()
-                            .find(|(_, last_char)| *last_char == character_name)
-                    {
+                    if let Some(window) = Self::logged_out_window_for_character(
+                        &self.active_windows,
+                        character_name,
+                        logged_out_map,
+                    ) {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, window = window, "Cycling forward to logged-out character");
                         return Some((window, character_name.clone()));
                     }
@@ -265,16 +287,18 @@ impl CycleState {
                         continue;
                     }
 
-                    if let Some(&window) = self.active_windows.get(character_name) {
+                    if let Some(window) =
+                        Self::active_window_for_character(&self.active_windows, character_name)
+                    {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, "Cycling backward to logged-in character");
                         return Some((window, character_name.clone()));
                     }
 
-                    if let Some(map) = logged_out_map
-                        && let Some((&window, _)) = map
-                            .iter()
-                            .find(|(_, last_char)| *last_char == character_name)
-                    {
+                    if let Some(window) = Self::logged_out_window_for_character(
+                        &self.active_windows,
+                        character_name,
+                        logged_out_map,
+                    ) {
                         debug!(group = group_name, character = %character_name, index = group_state.current_index, window = window, "Cycling backward to logged-out character");
                         return Some((window, character_name.clone()));
                     }
@@ -301,7 +325,9 @@ impl CycleState {
         logged_out_map: Option<&HashMap<Window, String>>,
     ) -> Option<(Window, &'a str)> {
         // Check logged-in characters first
-        if let Some(&window) = self.active_windows.get(character_name) {
+        if let Some(window) =
+            Self::active_window_for_character(&self.active_windows, character_name)
+        {
             debug!(character = %character_name, window = window, "Activating logged-in character via per-character hotkey");
 
             // Update current_index in ALL groups that contain this character
@@ -316,11 +342,11 @@ impl CycleState {
         }
 
         // If enabled, check for logged-out windows with this character's last identity
-        if let Some(map) = logged_out_map
-            && let Some((&window, _)) = map
-                .iter()
-                .find(|(_, last_char)| *last_char == character_name)
-        {
+        if let Some(window) = Self::logged_out_window_for_character(
+            &self.active_windows,
+            character_name,
+            logged_out_map,
+        ) {
             debug!(character = %character_name, window = window, "Activating logged-out character via per-character hotkey");
 
             // Update current_index in ALL groups
@@ -360,23 +386,6 @@ impl CycleState {
         }
     }
 
-    /// Set current cycle position based on focused window
-    /// Returns true if window was found and state updated (even for detached characters)
-    pub fn set_current_by_window(&mut self, window: Window) -> bool {
-        // Always track the current window, even if it's not part of the cycle group
-        self.current_window = Some(window);
-
-        if let Some((character_name, _)) = self.active_windows.iter().find(|&(_, &w)| w == window) {
-            let character_name = character_name.clone();
-            // This will try to update current_index if in group, but we return true regardless if found
-            self.set_current_group_index(&character_name);
-            return true; // Found the window
-        }
-
-        // Window not known (not an EVE client?)
-        false
-    }
-
     /// Set current cycle position by exact window ID, with an optional character name for
     /// logged-out windows whose live thumbnail name is empty.
     pub fn set_current_by_window_with_character(
@@ -386,8 +395,7 @@ impl CycleState {
     ) -> bool {
         self.current_window = Some(window);
 
-        if let Some((active_name, _)) = self.active_windows.iter().find(|&(_, &w)| w == window) {
-            let active_name = active_name.clone();
+        if let Some(active_name) = self.active_windows.get(&window).cloned() {
             if !active_name.is_empty() {
                 self.set_current_group_index(&active_name);
                 return true;
@@ -424,23 +432,12 @@ impl CycleState {
         group: &[String],
         logged_out_map: Option<&HashMap<Window, String>>,
     ) -> Option<(Window, String)> {
-        // 1. Separate group into "In Cycle Group" and "Out of Cycle Group"
+        // Prefer Default-group order when available, then append remaining shared-hotkey
+        // candidates alphabetically for stable cycling.
         let mut in_group_indices: Vec<(usize, &String)> = Vec::new();
         let mut out_of_group: Vec<&String> = Vec::new();
 
         for name in group {
-            // Updated logic: Check if present in ANY group?
-            // Fallback: Just maintain original behavior relative to first finding?
-            // Actually, requirements say: "alphabetical order" for shared hotkeys if not in group.
-            // But if they ARE in a group, use group order?
-            // Complex if they are in different groups.
-            // Let's simplified to Alphabetical sort for now as default robust behavior.
-            // Or maybe sort by "Default" group if available?
-
-            // Current Simplification: Just dump everything to out_of_group (Alphabetical)
-            // UNLESS we can find a dominant group order.
-
-            // Let's try to search the "Default" group specifically?
             let in_default = self
                 .groups
                 .get("Default")
@@ -453,13 +450,9 @@ impl CycleState {
             }
         }
 
-        // 2. Sort "In Group" by config order
         in_group_indices.sort_by_key(|(idx, _)| *idx);
-
-        // 3. Sort "Out of Group" alphabetically
         out_of_group.sort();
 
-        // 4. Combine into final sorted candidates list
         let sorted_candidates: Vec<&String> = in_group_indices
             .into_iter()
             .map(|(_, name)| name)
@@ -471,11 +464,10 @@ impl CycleState {
             return None;
         }
 
-        // 5. Find starting position based on `current_window` or fallback to `current_index`
+        // Start from the exact current window when possible, so logged-out clients
+        // with remembered identities cycle from the clicked or focused source.
         let start_pos = if let Some(curr_win) = self.current_window
-            // Find which character owns this window
-            && let Some((curr_char, _)) = self.active_windows.iter().find(|&(_, &w)| w == curr_win)
-            // Find that character in the sorted candidates
+            && let Some(curr_char) = self.character_for_window(curr_win, logged_out_map)
             && let Some(pos) = sorted_candidates.iter().position(|&c| c == curr_char)
         {
             pos
@@ -496,7 +488,6 @@ impl CycleState {
             sorted_candidates.len().saturating_sub(1)
         };
 
-        // 6. Cycle through candidates starting after start_pos
         for i in 1..=sorted_candidates.len() {
             let idx = (start_pos + i) % sorted_candidates.len();
             let name = sorted_candidates[idx];
@@ -521,8 +512,8 @@ impl CycleState {
         self.current_window
     }
 
-    /// Get all active windows known to cycle state
-    pub fn get_active_windows(&self) -> &HashMap<String, Window> {
+    /// Get all active source windows known to cycle state with their live names.
+    pub fn get_active_windows(&self) -> &HashMap<Window, String> {
         &self.active_windows
     }
 }
@@ -531,18 +522,23 @@ impl CycleState {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_cycle_forward_multi_group() {
-        use crate::config::profile::CycleGroup;
-        let group1 = CycleGroup {
-            name: "G1".to_string(),
-            cycle_list: vec![
-                crate::config::profile::CycleSlot::Eve("A".to_string()),
-                crate::config::profile::CycleSlot::Eve("B".to_string()),
-            ],
+    fn test_group(name: &str, characters: &[&str]) -> crate::config::profile::CycleGroup {
+        use crate::config::profile::{CycleGroup, CycleSlot};
+
+        CycleGroup {
+            name: name.to_string(),
+            cycle_list: characters
+                .iter()
+                .map(|character| CycleSlot::Eve((*character).to_string()))
+                .collect(),
             hotkey_forward: None,
             hotkey_backward: None,
-        };
+        }
+    }
+
+    #[test]
+    fn test_cycle_forward_multi_group() {
+        let group1 = test_group("G1", &["A", "B"]);
         let mut state = CycleState::new(vec![group1]);
         state.add_window("A".to_string(), 100);
         state.add_window("B".to_string(), 200);
@@ -625,23 +621,14 @@ mod tests {
 
     #[test]
     fn test_logged_out_click_preserves_clicked_window() {
-        use crate::config::profile::{CycleGroup, CycleSlot};
         use std::collections::HashMap;
 
-        let group = CycleGroup {
-            name: "G1".to_string(),
-            cycle_list: vec![
-                CycleSlot::Eve("A".to_string()),
-                CycleSlot::Eve("B".to_string()),
-            ],
-            hotkey_forward: None,
-            hotkey_backward: None,
-        };
+        let group = test_group("G1", &["A", "B"]);
         let mut state = CycleState::new(vec![group]);
 
-        // Multiple logged-out thumbnails all have an empty live character name. The
-        // active map can only hold one empty key, so clicking another logged-out
-        // preview must still anchor current_window to the exact clicked window.
+        // Multiple logged-out thumbnails all have an empty live character name,
+        // so clicks must anchor current_window to the exact source window.
+        state.add_window("".to_string(), 111);
         state.add_window("".to_string(), 222);
 
         assert!(state.set_current_by_window_with_character(111, Some("A")));
@@ -651,6 +638,98 @@ mod tests {
         let logged_out = HashMap::from([(111, "A".to_string()), (222, "B".to_string())]);
         assert_eq!(
             state.cycle_forward("G1", Some(&logged_out), false),
+            Some((222, "B".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_multiple_logged_out_windows_preserve_source_ids() {
+        let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
+
+        state.add_window("".to_string(), 111);
+        state.add_window("".to_string(), 222);
+
+        assert_eq!(state.get_active_windows().len(), 2);
+        assert_eq!(
+            state.get_active_windows().get(&111).map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            state.get_active_windows().get(&222).map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn test_remove_logged_out_window_removes_exact_source_and_current() {
+        let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
+        state.add_window("".to_string(), 111);
+        state.add_window("".to_string(), 222);
+
+        assert!(state.set_current_by_window_with_character(111, Some("A")));
+
+        state.remove_window(222);
+        assert!(state.get_active_windows().contains_key(&111));
+        assert!(!state.get_active_windows().contains_key(&222));
+        assert_eq!(state.get_current_window(), Some(111));
+
+        state.remove_window(111);
+        assert_eq!(state.get_current_window(), None);
+    }
+
+    #[test]
+    fn test_cycle_forward_uses_remembered_logged_out_identity() {
+        use std::collections::HashMap;
+
+        let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
+        state.add_window("".to_string(), 111);
+        state.add_window("".to_string(), 222);
+
+        let logged_out = HashMap::from([(111, "A".to_string()), (222, "B".to_string())]);
+
+        assert_eq!(
+            state.cycle_forward("G1", Some(&logged_out), false),
+            Some((222, "B".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_anonymous_logged_out_window_is_not_cycle_candidate() {
+        use std::collections::HashMap;
+
+        let mut state = CycleState::new(vec![test_group("G1", &["A"])]);
+        state.add_window("".to_string(), 111);
+
+        assert!(state.set_current_by_window_with_character(111, None));
+        assert_eq!(state.get_current_window(), Some(111));
+        assert_eq!(
+            state.cycle_forward("G1", Some(&HashMap::new()), false),
+            None
+        );
+    }
+
+    #[test]
+    fn test_logged_out_cycling_is_disabled_without_logged_out_map() {
+        let mut state = CycleState::new(vec![test_group("G1", &["A"])]);
+        state.add_window("".to_string(), 111);
+
+        assert_eq!(state.cycle_forward("G1", None, false), None);
+        assert_eq!(state.activate_character("A", None), None);
+    }
+
+    #[test]
+    fn test_shared_hotkey_starts_from_remembered_logged_out_current_window() {
+        use std::collections::HashMap;
+
+        let mut state = CycleState::new(vec![test_group("Default", &["A", "B"])]);
+        state.add_window("".to_string(), 111);
+        state.add_window("".to_string(), 222);
+
+        let logged_out = HashMap::from([(111, "A".to_string()), (222, "B".to_string())]);
+        assert!(state.set_current_by_window_with_character(111, Some("A")));
+
+        assert_eq!(
+            state.activate_next_in_group(&["A".to_string(), "B".to_string()], Some(&logged_out)),
             Some((222, "B".to_string()))
         );
     }

@@ -14,8 +14,34 @@ use crate::config::DisplayConfig;
 use crate::x11::AppContext;
 
 use super::font::FontRenderer;
+use super::overlay::OverlayIdentity;
 use super::renderer::ThumbnailRenderer;
 use super::snapping::Rect;
+
+fn effective_character_name_from<'a>(
+    live_name: &'a str,
+    remembered_name: Option<&'a str>,
+) -> &'a str {
+    if !live_name.is_empty() {
+        live_name
+    } else {
+        remembered_name.unwrap_or("")
+    }
+}
+
+fn display_character_name_from<'a>(
+    live_name: &'a str,
+    remembered_name: Option<&'a str>,
+    show_logged_out_character_name: bool,
+) -> &'a str {
+    if !live_name.is_empty() {
+        live_name
+    } else if show_logged_out_character_name {
+        remembered_name.unwrap_or("")
+    } else {
+        ""
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct InputState {
@@ -37,6 +63,7 @@ pub struct InputState {
 pub struct Thumbnail<'a> {
     // === Application State (public, frequently accessed) ===
     pub character_name: String,
+    remembered_character_name: Option<String>,
     pub state: ThumbnailState,
     pub hidden: bool, // Tracks if hidden by "hide_when_no_focus"
     pub input_state: InputState,
@@ -58,7 +85,8 @@ impl<'a> Thumbnail<'a> {
     ///
     /// # Arguments
     /// * `ctx` - Application context.
-    /// * `character_name` - Name of the character.
+    /// * `character_name` - Live character name reported by the source window.
+    /// * `remembered_character_name` - Last known character for a logged-out source window.
     /// * `src` - Source EVE window ID.
     /// * `font_renderer` - Renderer for shared font resources.
     /// * `position` - Optional initial position (if loaded from config).
@@ -67,6 +95,7 @@ impl<'a> Thumbnail<'a> {
     pub fn new(
         ctx: &AppContext<'a>,
         character_name: String,
+        remembered_character_name: Option<String>,
         src: Window,
         display_config: &crate::config::DisplayConfig,
         font_renderer: &FontRenderer,
@@ -102,8 +131,18 @@ impl<'a> Thumbnail<'a> {
                 src_geom.y + positioning::DEFAULT_SPAWN_OFFSET,
             )
         });
+        let remembered_character_name = remembered_character_name.filter(|name| !name.is_empty());
+        let style_character_name =
+            effective_character_name_from(&character_name, remembered_character_name.as_deref());
+        let display_character_name = display_character_name_from(
+            &character_name,
+            remembered_character_name.as_deref(),
+            display_config.show_logged_out_character_name,
+        );
+
         debug!(
             character = %character_name,
+            remembered_character = %remembered_character_name.as_deref().unwrap_or(""),
             x = x,
             y = y,
             width = dimensions.width,
@@ -113,7 +152,8 @@ impl<'a> Thumbnail<'a> {
 
         let renderer = ThumbnailRenderer::new(
             ctx,
-            &character_name,
+            style_character_name,
+            display_character_name,
             src,
             src_geom.depth,
             display_config,
@@ -125,6 +165,7 @@ impl<'a> Thumbnail<'a> {
 
         Ok(Self {
             character_name,
+            remembered_character_name,
             state: ThumbnailState::default(),
             hidden: false,
             input_state: InputState::default(),
@@ -136,6 +177,42 @@ impl<'a> Thumbnail<'a> {
     }
 
     // Accessors
+
+    /// Returns the live character name reported by the source window.
+    pub fn live_character_name(&self) -> &str {
+        &self.character_name
+    }
+
+    /// Returns the remembered session identity synchronized from SessionState.
+    pub fn remembered_character_name(&self) -> Option<&str> {
+        self.remembered_character_name.as_deref()
+    }
+
+    /// Update the cached remembered identity from authoritative SessionState.
+    pub fn sync_remembered_character_name(&mut self, remembered_character_name: Option<String>) {
+        self.remembered_character_name = remembered_character_name.filter(|name| !name.is_empty());
+    }
+
+    /// Returns the identity used for behavior and per-character settings.
+    pub fn effective_character_name(&self) -> &str {
+        effective_character_name_from(self.live_character_name(), self.remembered_character_name())
+    }
+
+    /// Returns the label that should be shown on the thumbnail.
+    pub fn display_character_name<'b>(&'b self, display_config: &DisplayConfig) -> &'b str {
+        display_character_name_from(
+            self.live_character_name(),
+            self.remembered_character_name(),
+            display_config.show_logged_out_character_name,
+        )
+    }
+
+    fn overlay_identity<'b>(&'b self, display_config: &DisplayConfig) -> OverlayIdentity<'b> {
+        OverlayIdentity {
+            style: self.effective_character_name(),
+            display: self.display_character_name(display_config),
+        }
+    }
 
     /// Returns the underlying X11 window ID of the thumbnail.
     pub fn window(&self) -> Window {
@@ -206,7 +283,8 @@ impl<'a> Thumbnail<'a> {
 
     /// Moves the thumbnail to a new position updates the cached state.
     pub fn reposition(&mut self, x: i16, y: i16) -> Result<()> {
-        self.renderer.reposition(&self.character_name, x, y)?;
+        let effective_character_name = self.effective_character_name().to_string();
+        self.renderer.reposition(&effective_character_name, x, y)?;
         // Update cached position
         self.current_position = Position::new(x, y);
         Ok(())
@@ -230,7 +308,9 @@ impl<'a> Thumbnail<'a> {
         }
 
         self.dimensions = crate::common::types::Dimensions::new(width, height);
-        self.renderer.resize(&self.character_name, width, height)?;
+        let effective_character_name = self.effective_character_name().to_string();
+        self.renderer
+            .resize(&effective_character_name, width, height)?;
         Ok(())
     }
 
@@ -244,7 +324,7 @@ impl<'a> Thumbnail<'a> {
     ) -> Result<()> {
         self.renderer.border(
             display_config,
-            &self.character_name,
+            self.overlay_identity(display_config),
             self.dimensions,
             focused,
             skipped,
@@ -264,7 +344,7 @@ impl<'a> Thumbnail<'a> {
         if self.is_visible() {
             self.renderer.minimized(
                 display_config,
-                &self.character_name,
+                self.overlay_identity(display_config),
                 self.dimensions,
                 font_renderer,
             )?;
@@ -282,7 +362,7 @@ impl<'a> Thumbnail<'a> {
         // override_render_preview: None = use global, Some(true) = force on, Some(false) = force off
         let should_render = display_config
             .character_settings
-            .get(&self.character_name)
+            .get(self.effective_character_name())
             .and_then(|s| s.override_render_preview)
             .unwrap_or(display_config.enabled);
 
@@ -296,22 +376,27 @@ impl<'a> Thumbnail<'a> {
             return Ok(());
         }
 
+        let preview_mode = display_config
+            .character_settings
+            .get(self.effective_character_name())
+            .map(|settings| &settings.preview_mode)
+            .unwrap_or(&self.preview_mode);
+
         match self.state {
             ThumbnailState::Minimized => {
                 self.renderer.minimized(
                     display_config,
-                    &self.character_name,
+                    self.overlay_identity(display_config),
                     self.dimensions,
                     font_renderer,
                 )?;
             }
-            _ => match &self.preview_mode {
+            _ => match preview_mode {
                 crate::common::types::PreviewMode::Live => {
                     self.renderer
-                        .update(&self.character_name, self.dimensions)?;
+                        .update(self.effective_character_name(), self.dimensions)?;
                 }
                 crate::common::types::PreviewMode::Static { color } => {
-                    // ... color parsing ...
                     let color_u32 = crate::manager::utils::parse_hex_color(color)
                         .map_err(|_| anyhow::anyhow!("Invalid hex color: {}", color))?;
 
@@ -322,15 +407,30 @@ impl<'a> Thumbnail<'a> {
                         alpha: (color_u32.a() as u16) * 257,
                     };
 
-                    self.renderer
-                        .update_static(&self.character_name, self.dimensions, x_color)?;
+                    self.renderer.update_static(
+                        self.effective_character_name(),
+                        self.dimensions,
+                        x_color,
+                    )?;
                 }
             },
         }
         Ok(())
     }
 
-    // focus, reposition, resize unchanged
+    /// Redraw the name overlay after display-related config changes.
+    pub fn refresh_name_overlay(
+        &self,
+        display_config: &DisplayConfig,
+        font_renderer: &FontRenderer,
+    ) -> Result<()> {
+        self.renderer.update_name(
+            display_config,
+            self.overlay_identity(display_config),
+            self.dimensions,
+            font_renderer,
+        )
+    }
 
     /// Called when character name changes (e.g. login detection update).
     pub fn set_character_name(
@@ -341,6 +441,9 @@ impl<'a> Thumbnail<'a> {
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.character_name = new_name;
+        if !self.character_name.is_empty() {
+            self.remembered_character_name = Some(self.character_name.clone());
+        }
 
         // NOTE: Resize must precede update_name because it regenerates the overlay pixmap.
 
@@ -363,7 +466,7 @@ impl<'a> Thumbnail<'a> {
         self.renderer
             .update_name(
                 display_config,
-                &self.character_name,
+                self.overlay_identity(display_config),
                 self.dimensions,
                 font_renderer,
             )
@@ -387,5 +490,55 @@ impl<'a> Thumbnail<'a> {
             && x <= self.current_position.x + self.dimensions.width as i16
             && y >= self.current_position.y
             && y <= self.current_position.y + self.dimensions.height as i16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_character_name_from, effective_character_name_from};
+
+    #[test]
+    fn effective_name_prefers_live_character() {
+        assert_eq!(
+            effective_character_name_from("Live", Some("Remembered")),
+            "Live"
+        );
+    }
+
+    #[test]
+    fn effective_name_uses_remembered_logged_out_identity() {
+        assert_eq!(
+            effective_character_name_from("", Some("Remembered")),
+            "Remembered"
+        );
+    }
+
+    #[test]
+    fn effective_name_is_empty_for_anonymous_logged_out_identity() {
+        assert_eq!(effective_character_name_from("", None), "");
+    }
+
+    #[test]
+    fn display_name_keeps_live_character_even_when_logged_out_display_is_disabled() {
+        assert_eq!(
+            display_character_name_from("Live", Some("Remembered"), false),
+            "Live"
+        );
+    }
+
+    #[test]
+    fn display_name_hides_remembered_logged_out_identity_when_disabled() {
+        assert_eq!(
+            display_character_name_from("", Some("Remembered"), false),
+            ""
+        );
+    }
+
+    #[test]
+    fn display_name_shows_remembered_logged_out_identity_when_enabled() {
+        assert_eq!(
+            display_character_name_from("", Some("Remembered"), true),
+            "Remembered"
+        );
     }
 }

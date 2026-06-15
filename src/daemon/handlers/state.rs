@@ -40,7 +40,16 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
         return Ok(());
     }
 
-    if ctx.cycle_state.set_current_by_window(event.event) {
+    let remembered_character = ctx
+        .session_state
+        .window_last_character
+        .get(&event.event)
+        .map(String::as_str);
+
+    if ctx
+        .cycle_state
+        .set_current_by_window_with_character(event.event, remembered_character)
+    {
         debug!(window = event.event, "Synced cycle state to focused window");
     }
 
@@ -56,7 +65,7 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
             let should_render = ctx
                 .display_config
                 .character_settings
-                .get(&thumbnail.character_name)
+                .get(thumbnail.effective_character_name())
                 .and_then(|s| s.override_render_preview)
                 .unwrap_or(ctx.display_config.enabled);
 

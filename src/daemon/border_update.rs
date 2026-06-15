@@ -55,7 +55,7 @@ pub(crate) fn sync_focused_borders(
                     if let Err(e) = thumbnail.border(
                         display_config,
                         true,
-                        cycle_state.is_skipped(&thumbnail.character_name),
+                        cycle_state.is_skipped(thumbnail.effective_character_name()),
                         font_renderer,
                     ) {
                         warn!(
@@ -74,7 +74,7 @@ pub(crate) fn sync_focused_borders(
                     if let Err(e) = thumbnail.border(
                         display_config,
                         false,
-                        cycle_state.is_skipped(&thumbnail.character_name),
+                        cycle_state.is_skipped(thumbnail.effective_character_name()),
                         font_renderer,
                     ) {
                         warn!(
