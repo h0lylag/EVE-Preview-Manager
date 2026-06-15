@@ -58,6 +58,43 @@ impl DaemonConfig {
         )
     }
 
+    /// Get the configured fallback position for a new preview with no saved/session position.
+    ///
+    /// The fixed profile default wins when enabled. Otherwise we keep the historical behavior:
+    /// spawn near the source window using the standard offset.
+    pub fn fallback_new_thumbnail_position(
+        &self,
+        source_position: Option<Position>,
+    ) -> Option<Position> {
+        self.profile
+            .thumbnail_default_position_enabled
+            .then_some(self.profile.thumbnail_default_position)
+            .or_else(|| {
+                source_position.map(|source| {
+                    let offset = crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                    Position::new(
+                        source.x.saturating_add(offset),
+                        source.y.saturating_add(offset),
+                    )
+                })
+            })
+    }
+
+    /// Resolve initial placement for a preview that may have saved, session, or fallback position.
+    pub fn resolve_initial_thumbnail_position(
+        &self,
+        runtime_settings: Option<&CharacterSettings>,
+        profile_settings: Option<&CharacterSettings>,
+        session_position: Option<Position>,
+        source_position: Option<Position>,
+    ) -> Option<Position> {
+        runtime_settings
+            .map(CharacterSettings::position)
+            .or_else(|| profile_settings.map(CharacterSettings::position))
+            .or(session_position)
+            .or_else(|| self.fallback_new_thumbnail_position(source_position))
+    }
+
     /// Build DisplayConfig from current settings
     pub fn build_display_config(&self) -> DisplayConfig {
         let active_border_color = HexColor::parse(&self.profile.thumbnail_active_border_color)
@@ -282,6 +319,8 @@ mod tests {
                 profile_description: String::new(),
                 thumbnail_default_width: 480,
                 thumbnail_default_height: 270,
+                thumbnail_default_position_enabled: false,
+                thumbnail_default_position: Position::default(),
                 thumbnail_opacity: opacity_percent,
                 thumbnail_active_border: border_size > 0, // In tests, valid size > 0 implies enabled
                 thumbnail_active_border_size: border_size,
@@ -428,6 +467,93 @@ mod tests {
         if let Ok(new_pos) = result {
             assert_eq!(new_pos, None);
         }
+    }
+
+    #[test]
+    fn test_default_position_uses_fixed_coordinate() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let position = state.fallback_new_thumbnail_position(Some(Position::new(1000, 2000)));
+
+        assert_eq!(position, Some(Position::new(42, 84)));
+    }
+
+    #[test]
+    fn test_default_position_falls_back_to_source_offset() {
+        let state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+
+        let position = state.fallback_new_thumbnail_position(Some(Position::new(100, 200)));
+
+        assert_eq!(position, Some(Position::new(120, 220)));
+    }
+
+    #[test]
+    fn test_disabled_default_position_falls_back_to_source_offset() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = false;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let position = state.fallback_new_thumbnail_position(Some(Position::new(100, 200)));
+
+        assert_eq!(position, Some(Position::new(120, 220)));
+    }
+
+    #[test]
+    fn test_resolve_initial_position_saved_overrides_default() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+        let saved = CharacterSettings::new(500, 600, 240, 135);
+
+        let position = state.resolve_initial_thumbnail_position(
+            Some(&saved),
+            None,
+            Some(Position::new(300, 400)),
+            Some(Position::new(100, 200)),
+        );
+
+        assert_eq!(position, Some(Position::new(500, 600)));
+    }
+
+    #[test]
+    fn test_resolve_initial_position_session_overrides_default() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let position = state.resolve_initial_thumbnail_position(
+            None,
+            None,
+            Some(Position::new(300, 400)),
+            Some(Position::new(100, 200)),
+        );
+
+        assert_eq!(position, Some(Position::new(300, 400)));
+    }
+
+    #[test]
+    fn test_multiple_new_previews_use_same_fixed_position() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let first = state.resolve_initial_thumbnail_position(
+            None,
+            None,
+            None,
+            Some(Position::new(100, 200)),
+        );
+        let second = state.resolve_initial_thumbnail_position(
+            None,
+            None,
+            None,
+            Some(Position::new(900, 1000)),
+        );
+
+        assert_eq!(first, Some(Position::new(42, 84)));
+        assert_eq!(second, Some(Position::new(42, 84)));
     }
 
     #[test]

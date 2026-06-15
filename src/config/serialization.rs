@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use crate::common::types::CharacterSettings;
+use crate::common::types::{CharacterSettings, Position};
 use crate::config::profile::{
     CustomWindowRule, CycleGroup, HotkeyBackendType, LoggedOutUnidentifiedCycleMode, Profile,
     default_auto_save_thumbnail_positions, default_border_enabled, default_border_size,
@@ -23,6 +23,10 @@ struct ProfileHelper {
     thumbnail_default_width: u16,
     #[serde(default = "default_thumbnail_height")]
     thumbnail_default_height: u16,
+    #[serde(default)]
+    thumbnail_default_position_enabled: Option<bool>,
+    #[serde(default)]
+    thumbnail_default_position: Option<Position>,
     #[serde(default = "default_thumbnail_enabled")]
     thumbnail_enabled: bool,
     thumbnail_opacity: u8,
@@ -182,6 +186,10 @@ impl From<ProfileHelper> for Profile {
             profile_description: helper.profile_description,
             thumbnail_default_width: helper.thumbnail_default_width,
             thumbnail_default_height: helper.thumbnail_default_height,
+            thumbnail_default_position_enabled: helper
+                .thumbnail_default_position_enabled
+                .unwrap_or_else(|| helper.thumbnail_default_position.is_some()),
+            thumbnail_default_position: helper.thumbnail_default_position.unwrap_or_default(),
             thumbnail_enabled: helper.thumbnail_enabled,
             thumbnail_opacity: helper.thumbnail_opacity,
             thumbnail_active_border: helper.thumbnail_active_border,
@@ -247,6 +255,10 @@ impl<'de> Deserialize<'de> for Profile {
                 pub thumbnail_default_width: u16,
                 #[serde(default = "default_thumbnail_height")]
                 pub thumbnail_default_height: u16,
+                #[serde(default)]
+                pub thumbnail_default_position_enabled: bool,
+                #[serde(default)]
+                pub thumbnail_default_position: Position,
                 #[serde(default = "default_thumbnail_enabled")]
                 pub thumbnail_enabled: bool,
                 pub thumbnail_opacity: u8,
@@ -365,6 +377,8 @@ impl<'de> Deserialize<'de> for Profile {
                 profile_description: p.profile_description,
                 thumbnail_default_width: p.thumbnail_default_width,
                 thumbnail_default_height: p.thumbnail_default_height,
+                thumbnail_default_position_enabled: p.thumbnail_default_position_enabled,
+                thumbnail_default_position: p.thumbnail_default_position,
                 thumbnail_enabled: p.thumbnail_enabled,
                 thumbnail_opacity: p.thumbnail_opacity,
                 thumbnail_active_border: p.thumbnail_active_border,

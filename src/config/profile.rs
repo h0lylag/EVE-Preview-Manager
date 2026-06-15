@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::common::types::CharacterSettings;
+use crate::common::types::{CharacterSettings, Position};
 
 /// A named group of characters for cycling
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +207,10 @@ pub struct Profile {
     pub thumbnail_default_width: u16,
     /// Default thumbnail height for new characters
     pub thumbnail_default_height: u16,
+    /// Whether new previews with no saved coordinates should use a fixed top-left screen position
+    pub thumbnail_default_position_enabled: bool,
+    /// Stored fixed top-left screen position for new previews with no saved coordinates
+    pub thumbnail_default_position: Position,
 
     // Thumbnail visual settings
     /// Enable/disable thumbnail rendering entirely (daemon still runs for hotkeys)
@@ -394,6 +398,8 @@ fn default_profiles() -> Vec<Profile> {
             .to_string(),
         thumbnail_default_width: default_thumbnail_width(),
         thumbnail_default_height: default_thumbnail_height(),
+        thumbnail_default_position_enabled: false,
+        thumbnail_default_position: Position::default(),
         thumbnail_enabled: default_thumbnail_enabled(),
         thumbnail_opacity: crate::common::constants::defaults::thumbnail::OPACITY_PERCENT,
         thumbnail_active_border: crate::common::constants::defaults::border::ENABLED,
@@ -652,6 +658,8 @@ mod tests {
     #[test]
     fn test_profile_serialization() {
         let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.thumbnail_default_position_enabled = true;
+        profile.thumbnail_default_position = Position::new(321, 654);
         profile.character_thumbnails.insert(
             "TestChar".to_string(),
             CharacterSettings::new(100, 200, 480, 270),
@@ -661,8 +669,50 @@ mod tests {
         let deserialized: Profile = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.profile_name, "Test");
+        assert!(deserialized.thumbnail_default_position_enabled);
+        assert_eq!(
+            deserialized.thumbnail_default_position,
+            Position::new(321, 654)
+        );
         assert_eq!(deserialized.character_thumbnails.len(), 1);
         assert!(deserialized.character_thumbnails.contains_key("TestChar"));
+    }
+
+    #[test]
+    fn test_disabled_default_position_retains_coordinates() {
+        let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.thumbnail_default_position_enabled = false;
+        profile.thumbnail_default_position = Position::new(321, 654);
+
+        let json = serde_json::to_string(&profile).unwrap();
+        let deserialized: Profile = serde_json::from_str(&json).unwrap();
+
+        assert!(!deserialized.thumbnail_default_position_enabled);
+        assert_eq!(
+            deserialized.thumbnail_default_position,
+            Position::new(321, 654)
+        );
+    }
+
+    #[test]
+    fn test_legacy_default_position_option_enables_setting() {
+        let profile = Profile::default_with_name("Legacy Position".to_string(), String::new());
+        let mut json_value = serde_json::to_value(&profile).unwrap();
+
+        if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("thumbnail_default_position_enabled");
+            obj.insert(
+                "thumbnail_default_position".to_string(),
+                serde_json::json!({ "x": 321, "y": 654 }),
+            );
+        }
+
+        let deserialized: Profile = serde_json::from_value(json_value).unwrap();
+        assert!(deserialized.thumbnail_default_position_enabled);
+        assert_eq!(
+            deserialized.thumbnail_default_position,
+            Position::new(321, 654)
+        );
     }
 
     #[test]
@@ -749,6 +799,8 @@ mod tests {
             profile.thumbnail_default_height,
             crate::common::constants::defaults::thumbnail::HEIGHT
         );
+        assert!(!profile.thumbnail_default_position_enabled);
+        assert_eq!(profile.thumbnail_default_position, Position::default());
         assert_eq!(
             profile.client_minimize_on_switch,
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH
@@ -824,6 +876,8 @@ mod tests {
         let mut json_value = serde_json::to_value(&profile).unwrap();
 
         if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("thumbnail_default_position_enabled");
+            obj.remove("thumbnail_default_position");
             obj.remove("hotkey_logged_out_unidentified_cycle");
             obj.remove("hotkey_logged_out_unidentified_cycle_mode");
             obj.remove("hotkey_logged_out_unidentified_cycle_forward");
@@ -831,6 +885,8 @@ mod tests {
         }
 
         let deserialized: Profile = serde_json::from_value(json_value).unwrap();
+        assert!(!deserialized.thumbnail_default_position_enabled);
+        assert_eq!(deserialized.thumbnail_default_position, Position::default());
         assert!(!deserialized.hotkey_logged_out_unidentified_cycle);
         assert_eq!(
             deserialized.hotkey_logged_out_unidentified_cycle_mode,

@@ -10,6 +10,14 @@ use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
 use crate::common::types::{CharacterSettings, Position, ThumbnailState};
 
+fn source_window_position(ctx: &crate::x11::AppContext, window: Window) -> Option<Position> {
+    ctx.conn
+        .get_geometry(window)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|geom| Position::new(geom.x, geom.y))
+}
+
 /// Handle DamageNotify events - update damaged thumbnail
 pub fn handle_damage_notify(
     ctx: &mut EventContext,
@@ -301,20 +309,20 @@ pub fn process_detected_window(
                         ctx.daemon_config.profile.thumbnail_default_width,
                         ctx.daemon_config.profile.thumbnail_default_height,
                     );
-                    // Use source window position + spawn offset so re-enabling rendering
-                    // places the thumbnail in a sensible location rather than (0, 0).
-                    let offset = crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
-                    let (spawn_x, spawn_y) = ctx
-                        .app_ctx
-                        .conn
-                        .get_geometry(window)
-                        .ok()
-                        .and_then(|cookie| cookie.reply().ok())
-                        .map(|geom| (geom.x + offset, geom.y + offset))
-                        .unwrap_or((0, 0));
+                    let spawn_position = ctx
+                        .daemon_config
+                        .fallback_new_thumbnail_position(source_window_position(
+                            ctx.app_ctx,
+                            window,
+                        ))
+                        .unwrap_or_default();
 
-                    let settings =
-                        crate::common::types::CharacterSettings::new(spawn_x, spawn_y, w, h);
+                    let settings = crate::common::types::CharacterSettings::new(
+                        spawn_position.x,
+                        spawn_position.y,
+                        w,
+                        h,
+                    );
                     if identity.is_eve {
                         ctx.daemon_config
                             .character_thumbnails
@@ -326,8 +334,8 @@ pub fn process_detected_window(
                     }
                     let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
                         name: identity.name.clone(),
-                        x: spawn_x,
-                        y: spawn_y,
+                        x: spawn_position.x,
+                        y: spawn_position.y,
                         width: w,
                         height: h,
                         is_custom: !identity.is_eve,
@@ -691,18 +699,14 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                 let final_settings = if let Some(settings) = new_settings {
                     Some(settings)
                 } else {
-                    let settings = if ctx
+                    let session_position = ctx
                         .daemon_config
                         .profile
                         .thumbnail_preserve_position_on_swap
+                        .then_some(current_pos);
+                    let source_position = if session_position.is_none()
+                        && !ctx.daemon_config.profile.thumbnail_default_position_enabled
                     {
-                        crate::common::types::CharacterSettings::new(
-                            current_pos.x,
-                            current_pos.y,
-                            thumbnail.dimensions.width,
-                            thumbnail.dimensions.height,
-                        )
-                    } else {
                         let src_geom = ctx
                             .app_ctx
                             .conn
@@ -710,19 +714,25 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                             .context("Failed to query source geometry for reset position")?
                             .reply()
                             .context("Failed to get source geometry reply for reset position")?;
-
-                        let default_x = src_geom.x
-                            + crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
-                        let default_y = src_geom.y
-                            + crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
-
-                        crate::common::types::CharacterSettings::new(
-                            default_x,
-                            default_y,
-                            thumbnail.dimensions.width,
-                            thumbnail.dimensions.height,
-                        )
+                        Some(Position::new(src_geom.x, src_geom.y))
+                    } else {
+                        source_window_position(ctx.app_ctx, thumbnail.src())
                     };
+                    let default_position = ctx
+                        .daemon_config
+                        .resolve_initial_thumbnail_position(
+                            None,
+                            None,
+                            session_position,
+                            source_position,
+                        )
+                        .expect("session/default/source position should be available");
+                    let settings = crate::common::types::CharacterSettings::new(
+                        default_position.x,
+                        default_position.y,
+                        thumbnail.dimensions.width,
+                        thumbnail.dimensions.height,
+                    );
 
                     ctx.daemon_config
                         .character_thumbnails

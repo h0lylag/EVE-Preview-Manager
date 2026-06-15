@@ -8,7 +8,7 @@ use x11rb::protocol::xproto::*;
 
 use crate::common::constants;
 use crate::common::ipc::DaemonMessage;
-use crate::common::types::Dimensions;
+use crate::common::types::{Dimensions, Position};
 use crate::config::DaemonConfig;
 use crate::config::DisplayConfig;
 use crate::config::profile::CustomWindowRule;
@@ -17,6 +17,14 @@ use std::collections::HashMap;
 
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
+
+fn source_window_position(ctx: &AppContext, window: Window) -> Option<Position> {
+    ctx.conn
+        .get_geometry(window)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|geom| Position::new(geom.x, geom.y))
+}
 
 /// Check if a window is an EVE client and return its character name
 /// Returns Some(character_name) for EVE windows, None for non-EVE windows
@@ -389,22 +397,24 @@ pub fn check_and_create_window<'a>(
         &daemon_config.profile.custom_source_thumbnails
     };
 
-    // Priority 1: Runtime Settings (active session changes)
-    // Priority 2: Profile Settings (saved on disk)
-    // Priority 3: Inheritance / Session State
-    let position = if let Some(settings) = settings_map.get(effective_character_name) {
-        Some(settings.position())
-    } else if let Some(settings) = profile_map.get(effective_character_name) {
-        Some(settings.position())
-    } else {
-        // Pass the live name to preserve logged-out source-window fallback logic.
+    let runtime_settings = settings_map.get(effective_character_name);
+    let profile_settings = profile_map.get(effective_character_name);
+    let session_position = if runtime_settings.is_none() && profile_settings.is_none() {
         state.get_position(
             &character_name,
             window,
             &HashMap::new(),
             daemon_config.profile.thumbnail_preserve_position_on_swap,
         )
+    } else {
+        None
     };
+    let position = daemon_config.resolve_initial_thumbnail_position(
+        runtime_settings,
+        profile_settings,
+        session_position,
+        source_window_position(ctx, window),
+    );
 
     // NOTE: override_render_preview for custom sources is stored in the rule and resolved
     // by build_display_config(); the raw daemon maps only hold position/size.
@@ -644,19 +654,16 @@ pub fn scan_eve_windows<'a>(
                             daemon_config.profile.thumbnail_default_width,
                             daemon_config.profile.thumbnail_default_height,
                         );
-                        // Use source window position + spawn offset so re-enabling rendering
-                        // places the thumbnail in a sensible location rather than (0, 0).
-                        let offset = crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
-                        let (spawn_x, spawn_y) = ctx
-                            .conn
-                            .get_geometry(w)
-                            .ok()
-                            .and_then(|cookie| cookie.reply().ok())
-                            .map(|geom| (geom.x + offset, geom.y + offset))
-                            .unwrap_or((0, 0));
+                        let spawn_position = daemon_config
+                            .fallback_new_thumbnail_position(source_window_position(ctx, w))
+                            .unwrap_or_default();
 
-                        let settings =
-                            crate::common::types::CharacterSettings::new(spawn_x, spawn_y, ww, hh);
+                        let settings = crate::common::types::CharacterSettings::new(
+                            spawn_position.x,
+                            spawn_position.y,
+                            ww,
+                            hh,
+                        );
                         if identity.is_eve {
                             daemon_config
                                 .character_thumbnails
@@ -668,8 +675,8 @@ pub fn scan_eve_windows<'a>(
                         }
                         let _ = status_tx.send(DaemonMessage::PositionChanged {
                             name: identity.name.clone(),
-                            x: spawn_x,
-                            y: spawn_y,
+                            x: spawn_position.x,
+                            y: spawn_position.y,
                             width: ww,
                             height: hh,
                             is_custom: !identity.is_eve,

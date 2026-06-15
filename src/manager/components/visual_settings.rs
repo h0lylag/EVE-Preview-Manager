@@ -1,7 +1,9 @@
 use crate::common::constants::manager_ui::*;
-use crate::common::types::Dimensions;
+use crate::common::types::{Dimensions, Position};
 use crate::config::profile::Profile;
+use crate::manager::key_capture::{PositionPickResult, start_position_pick};
 use eframe::egui;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 /// State for visual settings UI
 pub struct VisualSettingsState {
@@ -10,9 +12,14 @@ pub struct VisualSettingsState {
     // Resizing state
     show_resize_confirmation: bool,
     pending_resize_all: Option<Dimensions>,
+    show_position_apply_confirmation: bool,
+    pending_position_all: Option<Position>,
     current_width: u16,
     current_height: u16,
     last_target: String,
+    position_pick_rx: Option<Receiver<PositionPickResult>>,
+    position_pick_cancel_tx: Option<Sender<()>>,
+    position_pick_status: Option<String>,
 }
 
 impl VisualSettingsState {
@@ -31,10 +38,24 @@ impl VisualSettingsState {
             font_load_error,
             show_resize_confirmation: false,
             pending_resize_all: None,
+            show_position_apply_confirmation: false,
+            pending_position_all: None,
             current_width: 250,
             current_height: 141,
             last_target: "---".to_string(),
+            position_pick_rx: None,
+            position_pick_cancel_tx: None,
+            position_pick_status: None,
         }
+    }
+
+    fn is_position_picking(&self) -> bool {
+        self.position_pick_rx.is_some()
+    }
+
+    fn clear_position_picker(&mut self) {
+        self.position_pick_rx = None;
+        self.position_pick_cancel_tx = None;
     }
 }
 
@@ -45,11 +66,17 @@ impl Default for VisualSettingsState {
 }
 
 pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut VisualSettingsState) -> bool {
-    let mut changed = false;
+    let mut changed = poll_position_picker(profile, state);
 
     ui.columns(2, |columns| {
-        // Column 1: Visual Settings
+        // Column 1: Visual settings and preview location controls
         if render_visual_controls(&mut columns[0], profile, state) {
+            changed = true;
+        }
+
+        columns[0].add_space(SECTION_SPACING);
+
+        if render_default_position_controls(&mut columns[0], profile, state) {
             changed = true;
         }
 
@@ -64,7 +91,51 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut VisualSettingsSt
         changed = true;
     }
 
+    if render_position_apply_confirmation(ui, profile, state) {
+        changed = true;
+    }
+
     changed
+}
+
+fn poll_position_picker(profile: &mut Profile, state: &mut VisualSettingsState) -> bool {
+    let pick_result = match &state.position_pick_rx {
+        Some(rx) => rx.try_recv(),
+        None => return false,
+    };
+
+    match pick_result {
+        Ok(PositionPickResult::Picked(position)) => {
+            profile.thumbnail_default_position = position;
+            state.position_pick_status = Some(format!(
+                "Picked position: X {}, Y {}",
+                position.x, position.y
+            ));
+            state.clear_position_picker();
+            true
+        }
+        Ok(PositionPickResult::Cancelled) => {
+            state.position_pick_status = Some("Position pick cancelled".to_string());
+            state.clear_position_picker();
+            false
+        }
+        Ok(PositionPickResult::Timeout) => {
+            state.position_pick_status = Some("Position pick timed out".to_string());
+            state.clear_position_picker();
+            false
+        }
+        Ok(PositionPickResult::Error(error)) => {
+            state.position_pick_status = Some(format!("Position pick failed: {}", error));
+            state.clear_position_picker();
+            false
+        }
+        Err(TryRecvError::Empty) => false,
+        Err(TryRecvError::Disconnected) => {
+            state.position_pick_status = Some("Position pick stopped unexpectedly".to_string());
+            state.clear_position_picker();
+            false
+        }
+    }
 }
 
 fn render_visual_controls(
@@ -666,6 +737,163 @@ fn render_size_controls(
     changed
 }
 
+fn render_default_position_controls(
+    ui: &mut egui::Ui,
+    profile: &mut Profile,
+    state: &mut VisualSettingsState,
+) -> bool {
+    let mut changed = false;
+
+    ui.group(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.label(egui::RichText::new("Default Preview Location").strong());
+        ui.add_space(ITEM_SPACING);
+
+        let is_picking = state.is_position_picking();
+        if ui
+            .add_enabled(
+                !is_picking,
+                egui::Checkbox::new(
+                    &mut profile.thumbnail_default_position_enabled,
+                    "Use custom location for new previews",
+                ),
+            )
+            .changed()
+        {
+            changed = true;
+        }
+
+        ui.add_space(ITEM_SPACING / 2.0);
+        ui.add_enabled_ui(profile.thumbnail_default_position_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("X:");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut profile.thumbnail_default_position.x)
+                            .range(i16::MIN..=i16::MAX),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.label("Y:");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut profile.thumbnail_default_position.y)
+                            .range(i16::MIN..=i16::MAX),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+        });
+
+        ui.add_space(ITEM_SPACING / 2.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    profile.thumbnail_default_position_enabled && !is_picking,
+                    egui::Button::new("Pick"),
+                )
+                .clicked()
+            {
+                let (result_rx, cancel_tx) = start_position_pick();
+                state.position_pick_rx = Some(result_rx);
+                state.position_pick_cancel_tx = Some(cancel_tx);
+                state.position_pick_status =
+                    Some("Picking... click on the dimmed desktop overlay".to_string());
+            }
+
+            if is_picking && ui.button("Cancel").clicked() {
+                if let Some(cancel_tx) = state.position_pick_cancel_tx.take() {
+                    let _ = cancel_tx.send(());
+                }
+                state.clear_position_picker();
+                state.position_pick_status = Some("Position pick cancelled".to_string());
+            }
+        });
+
+        if let Some(status) = &state.position_pick_status {
+            ui.add_space(ITEM_SPACING / 2.0);
+            ui.label(egui::RichText::new(status).small().weak());
+        }
+
+        ui.add_space(ITEM_SPACING / 2.0);
+        ui.label(
+            egui::RichText::new("Used when a new preview has no saved or session position.")
+                .small()
+                .weak(),
+        );
+
+        ui.add_space(ITEM_SPACING);
+        ui.separator();
+        ui.add_space(ITEM_SPACING / 2.0);
+        ui.label(egui::RichText::new("Preview Location Reset").strong());
+
+        let reset_target = saved_preview_reset_target(profile);
+        ui.label(
+            egui::RichText::new(format!(
+                "Reset target: X {}, Y {}",
+                reset_target.x, reset_target.y
+            ))
+            .small()
+            .weak(),
+        );
+
+        ui.horizontal(|ui| {
+            let saved_preview_count = saved_preview_count(profile);
+            if ui
+                .add_enabled(
+                    saved_preview_count > 0 && !is_picking,
+                    egui::Button::new("Reset Preview Locations"),
+                )
+                .clicked()
+            {
+                state.pending_position_all = Some(reset_target);
+                state.show_position_apply_confirmation = true;
+            }
+        });
+    });
+
+    changed
+}
+
+fn saved_preview_count(profile: &Profile) -> usize {
+    profile.character_thumbnails.len() + profile.custom_source_thumbnails.len()
+}
+
+fn automatic_saved_preview_reset_position() -> Position {
+    let offset = crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
+    Position::new(offset, offset)
+}
+
+fn saved_preview_reset_target(profile: &Profile) -> Position {
+    if profile.thumbnail_default_position_enabled {
+        profile.thumbnail_default_position
+    } else {
+        automatic_saved_preview_reset_position()
+    }
+}
+
+fn reset_saved_preview_positions(profile: &mut Profile, position: Position) -> usize {
+    let mut changed_count = 0;
+
+    for settings in profile
+        .character_thumbnails
+        .values_mut()
+        .chain(profile.custom_source_thumbnails.values_mut())
+    {
+        if settings.position() != position {
+            settings.x = position.x;
+            settings.y = position.y;
+            changed_count += 1;
+        }
+    }
+
+    changed_count
+}
+
 fn render_resize_confirmation(
     ui: &mut egui::Ui,
     profile: &mut Profile,
@@ -717,6 +945,59 @@ fn render_resize_confirmation(
     changed
 }
 
+fn render_position_apply_confirmation(
+    ui: &mut egui::Ui,
+    profile: &mut Profile,
+    state: &mut VisualSettingsState,
+) -> bool {
+    let mut changed = false;
+
+    if state.show_position_apply_confirmation {
+        egui::Window::new("Confirm Preview Location Reset")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                if let Some(position) = state.pending_position_all {
+                    let preview_count = saved_preview_count(profile);
+                    ui.label(format!(
+                        "Reset all {} saved preview locations to X {}, Y {}?",
+                        preview_count, position.x, position.y
+                    ));
+                    ui.add_space(ITEM_SPACING);
+                    ui.label(
+                        egui::RichText::new(
+                            "This will overwrite saved thumbnail coordinates but keep sizes.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.add_space(ITEM_SPACING);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Yes, Reset Locations").clicked() {
+                            let changed_count = reset_saved_preview_positions(profile, position);
+                            state.position_pick_status = Some(format!(
+                                "Reset {} preview locations to X {}, Y {}",
+                                changed_count, position.x, position.y
+                            ));
+                            changed = changed_count > 0;
+                            state.show_position_apply_confirmation = false;
+                            state.pending_position_all = None;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            state.show_position_apply_confirmation = false;
+                            state.pending_position_all = None;
+                        }
+                    });
+                }
+            });
+    }
+
+    changed
+}
+
 /// Parse hex color string - supports both #RRGGBB and #AARRGGBB formats.
 /// Returns a Color32 if parsing succeeds, treating 6-digit hex as full-opacity RGB.
 fn parse_hex_color(hex: &str) -> Result<egui::Color32, ()> {
@@ -756,5 +1037,57 @@ fn format_hex_color(color: egui::Color32) -> String {
             color.g(),
             color.b()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::types::CharacterSettings;
+
+    #[test]
+    fn saved_preview_reset_target_uses_custom_position_when_enabled() {
+        let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.thumbnail_default_position_enabled = true;
+        profile.thumbnail_default_position = Position::new(10, 20);
+        profile.character_thumbnails.insert(
+            "Alpha".to_string(),
+            CharacterSettings::new(100, 200, 480, 270),
+        );
+
+        assert_eq!(saved_preview_reset_target(&profile), Position::new(10, 20));
+    }
+
+    #[test]
+    fn saved_preview_reset_target_uses_safe_default_when_custom_position_disabled() {
+        let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.thumbnail_default_position_enabled = false;
+        profile.thumbnail_default_position = Position::new(10, 20);
+
+        assert_eq!(saved_preview_reset_target(&profile), Position::new(20, 20));
+    }
+
+    #[test]
+    fn reset_saved_preview_positions_moves_all_saved_entries_and_preserves_sizes() {
+        let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.character_thumbnails.insert(
+            "Alpha".to_string(),
+            CharacterSettings::new(100, 200, 480, 270),
+        );
+        profile.custom_source_thumbnails.insert(
+            "Browser".to_string(),
+            CharacterSettings::new(300, 400, 640, 360),
+        );
+
+        let changed_count = reset_saved_preview_positions(&mut profile, Position::new(10, 20));
+
+        assert_eq!(changed_count, 2);
+        let character = profile.character_thumbnails.get("Alpha").unwrap();
+        assert_eq!(character.position(), Position::new(10, 20));
+        assert_eq!(character.dimensions, Dimensions::new(480, 270));
+
+        let custom_source = profile.custom_source_thumbnails.get("Browser").unwrap();
+        assert_eq!(custom_source.position(), Position::new(10, 20));
+        assert_eq!(custom_source.dimensions, Dimensions::new(640, 360));
     }
 }
