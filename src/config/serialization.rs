@@ -3,12 +3,13 @@ use std::collections::HashMap;
 
 use crate::common::types::CharacterSettings;
 use crate::config::profile::{
-    CustomWindowRule, CycleGroup, HotkeyBackendType, Profile,
+    CustomWindowRule, CycleGroup, HotkeyBackendType, LoggedOutUnidentifiedCycleMode, Profile,
     default_auto_save_thumbnail_positions, default_border_enabled, default_border_size,
     default_hotkey_backend, default_inactive_border_color, default_inactive_border_enabled,
-    default_preserve_thumbnail_position_on_swap, default_profile_name,
-    default_show_logged_out_character_name, default_snap_threshold, default_text_font_family,
-    default_thumbnail_enabled, default_thumbnail_height, default_thumbnail_width,
+    default_logged_out_unidentified_cycle_mode, default_preserve_thumbnail_position_on_swap,
+    default_profile_name, default_show_logged_out_character_name, default_snap_threshold,
+    default_text_font_family, default_thumbnail_enabled, default_thumbnail_height,
+    default_thumbnail_width,
 };
 
 /// Helper struct for migration during deserialization
@@ -66,6 +67,14 @@ struct ProfileHelper {
     hotkey_input_device: Option<String>,
     #[serde(default)]
     hotkey_logged_out_cycle: bool,
+    #[serde(default)]
+    hotkey_logged_out_unidentified_cycle: bool,
+    #[serde(default = "default_logged_out_unidentified_cycle_mode")]
+    hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
+    #[serde(default)]
+    hotkey_logged_out_unidentified_cycle_forward: Option<crate::config::HotkeyBinding>,
+    #[serde(default)]
+    hotkey_logged_out_unidentified_cycle_backward: Option<crate::config::HotkeyBinding>,
     #[serde(default)]
     hotkey_require_eve_focus: bool,
     #[serde(default)]
@@ -197,6 +206,13 @@ impl From<ProfileHelper> for Profile {
             hotkey_backend: helper.hotkey_backend,
             hotkey_input_device: helper.hotkey_input_device,
             hotkey_logged_out_cycle: helper.hotkey_logged_out_cycle,
+            hotkey_logged_out_unidentified_cycle: helper.hotkey_logged_out_unidentified_cycle,
+            hotkey_logged_out_unidentified_cycle_mode: helper
+                .hotkey_logged_out_unidentified_cycle_mode,
+            hotkey_logged_out_unidentified_cycle_forward: helper
+                .hotkey_logged_out_unidentified_cycle_forward,
+            hotkey_logged_out_unidentified_cycle_backward: helper
+                .hotkey_logged_out_unidentified_cycle_backward,
             hotkey_require_eve_focus: helper.hotkey_require_eve_focus,
             hotkey_cycle_reset_index: helper.hotkey_cycle_reset_index,
             hotkey_profile_switch: helper.hotkey_profile_switch,
@@ -277,6 +293,16 @@ impl<'de> Deserialize<'de> for Profile {
                 pub cycle_groups: Vec<CycleGroupBinary>,
                 #[serde(default)]
                 pub hotkey_logged_out_cycle: bool,
+                #[serde(default)]
+                pub hotkey_logged_out_unidentified_cycle: bool,
+                #[serde(default = "default_logged_out_unidentified_cycle_mode")]
+                pub hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
+                #[serde(default)]
+                pub hotkey_logged_out_unidentified_cycle_forward:
+                    Option<crate::config::HotkeyBinding>,
+                #[serde(default)]
+                pub hotkey_logged_out_unidentified_cycle_backward:
+                    Option<crate::config::HotkeyBinding>,
                 #[serde(default)]
                 pub hotkey_require_eve_focus: bool,
                 #[serde(default)]
@@ -364,6 +390,13 @@ impl<'de> Deserialize<'de> for Profile {
                 hotkey_input_device: p.hotkey_input_device,
                 cycle_groups,
                 hotkey_logged_out_cycle: p.hotkey_logged_out_cycle,
+                hotkey_logged_out_unidentified_cycle: p.hotkey_logged_out_unidentified_cycle,
+                hotkey_logged_out_unidentified_cycle_mode: p
+                    .hotkey_logged_out_unidentified_cycle_mode,
+                hotkey_logged_out_unidentified_cycle_forward: p
+                    .hotkey_logged_out_unidentified_cycle_forward,
+                hotkey_logged_out_unidentified_cycle_backward: p
+                    .hotkey_logged_out_unidentified_cycle_backward,
                 hotkey_require_eve_focus: p.hotkey_require_eve_focus,
                 hotkey_cycle_reset_index: p.hotkey_cycle_reset_index,
                 hotkey_profile_switch: p.hotkey_profile_switch,

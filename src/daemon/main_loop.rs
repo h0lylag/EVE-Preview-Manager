@@ -13,6 +13,7 @@ use x11rb::protocol::xproto::*;
 use crate::common::constants::eve;
 use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
 use crate::config::DaemonConfig;
+use crate::config::profile::LoggedOutUnidentifiedCycleMode;
 use crate::input::listener::{self, CycleCommand, TimestampedCommand};
 use crate::x11::{
     AppContext, CachedAtoms, activate_window, minimize_window, refresh_pointer_state,
@@ -174,7 +175,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
     }
 
     // Spawn hotkey listener (start if any hotkeys configured: cycle or per-character)
-    let cycle_hotkeys: Vec<(CycleCommand, crate::config::HotkeyBinding)> = daemon_config
+    let mut cycle_hotkeys: Vec<(CycleCommand, crate::config::HotkeyBinding)> = daemon_config
         .profile
         .cycle_groups
         .iter()
@@ -189,6 +190,26 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
             hotkeys
         })
         .collect();
+
+    if daemon_config.profile.hotkey_logged_out_unidentified_cycle
+        && daemon_config
+            .profile
+            .hotkey_logged_out_unidentified_cycle_mode
+            == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+    {
+        if let Some(fwd) = &daemon_config
+            .profile
+            .hotkey_logged_out_unidentified_cycle_forward
+        {
+            cycle_hotkeys.push((CycleCommand::LoggedOutUnidentifiedForward, fwd.clone()));
+        }
+        if let Some(bwd) = &daemon_config
+            .profile
+            .hotkey_logged_out_unidentified_cycle_backward
+        {
+            cycle_hotkeys.push((CycleCommand::LoggedOutUnidentifiedBackward, bwd.clone()));
+        }
+    }
 
     let has_cycle_keys = !cycle_hotkeys.is_empty();
     let has_character_hotkeys = !character_hotkeys.is_empty();
@@ -985,24 +1006,83 @@ fn handle_cycle_command(
     } else {
         None
     };
+    let append_unidentified = resources
+        .config
+        .profile
+        .hotkey_logged_out_unidentified_cycle
+        && resources
+            .config
+            .profile
+            .hotkey_logged_out_unidentified_cycle_mode
+            == LoggedOutUnidentifiedCycleMode::AppendToGroups;
 
     match command {
-        CycleCommand::Forward(group) => resources
-            .cycle
-            .cycle_forward(
+        CycleCommand::Forward(group) => if append_unidentified {
+            resources.cycle.cycle_forward_with_unidentified(
+                group,
+                logged_out_map,
+                &resources.session.window_last_character,
+                resources.config.profile.hotkey_cycle_reset_index,
+            )
+        } else {
+            resources.cycle.cycle_forward(
                 group,
                 logged_out_map,
                 resources.config.profile.hotkey_cycle_reset_index,
             )
-            .map(|(w, s)| (w, s.to_string())),
-        CycleCommand::Backward(group) => resources
-            .cycle
-            .cycle_backward(
+        }
+        .map(|(w, s)| (w, s.to_string())),
+        CycleCommand::Backward(group) => if append_unidentified {
+            resources.cycle.cycle_backward_with_unidentified(
+                group,
+                logged_out_map,
+                &resources.session.window_last_character,
+                resources.config.profile.hotkey_cycle_reset_index,
+            )
+        } else {
+            resources.cycle.cycle_backward(
                 group,
                 logged_out_map,
                 resources.config.profile.hotkey_cycle_reset_index,
             )
-            .map(|(w, s)| (w, s.to_string())),
+        }
+        .map(|(w, s)| (w, s.to_string())),
+        CycleCommand::LoggedOutUnidentifiedForward => {
+            if resources
+                .config
+                .profile
+                .hotkey_logged_out_unidentified_cycle
+                && resources
+                    .config
+                    .profile
+                    .hotkey_logged_out_unidentified_cycle_mode
+                    == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+            {
+                resources
+                    .cycle
+                    .cycle_unidentified_logged_out_forward(&resources.session.window_last_character)
+            } else {
+                None
+            }
+        }
+        CycleCommand::LoggedOutUnidentifiedBackward => {
+            if resources
+                .config
+                .profile
+                .hotkey_logged_out_unidentified_cycle
+                && resources
+                    .config
+                    .profile
+                    .hotkey_logged_out_unidentified_cycle_mode
+                    == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+            {
+                resources.cycle.cycle_unidentified_logged_out_backward(
+                    &resources.session.window_last_character,
+                )
+            } else {
+                None
+            }
+        }
         CycleCommand::CharacterHotkey(binding) => {
             debug!(
                 binding = %binding.display_name(),

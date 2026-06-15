@@ -2,18 +2,20 @@
 
 use crate::common::constants::manager_ui::*;
 use crate::config::HotkeyBackendType;
-use crate::config::profile::Profile;
+use crate::config::profile::{LoggedOutUnidentifiedCycleMode, Profile};
 use crate::manager::key_capture::{self, CaptureResult, CaptureState};
 use eframe::egui;
 use std::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureTarget {
-    ToggleSkip,         // Hotkey to temporarily skip current character
-    TogglePreviews,     // Hotkey to toggle thumbnail visibility
-    Profile,            // Hotkey to switch to this profile
-    Character(String),  // Character name for per-character hotkey
-    CustomRule(String), // Custom Window Rule alias (Custom Source Hotkey)
+    ToggleSkip,
+    TogglePreviews,
+    LoggedOutUnidentifiedForward,
+    LoggedOutUnidentifiedBackward,
+    Profile,
+    Character(String),
+    CustomRule(String),
 }
 
 /// State for hotkey settings Manager
@@ -269,14 +271,6 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     changed = true;
                 }
                 ui.label(egui::RichText::new("Cycle hotkeys only work when an EVE window is focused").small().weak());
-
-                ui.add_space(ITEM_SPACING);
-
-                // Logged-out cycling checkbox
-                if ui.checkbox(&mut profile.hotkey_logged_out_cycle, "Include logged-out characters").changed() {
-                    changed = true;
-                }
-                ui.label(egui::RichText::new("Characters that log out will remain in the cycle").small().weak());
             });
         });
 
@@ -389,6 +383,93 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                  ui.add_space(ITEM_SPACING);
                  ui.label(egui::RichText::new("Show/Hide all thumbnails (resets to visible on restart).").weak().small());
 
+                 if profile.hotkey_logged_out_unidentified_cycle
+                    && profile.hotkey_logged_out_unidentified_cycle_mode
+                        == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+                 {
+                    ui.add_space(ITEM_SPACING);
+                    ui.separator();
+                    ui.add_space(ITEM_SPACING);
+
+                    ui.label("Unidentified Login-Screen Clients:");
+                    ui.add_space(ITEM_SPACING / 2.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Forward:");
+                        let binding_text = profile
+                            .hotkey_logged_out_unidentified_cycle_forward
+                            .as_ref()
+                            .map(|b| b.display_name())
+                            .unwrap_or_else(|| "Not set".to_string());
+
+                        let color = if profile
+                            .hotkey_logged_out_unidentified_cycle_forward
+                            .is_none()
+                        {
+                            ui.style().visuals.weak_text_color()
+                        } else {
+                            ui.style().visuals.text_color()
+                        };
+
+                        ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                        if ui.button("⌨ Bind").clicked() {
+                            state.start_key_capture(
+                                CaptureTarget::LoggedOutUnidentifiedForward,
+                                profile.hotkey_backend,
+                            );
+                        }
+
+                        if profile
+                            .hotkey_logged_out_unidentified_cycle_forward
+                            .is_some()
+                            && ui.small_button("✖").on_hover_text("Clear binding").clicked()
+                        {
+                            profile.hotkey_logged_out_unidentified_cycle_forward = None;
+                            changed = true;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Backward:");
+                        let binding_text = profile
+                            .hotkey_logged_out_unidentified_cycle_backward
+                            .as_ref()
+                            .map(|b| b.display_name())
+                            .unwrap_or_else(|| "Not set".to_string());
+
+                        let color = if profile
+                            .hotkey_logged_out_unidentified_cycle_backward
+                            .is_none()
+                        {
+                            ui.style().visuals.weak_text_color()
+                        } else {
+                            ui.style().visuals.text_color()
+                        };
+
+                        ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                        if ui.button("⌨ Bind").clicked() {
+                            state.start_key_capture(
+                                CaptureTarget::LoggedOutUnidentifiedBackward,
+                                profile.hotkey_backend,
+                            );
+                        }
+
+                        if profile
+                            .hotkey_logged_out_unidentified_cycle_backward
+                            .is_some()
+                            && ui.small_button("✖").on_hover_text("Clear binding").clicked()
+                        {
+                            profile.hotkey_logged_out_unidentified_cycle_backward = None;
+                            changed = true;
+                        }
+                    });
+
+                    ui.add_space(ITEM_SPACING);
+                    ui.label(egui::RichText::new("Separate-hotkey mode from Behavior Settings. Only cycles clients with no character name yet.").weak().small());
+                 }
+
 
                  if profile.hotkey_backend == HotkeyBackendType::Evdev {
                       ui.add_space(ITEM_SPACING);
@@ -458,6 +539,12 @@ pub fn render_key_capture_modal(
             let target_name = match state.capture_target {
                 Some(CaptureTarget::ToggleSkip) => "Toggle Skip".to_string(),
                 Some(CaptureTarget::TogglePreviews) => "Toggle Previews".to_string(),
+                Some(CaptureTarget::LoggedOutUnidentifiedForward) => {
+                    "Unidentified Login-Screen Client Forward".to_string()
+                }
+                Some(CaptureTarget::LoggedOutUnidentifiedBackward) => {
+                    "Unidentified Login-Screen Client Backward".to_string()
+                }
                 Some(CaptureTarget::Profile) => "Switch to Profile".to_string(),
                 Some(CaptureTarget::Character(ref name)) => format!("Character: {}", name),
                 Some(CaptureTarget::CustomRule(ref alias)) => format!("Custom Source: {}", alias),
@@ -572,6 +659,16 @@ pub fn render_key_capture_modal(
                                 }
                                 Some(CaptureTarget::TogglePreviews) => {
                                     profile.hotkey_toggle_previews = Some(binding_clone);
+                                    changed = true;
+                                }
+                                Some(CaptureTarget::LoggedOutUnidentifiedForward) => {
+                                    profile.hotkey_logged_out_unidentified_cycle_forward =
+                                        Some(binding_clone);
+                                    changed = true;
+                                }
+                                Some(CaptureTarget::LoggedOutUnidentifiedBackward) => {
+                                    profile.hotkey_logged_out_unidentified_cycle_backward =
+                                        Some(binding_clone);
                                     changed = true;
                                 }
                                 Some(CaptureTarget::Profile) => {

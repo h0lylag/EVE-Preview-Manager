@@ -15,6 +15,10 @@ pub enum CycleCommand {
     Forward(String),
     /// Cycle backward in the specified group
     Backward(String),
+    /// Cycle forward through logged-out clients without remembered character identity
+    LoggedOutUnidentifiedForward,
+    /// Cycle backward through logged-out clients without remembered character identity
+    LoggedOutUnidentifiedBackward,
     /// Triggered when a character-specific hotkey is pressed, carrying its binding configuration for context
     CharacterHotkey(HotkeyBinding),
     /// Triggered when a profile switch hotkey is pressed

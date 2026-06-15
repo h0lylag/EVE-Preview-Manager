@@ -302,6 +302,11 @@ mod tests {
                 client_minimize_on_switch: false,
                 hotkey_input_device: None,
                 hotkey_logged_out_cycle: false,
+                hotkey_logged_out_unidentified_cycle: false,
+                hotkey_logged_out_unidentified_cycle_mode:
+                    crate::config::profile::LoggedOutUnidentifiedCycleMode::SeparateHotkeys,
+                hotkey_logged_out_unidentified_cycle_forward: None,
+                hotkey_logged_out_unidentified_cycle_backward: None,
                 hotkey_require_eve_focus: true,
                 hotkey_cycle_reset_index: false,
                 cycle_groups: vec![crate::config::profile::CycleGroup::default_group()],

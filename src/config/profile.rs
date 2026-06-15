@@ -156,6 +156,16 @@ pub enum HotkeyBackendType {
     Evdev,
 }
 
+/// How unidentified logged-out clients participate in hotkey cycling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoggedOutUnidentifiedCycleMode {
+    /// Cycle unidentified logged-out clients with their own dedicated hotkeys.
+    SeparateHotkeys,
+    /// Append unidentified logged-out clients after configured cycle group entries.
+    AppendToGroups,
+}
+
 /// Top-level configuration with profile support
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -246,6 +256,14 @@ pub struct Profile {
 
     /// Include logged-out characters in hotkey cycle if they were previously logged in during this session
     pub hotkey_logged_out_cycle: bool,
+    /// Include logged-out clients that have not been associated with a character yet
+    pub hotkey_logged_out_unidentified_cycle: bool,
+    /// How unidentified logged-out clients participate in cycle hotkeys
+    pub hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
+    /// Dedicated forward hotkey for unidentified logged-out clients
+    pub hotkey_logged_out_unidentified_cycle_forward: Option<crate::config::HotkeyBinding>,
+    /// Dedicated backward hotkey for unidentified logged-out clients
+    pub hotkey_logged_out_unidentified_cycle_backward: Option<crate::config::HotkeyBinding>,
 
     /// Require EVE window focused for hotkeys to work
     pub hotkey_require_eve_focus: bool,
@@ -288,6 +306,10 @@ pub(crate) fn default_profile_name() -> String {
 
 pub(crate) fn default_hotkey_backend() -> HotkeyBackendType {
     HotkeyBackendType::X11
+}
+
+pub(crate) fn default_logged_out_unidentified_cycle_mode() -> LoggedOutUnidentifiedCycleMode {
+    LoggedOutUnidentifiedCycleMode::SeparateHotkeys
 }
 
 pub(crate) fn default_backup_enabled() -> bool {
@@ -398,6 +420,10 @@ fn default_profiles() -> Vec<Profile> {
         hotkey_backend: default_hotkey_backend(), // Default: X11 (secure, no permissions)
         hotkey_input_device: None, // Default: no device selected (only used by evdev backend)
         hotkey_logged_out_cycle: false, // Default: off
+        hotkey_logged_out_unidentified_cycle: false,
+        hotkey_logged_out_unidentified_cycle_mode: default_logged_out_unidentified_cycle_mode(),
+        hotkey_logged_out_unidentified_cycle_forward: None,
+        hotkey_logged_out_unidentified_cycle_backward: None,
         hotkey_require_eve_focus:
             crate::common::constants::defaults::behavior::HOTKEY_REQUIRE_EVE_FOCUS,
         hotkey_cycle_reset_index: false,
@@ -700,6 +726,21 @@ mod tests {
             crate::common::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
         );
         assert!(!profile.thumbnail_show_logged_out_character_name);
+        assert!(!profile.hotkey_logged_out_unidentified_cycle);
+        assert_eq!(
+            profile.hotkey_logged_out_unidentified_cycle_mode,
+            LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+        );
+        assert!(
+            profile
+                .hotkey_logged_out_unidentified_cycle_forward
+                .is_none()
+        );
+        assert!(
+            profile
+                .hotkey_logged_out_unidentified_cycle_backward
+                .is_none()
+        );
         assert_eq!(
             profile.thumbnail_default_width,
             crate::common::constants::defaults::thumbnail::WIDTH
@@ -741,6 +782,69 @@ mod tests {
         assert_eq!(
             deserialized.cycle_groups[0].hotkey_backward,
             profile.cycle_groups[0].hotkey_backward
+        );
+    }
+
+    #[test]
+    fn test_logged_out_unidentified_cycle_mode_serialization() {
+        let mut profile =
+            Profile::default_with_name("Unidentified Test".to_string(), String::new());
+        profile.hotkey_logged_out_unidentified_cycle = true;
+        profile.hotkey_logged_out_unidentified_cycle_mode =
+            LoggedOutUnidentifiedCycleMode::AppendToGroups;
+        profile.hotkey_logged_out_unidentified_cycle_forward = Some(
+            crate::config::HotkeyBinding::new(16, false, false, false, false),
+        );
+        profile.hotkey_logged_out_unidentified_cycle_backward = Some(
+            crate::config::HotkeyBinding::new(17, false, false, false, false),
+        );
+
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("append_to_groups"));
+
+        let deserialized: Profile = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.hotkey_logged_out_unidentified_cycle);
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_mode,
+            LoggedOutUnidentifiedCycleMode::AppendToGroups
+        );
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_forward,
+            profile.hotkey_logged_out_unidentified_cycle_forward
+        );
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_backward,
+            profile.hotkey_logged_out_unidentified_cycle_backward
+        );
+    }
+
+    #[test]
+    fn test_logged_out_unidentified_cycle_missing_fields_default() {
+        let profile = Profile::default_with_name("Missing Fields".to_string(), String::new());
+        let mut json_value = serde_json::to_value(&profile).unwrap();
+
+        if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("hotkey_logged_out_unidentified_cycle");
+            obj.remove("hotkey_logged_out_unidentified_cycle_mode");
+            obj.remove("hotkey_logged_out_unidentified_cycle_forward");
+            obj.remove("hotkey_logged_out_unidentified_cycle_backward");
+        }
+
+        let deserialized: Profile = serde_json::from_value(json_value).unwrap();
+        assert!(!deserialized.hotkey_logged_out_unidentified_cycle);
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_mode,
+            LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+        );
+        assert!(
+            deserialized
+                .hotkey_logged_out_unidentified_cycle_forward
+                .is_none()
+        );
+        assert!(
+            deserialized
+                .hotkey_logged_out_unidentified_cycle_backward
+                .is_none()
         );
     }
 

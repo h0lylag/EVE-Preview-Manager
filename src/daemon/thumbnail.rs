@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_name_is_empty_for_anonymous_logged_out_identity() {
+    fn effective_name_is_empty_for_unidentified_logged_out_identity() {
         assert_eq!(effective_character_name_from("", None), "");
     }
 
