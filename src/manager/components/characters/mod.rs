@@ -8,7 +8,8 @@ mod modals;
 /// State for character management UI
 pub struct CharactersState {
     pub(crate) show_add_characters_popup: bool,
-    pub(crate) character_selections: std::collections::HashMap<String, bool>,
+    pub(crate) character_selections:
+        std::collections::HashMap<crate::config::profile::CycleSlot, bool>,
     pub(crate) expanded_rows: std::collections::HashMap<String, bool>,
     pub(crate) cached_overrides: std::collections::HashMap<String, CachedOverrides>,
     pub(crate) selected_cycle_group_index: usize,

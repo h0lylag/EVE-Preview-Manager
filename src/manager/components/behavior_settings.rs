@@ -139,7 +139,7 @@ fn window_preview_settings(
         ui,
         &mut profile.client_minimize_on_switch,
         "Minimize clients on switch",
-        "After activating a thumbnail, minimize the other EVE clients.",
+        "After activating a thumbnail, minimize the other tracked source windows.",
         action,
     );
 
@@ -158,8 +158,8 @@ fn window_preview_settings(
     setting_row(
         ui,
         &mut profile.thumbnail_hide_not_focused,
-        "Hide thumbnails without EVE focus",
-        "Hide previews when no EVE client is focused.",
+        "Hide thumbnails without source focus",
+        "Hide previews when no EVE client or custom source is focused.",
         action,
     );
 

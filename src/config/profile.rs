@@ -1,7 +1,7 @@
 //! Profile-based configuration for the Manager
 //!
 //! Supports multiple profiles, each containing visual settings (opacity, border, text),
-//! hotkey bindings, and per-character thumbnail positions.
+//! hotkey bindings, and per-source thumbnail positions.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::common::types::{CharacterSettings, Position};
 
-/// A named group of characters for cycling
+/// A named group of typed sources for cycling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CycleGroup {
     pub name: String,
@@ -29,7 +29,7 @@ pub struct CycleGroup {
     pub hotkey_backward: Option<crate::config::HotkeyBinding>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum CycleSlot {
     #[serde(rename = "eve")]
     Eve(String),
@@ -105,7 +105,7 @@ pub struct CustomWindowRule {
     pub title_pattern: Option<String>,
     /// Pattern to match window class/process (optional)
     pub class_pattern: Option<String>,
-    /// Display name used as the identifier ("Character Name")
+    /// Display name used as the custom-source identity key.
     pub alias: String,
 
     // --- Layout Overrides ---
@@ -255,7 +255,7 @@ pub struct Profile {
 
     // REMOVED LEGACY FIELDS in favor of cycle_groups
     // hotkey_cycle_forward, hotkey_cycle_backward, hotkey_cycle_group are now inside CycleGroup
-    /// Multiple cycle groups, each with its own character list and hotkeys
+    /// Multiple cycle groups, each with its own source list and hotkeys.
     pub cycle_groups: Vec<CycleGroup>,
 
     /// Include logged-out characters in hotkey cycle if they were previously logged in during this session
@@ -269,7 +269,7 @@ pub struct Profile {
     /// Dedicated backward hotkey for unidentified logged-out clients
     pub hotkey_logged_out_unidentified_cycle_backward: Option<crate::config::HotkeyBinding>,
 
-    /// Require EVE window focused for hotkeys to work
+    /// Require a tracked source window to be focused for hotkeys to work.
     pub hotkey_require_eve_focus: bool,
 
     /// Reset cycle index to the beginning when switching between cycle groups
@@ -278,15 +278,14 @@ pub struct Profile {
     /// Hotkey to switch to this profile (global)
     pub hotkey_profile_switch: Option<crate::config::HotkeyBinding>,
 
-    /// Hotkey to temporarily skip the current character in the cycle
+    /// Hotkey to temporarily skip the current source in the cycle.
     pub hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
 
     /// Hotkey to toggle visibility of all thumbnails (ephemeral)
     pub hotkey_toggle_previews: Option<crate::config::HotkeyBinding>,
 
-    /// Per-character hotkey assignments (character_name -> optional binding)
-    /// Allows direct switching to specific characters with dedicated hotkeys
-    /// Display order follows hotkey_cycle_group
+    /// EVE character hotkey assignments (character_name -> binding).
+    /// Custom source hotkeys live on their CustomWindowRule entries.
     pub character_hotkeys: HashMap<String, crate::config::HotkeyBinding>,
 
     // Per-profile character positions and dimensions
@@ -511,6 +510,140 @@ impl Profile {
             true
         }
     }
+
+    pub fn validate_custom_source_aliases(&self) -> std::result::Result<(), String> {
+        let mut seen: HashMap<String, String> = HashMap::new();
+
+        for rule in &self.custom_windows {
+            let trimmed = rule.alias.trim();
+            if trimmed.is_empty() {
+                return Err("Custom source display names cannot be empty".to_string());
+            }
+
+            let normalized = trimmed.to_lowercase();
+            if let Some(existing) = seen.get(&normalized) {
+                return Err(format!(
+                    "Duplicate custom source display name '{}'",
+                    existing
+                ));
+            }
+            seen.insert(normalized, trimmed.to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_custom_source_alias_for_rule(
+        &self,
+        rule_idx: usize,
+        alias: &str,
+    ) -> std::result::Result<String, String> {
+        let trimmed = alias.trim();
+        if trimmed.is_empty() {
+            return Err("Custom source display name cannot be empty".to_string());
+        }
+
+        let normalized = trimmed.to_lowercase();
+        if self
+            .custom_windows
+            .iter()
+            .enumerate()
+            .any(|(idx, rule)| idx != rule_idx && rule.alias.trim().to_lowercase() == normalized)
+        {
+            return Err(format!("Another custom source already uses '{}'", trimmed));
+        }
+
+        Ok(trimmed.to_string())
+    }
+
+    pub fn rename_custom_source_alias(
+        &mut self,
+        rule_idx: usize,
+        new_alias: &str,
+    ) -> std::result::Result<bool, String> {
+        let new_alias = self.validate_custom_source_alias_for_rule(rule_idx, new_alias)?;
+        let Some(rule) = self.custom_windows.get(rule_idx) else {
+            return Err("Custom source rule no longer exists".to_string());
+        };
+
+        let old_alias = rule.alias.clone();
+        if old_alias == new_alias {
+            return Ok(false);
+        }
+
+        let old_alias_normalized = old_alias.trim().to_lowercase();
+        let old_alias_count = self
+            .custom_windows
+            .iter()
+            .filter(|rule| rule.alias.trim().to_lowercase() == old_alias_normalized)
+            .count();
+
+        self.custom_windows[rule_idx].alias = new_alias.clone();
+
+        let old_settings_key = self
+            .custom_source_thumbnails
+            .keys()
+            .find(|key| key.trim().to_lowercase() == old_alias_normalized)
+            .cloned();
+
+        if let Some(settings_key) = old_settings_key
+            && let Some(settings) = self.custom_source_thumbnails.get(&settings_key).cloned()
+        {
+            if old_alias_count > 1 {
+                self.custom_source_thumbnails
+                    .entry(new_alias.clone())
+                    .or_insert(settings);
+            } else if let Some(settings) = self.custom_source_thumbnails.remove(&settings_key) {
+                self.custom_source_thumbnails
+                    .insert(new_alias.clone(), settings);
+            }
+        }
+
+        if old_alias_count == 1 {
+            for group in &mut self.cycle_groups {
+                for slot in &mut group.cycle_list {
+                    if let CycleSlot::Source(name) = slot
+                        && name.trim().to_lowercase() == old_alias_normalized
+                    {
+                        *name = new_alias.clone();
+                    }
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    pub fn remove_custom_source_rule(&mut self, rule_idx: usize) -> bool {
+        if rule_idx >= self.custom_windows.len() {
+            return false;
+        }
+
+        let alias = self.custom_windows.remove(rule_idx).alias;
+        let normalized = alias.trim().to_lowercase();
+        if !self
+            .custom_windows
+            .iter()
+            .any(|rule| rule.alias.trim().to_lowercase() == normalized)
+        {
+            if let Some(settings_key) = self
+                .custom_source_thumbnails
+                .keys()
+                .find(|key| key.trim().to_lowercase() == normalized)
+                .cloned()
+            {
+                self.custom_source_thumbnails.remove(&settings_key);
+            }
+            for group in &mut self.cycle_groups {
+                group.cycle_list.retain(|slot| match slot {
+                    CycleSlot::Eve(_) => true,
+                    CycleSlot::Source(name) => name.trim().to_lowercase() != normalized,
+                });
+            }
+        }
+
+        true
+    }
 }
 
 impl Default for Profile {
@@ -616,6 +749,30 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::types::CharacterSettings;
+
+    fn test_custom_rule(alias: &str) -> CustomWindowRule {
+        CustomWindowRule {
+            title_pattern: Some(alias.to_string()),
+            class_pattern: None,
+            alias: alias.to_string(),
+            default_width: default_thumbnail_width(),
+            default_height: default_thumbnail_height(),
+            limit: false,
+            active_border_color: None,
+            inactive_border_color: None,
+            active_border_size: None,
+            inactive_border_size: None,
+            text_color: None,
+            text_size: None,
+            text_x: None,
+            text_y: None,
+            preview_mode: None,
+            exempt_from_minimize: false,
+            override_render_preview: None,
+            hotkey: None,
+        }
+    }
 
     #[test]
     fn test_profile_default_with_name() {
@@ -634,6 +791,206 @@ mod tests {
         );
         assert!(profile.character_thumbnails.is_empty());
         assert!(profile.custom_source_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn custom_source_alias_validation_allows_eve_name_collision() {
+        let mut profile = Profile::default();
+        profile.character_thumbnails.insert(
+            "h0ly lag".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.custom_windows.push(test_custom_rule("h0ly lag"));
+
+        assert!(profile.validate_custom_source_aliases().is_ok());
+    }
+
+    #[test]
+    fn custom_source_alias_validation_rejects_duplicate_sources_case_insensitively() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Browser"));
+        profile.custom_windows.push(test_custom_rule(" browser "));
+
+        assert!(profile.validate_custom_source_aliases().is_err());
+    }
+
+    #[test]
+    fn rename_custom_source_alias_migrates_source_state_only() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile
+            .custom_source_thumbnails
+            .insert("Old".to_string(), CharacterSettings::new(10, 20, 300, 200));
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("Old".to_string()),
+            CycleSlot::Eve("Old".to_string()),
+        ];
+
+        assert_eq!(profile.rename_custom_source_alias(0, "New"), Ok(true));
+
+        assert!(!profile.custom_source_thumbnails.contains_key("Old"));
+        assert!(profile.custom_source_thumbnails.contains_key("New"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![
+                CycleSlot::Source("New".to_string()),
+                CycleSlot::Eve("Old".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_custom_source_alias_migrates_normalized_source_slots() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule(" Old "));
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("old".to_string()),
+            CycleSlot::Eve("old".to_string()),
+        ];
+
+        assert_eq!(profile.rename_custom_source_alias(0, "New"), Ok(true));
+
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![
+                CycleSlot::Source("New".to_string()),
+                CycleSlot::Eve("old".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_legacy_duplicate_custom_source_copies_shared_settings() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile
+            .custom_source_thumbnails
+            .insert("Old".to_string(), CharacterSettings::new(10, 20, 300, 200));
+        profile.cycle_groups[0]
+            .cycle_list
+            .push(CycleSlot::Source("Old".to_string()));
+
+        assert_eq!(profile.rename_custom_source_alias(1, "New"), Ok(true));
+
+        assert!(profile.custom_source_thumbnails.contains_key("Old"));
+        assert_eq!(
+            profile.custom_source_thumbnails.get("New"),
+            profile.custom_source_thumbnails.get("Old")
+        );
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Source("Old".to_string())]
+        );
+    }
+
+    #[test]
+    fn rename_legacy_duplicate_custom_source_finds_shared_settings_case_insensitively() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile.custom_windows.push(test_custom_rule(" old "));
+        profile
+            .custom_source_thumbnails
+            .insert("Old".to_string(), CharacterSettings::new(10, 20, 300, 200));
+
+        assert_eq!(profile.rename_custom_source_alias(1, "New"), Ok(true));
+
+        assert!(profile.custom_source_thumbnails.contains_key("Old"));
+        assert_eq!(
+            profile.custom_source_thumbnails.get("New"),
+            profile.custom_source_thumbnails.get("Old")
+        );
+    }
+
+    #[test]
+    fn remove_custom_source_rule_cleans_source_state_only_when_alias_is_unused() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Shared"));
+        profile.custom_source_thumbnails.insert(
+            "Shared".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("Shared".to_string()),
+            CycleSlot::Eve("Shared".to_string()),
+        ];
+
+        assert!(profile.remove_custom_source_rule(0));
+
+        assert!(!profile.custom_source_thumbnails.contains_key("Shared"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("Shared".to_string())]
+        );
+    }
+
+    #[test]
+    fn remove_custom_source_rule_preserves_state_for_remaining_normalized_duplicate() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Shared"));
+        profile.custom_windows.push(test_custom_rule(" shared "));
+        profile.custom_source_thumbnails.insert(
+            "Shared".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.cycle_groups[0]
+            .cycle_list
+            .push(CycleSlot::Source("Shared".to_string()));
+
+        assert!(profile.remove_custom_source_rule(0));
+
+        assert!(profile.custom_source_thumbnails.contains_key("Shared"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Source("Shared".to_string())]
+        );
+    }
+
+    #[test]
+    fn remove_custom_source_rule_cleans_normalized_settings_when_alias_is_unused() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule(" Shared "));
+        profile.custom_source_thumbnails.insert(
+            "shared".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("shared".to_string()),
+            CycleSlot::Eve("shared".to_string()),
+        ];
+
+        assert!(profile.remove_custom_source_rule(0));
+
+        assert!(profile.custom_source_thumbnails.is_empty());
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("shared".to_string())]
+        );
+    }
+
+    #[test]
+    fn json_deserialization_preserves_same_name_eve_entries() {
+        let mut config = Config::default();
+        let profile = &mut config.profiles[0];
+        profile.character_thumbnails.insert(
+            "h0ly lag".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.custom_windows.push(test_custom_rule("h0ly lag"));
+        profile.cycle_groups[0]
+            .cycle_list
+            .push(CycleSlot::Eve("h0ly lag".to_string()));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
+        let profile = &deserialized.profiles[0];
+
+        assert!(profile.character_thumbnails.contains_key("h0ly lag"));
+        assert!(profile.custom_source_thumbnails.contains_key("h0ly lag"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("h0ly lag".to_string())]
+        );
     }
 
     #[test]

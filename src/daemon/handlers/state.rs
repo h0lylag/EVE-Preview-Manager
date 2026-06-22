@@ -1,5 +1,6 @@
 use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
+use crate::common::types::SourceIdentity;
 use anyhow::{Context, Result};
 use tracing::debug;
 use x11rb::protocol::xproto::*;
@@ -44,11 +45,11 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
         .session_state
         .window_last_character
         .get(&event.event)
-        .map(String::as_str);
+        .map(|name| SourceIdentity::eve(name.clone()));
 
     if ctx
         .cycle_state
-        .set_current_by_window_with_character(event.event, remembered_character)
+        .set_current_by_window_with_identity(event.event, remembered_character.as_ref())
     {
         debug!(window = event.event, "Synced cycle state to focused window");
     }
@@ -61,11 +62,13 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
 
     if ctx.display_config.hide_when_no_focus && ctx.eve_clients.values().any(|x| !x.is_visible()) {
         for thumbnail in ctx.eve_clients.values_mut() {
-            // Respect per-character override: don't reveal force-hidden thumbnails
+            // Respect per-source override: don't reveal force-hidden thumbnails.
             let should_render = ctx
                 .display_config
-                .character_settings
-                .get(thumbnail.effective_character_name())
+                .settings_for(
+                    thumbnail.source_kind(),
+                    thumbnail.effective_character_name(),
+                )
                 .and_then(|s| s.override_render_preview)
                 .unwrap_or(ctx.display_config.enabled);
 
@@ -73,7 +76,7 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
                 continue;
             }
 
-            debug!(character = %thumbnail.character_name, "Revealing thumbnail due to focus change");
+            debug!(source = %thumbnail.character_name, "Revealing thumbnail due to focus change");
             thumbnail.visibility(true).context(format!(
                 "Failed to show thumbnail '{}' on focus",
                 thumbnail.character_name

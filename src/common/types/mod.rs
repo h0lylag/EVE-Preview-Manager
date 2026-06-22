@@ -6,5 +6,7 @@ pub mod character;
 pub mod geometry;
 
 // Re-export specific types to maintain compatibility
-pub use character::{CharacterSettings, EveWindowType, PreviewMode, ThumbnailState};
+pub use character::{
+    CharacterSettings, EveWindowType, PreviewMode, SourceIdentity, SourceKind, ThumbnailState,
+};
 pub use geometry::{Dimensions, Position, TextOffset};

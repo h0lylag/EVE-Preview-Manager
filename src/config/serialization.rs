@@ -128,13 +128,7 @@ impl From<ProfileHelper> for Profile {
                 cycle_list: helper
                     .hotkey_cycle_group
                     .into_iter()
-                    .map(|name| {
-                        if helper.custom_windows.iter().any(|w| w.alias == name) {
-                            crate::config::profile::CycleSlot::Source(name)
-                        } else {
-                            crate::config::profile::CycleSlot::Eve(name)
-                        }
-                    })
+                    .map(crate::config::profile::CycleSlot::Eve)
                     .collect(),
                 hotkey_forward: helper.hotkey_cycle_forward,
                 hotkey_backward: helper.hotkey_cycle_backward,
@@ -146,8 +140,8 @@ impl From<ProfileHelper> for Profile {
             cycle_groups.push(CycleGroup::default_group());
         }
 
-        // Enforce separation: Ensure no custom sources remain in character_thumbnails
-        let mut character_thumbnails = helper.character_thumbnails;
+        // Preserve EVE entries while copying legacy custom source positions when needed.
+        let character_thumbnails = helper.character_thumbnails;
         let mut custom_source_thumbnails = helper.custom_source_thumbnails;
 
         let custom_aliases: Vec<String> = helper
@@ -156,28 +150,16 @@ impl From<ProfileHelper> for Profile {
             .map(|w| w.alias.clone())
             .collect();
 
-        // Move any entry that matches a custom alias to the correct map
-        let keys_to_move: Vec<String> = character_thumbnails
+        // Copy legacy custom source positions if they were saved in the old
+        // character map, but never remove the EVE entry: names can validly collide.
+        for key in character_thumbnails
             .keys()
             .filter(|k| custom_aliases.contains(k))
-            .cloned()
-            .collect();
-
-        for key in keys_to_move {
-            if let Some(val) = character_thumbnails.remove(&key) {
-                custom_source_thumbnails.insert(key, val);
-            }
-        }
-
-        // Fixup: Go through all cycle groups and ensure any entry matching a custom window is Source
-        let custom_aliases_set = custom_aliases; // move ownership
-        for group in &mut cycle_groups {
-            for slot in &mut group.cycle_list {
-                if let crate::config::profile::CycleSlot::Eve(name) = slot
-                    && custom_aliases_set.contains(name)
-                {
-                    *slot = crate::config::profile::CycleSlot::Source(name.clone());
-                }
+        {
+            if !custom_source_thumbnails.contains_key(key)
+                && let Some(val) = character_thumbnails.get(key)
+            {
+                custom_source_thumbnails.insert(key.clone(), val.clone());
             }
         }
 

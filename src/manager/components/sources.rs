@@ -60,6 +60,12 @@ impl SourcesTab {
                 .weak()
                 .small(),
         );
+        if let Err(err) = profile.validate_custom_source_aliases() {
+            ui.colored_label(egui::Color32::RED, err);
+        }
+        if let Some(err) = &self.error_msg {
+            ui.colored_label(egui::Color32::RED, err);
+        }
         ui.add_space(10.0);
 
         // -- Rules List (Expandable) --
@@ -78,6 +84,7 @@ impl SourcesTab {
                 }
 
                 let mut remove_idx = None;
+                let mut pending_alias_rename = None;
 
                 for (idx, rule) in profile.custom_windows.iter_mut().enumerate() {
                     let is_expanded = self.expanded_rows.contains(&idx);
@@ -127,8 +134,9 @@ impl SourcesTab {
                                 .show(ui, |ui| {
                                     // Alias
                                     ui.label("Display Name:");
-                                    if ui.text_edit_singleline(&mut rule.alias).changed() {
-                                        changed = true;
+                                    let mut alias_text = rule.alias.clone();
+                                    if ui.text_edit_singleline(&mut alias_text).changed() {
+                                        pending_alias_rename = Some((idx, alias_text));
                                     }
                                     ui.end_row();
 
@@ -187,7 +195,7 @@ impl SourcesTab {
                                         }
 
                                         let bind_text =
-                                            if hotkey_state.is_capturing_custom_rule(&rule.alias) {
+                                            if hotkey_state.is_capturing_custom_rule(idx) {
                                                 "Capturing..."
                                             } else {
                                                 "⌨ Bind"
@@ -195,7 +203,7 @@ impl SourcesTab {
 
                                         if ui.button(bind_text).clicked() {
                                             hotkey_state.start_key_capture_for_custom_rule(
-                                                rule.alias.clone(),
+                                                idx,
                                                 profile.hotkey_backend,
                                             );
                                         }
@@ -661,8 +669,22 @@ impl SourcesTab {
                     ui.separator();
                 }
 
+                if let Some((idx, alias)) = pending_alias_rename {
+                    match profile.rename_custom_source_alias(idx, &alias) {
+                        Ok(alias_changed) => {
+                            if alias_changed {
+                                changed = true;
+                            }
+                            self.error_msg = None;
+                        }
+                        Err(err) => {
+                            self.error_msg = Some(err);
+                        }
+                    }
+                }
+
                 if let Some(idx) = remove_idx {
-                    profile.custom_windows.remove(idx);
+                    profile.remove_custom_source_rule(idx);
                     self.expanded_rows.remove(&idx);
                     changed = true;
                 }
@@ -804,13 +826,34 @@ impl SourcesTab {
 
             ui.add_space(10.0);
 
-            let is_valid = !self.new_rule.alias.is_empty()
+            let alias_validation = profile
+                .validate_custom_source_alias_for_rule(
+                    profile.custom_windows.len(),
+                    &self.new_rule.alias,
+                )
+                .ok();
+            if alias_validation.is_none() && !self.new_rule.alias.trim().is_empty() {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    profile
+                        .validate_custom_source_alias_for_rule(
+                            profile.custom_windows.len(),
+                            &self.new_rule.alias,
+                        )
+                        .unwrap_err(),
+                );
+            }
+
+            let is_valid = alias_validation.is_some()
                 && (self.new_rule.class_pattern.is_some() || self.new_rule.title_pattern.is_some());
 
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(is_valid, |ui| {
                     if ui.button("Add Source").clicked() {
                         // Inherit global defaults for dimensions
+                        if let Some(alias) = alias_validation.clone() {
+                            self.new_rule.alias = alias;
+                        }
                         self.new_rule.default_width = profile.thumbnail_default_width;
                         self.new_rule.default_height = profile.thumbnail_default_height;
 

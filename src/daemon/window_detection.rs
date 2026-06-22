@@ -8,7 +8,7 @@ use x11rb::protocol::xproto::*;
 
 use crate::common::constants;
 use crate::common::ipc::DaemonMessage;
-use crate::common::types::{Dimensions, Position};
+use crate::common::types::{Dimensions, Position, SourceIdentity, SourceKind};
 use crate::config::DaemonConfig;
 use crate::config::DisplayConfig;
 use crate::config::profile::CustomWindowRule;
@@ -31,8 +31,38 @@ fn source_window_position(ctx: &AppContext, window: Window) -> Option<Position> 
 #[derive(Debug, Clone)]
 pub struct WindowIdentity {
     pub name: String,
-    pub is_eve: bool,
+    pub kind: SourceKind,
     pub rule: Option<CustomWindowRule>,
+}
+
+impl WindowIdentity {
+    pub fn new_eve(name: String) -> Self {
+        Self {
+            name,
+            kind: SourceKind::Eve,
+            rule: None,
+        }
+    }
+
+    pub fn new_custom(name: String, rule: CustomWindowRule) -> Self {
+        Self {
+            name,
+            kind: SourceKind::Custom,
+            rule: Some(rule),
+        }
+    }
+
+    pub fn source_identity(&self) -> SourceIdentity {
+        SourceIdentity::new(self.kind, self.name.clone())
+    }
+
+    pub fn is_eve(&self) -> bool {
+        self.kind.is_eve()
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.kind.is_custom()
+    }
 }
 
 /// Identify a window as either an EVE client or a Custom Source
@@ -45,11 +75,7 @@ pub fn identify_window(
     // Check for EVE Client identity first (Standard/Steam/Wine) using robust detection
     if let Some(eve_window) = check_eve_window_internal(ctx, window, state)? {
         let name = eve_window;
-        return Ok(Some(WindowIdentity {
-            name,
-            is_eve: true,
-            rule: None,
-        }));
+        return Ok(Some(WindowIdentity::new_eve(name)));
     }
 
     // 2. Check Custom Rules
@@ -164,12 +190,10 @@ pub fn identify_window(
                 class = %wm_class,
                 "Identified Custom Source"
             );
-            state.update_last_character(window, &rule.alias);
-            return Ok(Some(WindowIdentity {
-                name: rule.alias.clone(),
-                is_eve: false,
-                rule: Some(rule.clone()),
-            }));
+            return Ok(Some(WindowIdentity::new_custom(
+                rule.alias.clone(),
+                rule.clone(),
+            )));
         }
     }
 
@@ -259,7 +283,7 @@ pub fn check_and_create_window<'a>(
     };
 
     // Apply Limit Logic for Custom Sources
-    if !identity.is_eve {
+    if identity.is_custom() {
         // FILTER 1: Must be mapped and viewable OR minimized
         // We removed the strict MapState::VIEWABLE check to allow minimized windows to be detected.
         // Utility windows are still filtered by `is_normal_window` below.
@@ -356,7 +380,7 @@ pub fn check_and_create_window<'a>(
         // Note: existing_thumbnails contains previously processed windows
         if existing_thumbnails
             .values()
-            .any(|t| t.character_name == identity.name)
+            .any(|t| t.source_kind().is_custom() && t.character_name == identity.name)
         {
             debug!(
                 window = window,
@@ -371,12 +395,12 @@ pub fn check_and_create_window<'a>(
     // and `handle_create_notify` calls `identify_window` before calling this.
     // This function is strictly for determining if we should create a renderable thumbnail.
 
-    let remembered_character_name = if identity.is_eve {
+    let remembered_character_name = if identity.is_eve() {
         state.window_last_character.get(&window).cloned()
     } else {
         None
     };
-    let character_name = identity.name;
+    let character_name = identity.name.clone();
     let effective_character_name = if character_name.is_empty() {
         remembered_character_name.as_deref().unwrap_or("")
     } else {
@@ -385,13 +409,13 @@ pub fn check_and_create_window<'a>(
 
     // Get saved position and dimensions
     // Determine which map to query based on identity type
-    let settings_map = if identity.is_eve {
+    let settings_map = if identity.is_eve() {
         &daemon_config.character_thumbnails
     } else {
         &daemon_config.custom_source_thumbnails
     };
 
-    let profile_map = if identity.is_eve {
+    let profile_map = if identity.is_eve() {
         &daemon_config.profile.character_thumbnails
     } else {
         &daemon_config.profile.custom_source_thumbnails
@@ -419,8 +443,7 @@ pub fn check_and_create_window<'a>(
     // NOTE: override_render_preview for custom sources is stored in the rule and resolved
     // by build_display_config(); the raw daemon maps only hold position/size.
     let force_enable = display_config
-        .character_settings
-        .get(effective_character_name)
+        .settings_for(identity.kind, effective_character_name)
         .and_then(|s| s.override_render_preview)
         .unwrap_or(false);
 
@@ -457,7 +480,7 @@ pub fn check_and_create_window<'a>(
         (dims, mode)
     } else {
         // No saved settings
-        if let Some(rule) = identity.rule {
+        if let Some(rule) = &identity.rule {
             // Use Custom Rule defaults
             (
                 Dimensions::new(rule.default_width, rule.default_height),
@@ -476,6 +499,7 @@ pub fn check_and_create_window<'a>(
 
     let mut thumbnail = Thumbnail::new(
         ctx,
+        identity.kind,
         character_name.clone(),
         remembered_character_name,
         window,
@@ -503,13 +527,13 @@ pub fn check_and_create_window<'a>(
     debug!(
         window = window,
         character = %character_name,
-        is_custom = !identity.is_eve,
+        is_custom = identity.is_custom(),
         "Created thumbnail"
     );
     Ok(Some(thumbnail))
 }
 
-/// Initial scan for existing EVE windows to populate thumbnails
+// Initial scan for existing EVE clients and custom sources to populate thumbnails.
 use super::cycle_state::CycleState;
 
 pub fn scan_eve_windows<'a>(
@@ -543,7 +567,8 @@ pub fn scan_eve_windows<'a>(
         };
 
         // Register identified window with CycleState
-        cycle_state.add_window(identity.name.clone(), w);
+        let cycle_identity = (!identity.name.is_empty()).then(|| identity.source_identity());
+        cycle_state.add_window(cycle_identity, w);
 
         // 2. Try to create thumbnail
         match check_and_create_window(
@@ -568,7 +593,7 @@ pub fn scan_eve_windows<'a>(
 
                 match geom_result {
                     Ok(geom) => {
-                        // Update character_thumbnails in memory (skip logged-out clients with empty name)
+                        // Update the typed runtime settings map (skip logged-out clients with empty name).
                         let effective_character_name = eve.effective_character_name().to_string();
                         if !effective_character_name.is_empty() {
                             let settings = crate::common::types::CharacterSettings::new(
@@ -578,15 +603,7 @@ pub fn scan_eve_windows<'a>(
                                 eve.dimensions.height,
                             );
 
-                            // Route settings to the correct map based on whether this alias matches a Custom Rule.
-                            // This ensures separation even if originally detected as a generic client.
-                            let is_custom_alias = daemon_config
-                                .profile
-                                .custom_windows
-                                .iter()
-                                .any(|r| r.alias == effective_character_name);
-
-                            if is_custom_alias {
+                            if eve.source_kind().is_custom() {
                                 // NOTE: specific check to preserve existing overrides (like preview_mode)
                                 // if they were already loaded from the profile config key.
                                 if let Some(existing) = daemon_config
@@ -628,10 +645,10 @@ pub fn scan_eve_windows<'a>(
                 eve_clients.insert(w, eve);
             }
             Ok(None) => {
-                // NOTE: Even with rendering disabled, new characters must reach the Manager via
-                // PositionChanged so they appear in the character manager for configuration.
+                // NOTE: Even with rendering disabled, new EVE characters and custom sources
+                // must reach the Manager via PositionChanged so they appear for configuration.
                 if !display_config.enabled && !identity.name.is_empty() {
-                    let is_new = if identity.is_eve {
+                    let is_new = if identity.is_eve() {
                         !daemon_config
                             .character_thumbnails
                             .contains_key(&identity.name)
@@ -664,7 +681,7 @@ pub fn scan_eve_windows<'a>(
                             ww,
                             hh,
                         );
-                        if identity.is_eve {
+                        if identity.is_eve() {
                             daemon_config
                                 .character_thumbnails
                                 .insert(identity.name.clone(), settings);
@@ -679,11 +696,11 @@ pub fn scan_eve_windows<'a>(
                             y: spawn_position.y,
                             width: ww,
                             height: hh,
-                            is_custom: !identity.is_eve,
+                            is_custom: identity.is_custom(),
                         });
                         let _ = status_tx.send(DaemonMessage::CharacterDetected {
                             name: identity.name.clone(),
-                            is_custom: !identity.is_eve,
+                            is_custom: identity.is_custom(),
                         });
                     }
                 }

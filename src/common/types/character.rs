@@ -1,7 +1,58 @@
-//! Character-specific types and settings for EVE Online windows
+//! Source identity and per-source settings for preview windows
 
 use super::geometry::{Dimensions, Position};
 use serde::{Deserialize, Serialize};
+
+/// Distinguishes first-party EVE clients from user-configured custom sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Eve,
+    Custom,
+}
+
+impl SourceKind {
+    pub fn from_is_custom(is_custom: bool) -> Self {
+        if is_custom { Self::Custom } else { Self::Eve }
+    }
+
+    pub fn is_custom(self) -> bool {
+        matches!(self, Self::Custom)
+    }
+
+    pub fn is_eve(self) -> bool {
+        matches!(self, Self::Eve)
+    }
+}
+
+/// A typed source identity. The name remains user-facing, but the kind keeps
+/// same-name EVE characters and custom sources separate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceIdentity {
+    pub kind: SourceKind,
+    pub name: String,
+}
+
+impl SourceIdentity {
+    pub fn new(kind: SourceKind, name: impl Into<String>) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+        }
+    }
+
+    pub fn eve(name: impl Into<String>) -> Self {
+        Self::new(SourceKind::Eve, name)
+    }
+
+    pub fn custom(name: impl Into<String>) -> Self {
+        Self::new(SourceKind::Custom, name)
+    }
+
+    pub fn from_parts(name: impl Into<String>, is_custom: bool) -> Self {
+        Self::new(SourceKind::from_is_custom(is_custom), name)
+    }
+}
 
 /// EVE Online window type classification
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +114,7 @@ pub enum PreviewMode {
     Static { color: String },
 }
 
-/// Per-character settings: position and thumbnail dimensions
+/// Per-source settings: position, thumbnail dimensions, and visual overrides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "CharacterSettingsProxy", into = "CharacterSettingsProxy")]
 pub struct CharacterSettings {
@@ -72,7 +123,7 @@ pub struct CharacterSettings {
     /// Thumbnail dimensions (0 = use auto-detect)
     pub dimensions: Dimensions,
 
-    // -- Advanced Character Settings --
+    // -- Advanced Source Settings --
     pub alias: Option<String>,
     pub notes: Option<String>,
     pub override_active_border_color: Option<String>,
@@ -81,9 +132,9 @@ pub struct CharacterSettings {
     pub override_inactive_border_size: Option<u16>,
     pub override_text_color: Option<String>,
     pub preview_mode: PreviewMode,
-    /// If true, this character is exempt from minimize-on-switch behavior
+    /// If true, this source is exempt from minimize-on-switch behavior
     pub exempt_from_minimize: bool,
-    /// Per-character override for preview rendering.
+    /// Per-source override for preview rendering.
     /// None = use global setting, Some(true) = always show, Some(false) = always hide
     pub override_render_preview: Option<bool>,
 }

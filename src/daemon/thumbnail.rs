@@ -1,6 +1,6 @@
 //! Thumbnail window management
 //!
-//! Creates and manages X11 overlay windows that display scaled previews of EVE clients.
+//! Creates and manages X11 overlay windows that display scaled previews of tracked sources.
 //! High-level logic that delegates rendering to `renderer::ThumbnailRenderer`.
 
 use anyhow::{Context, Result};
@@ -9,7 +9,7 @@ use x11rb::protocol::damage::Damage;
 use x11rb::protocol::xproto::{ConnectionExt, Window};
 
 use crate::common::constants::positioning;
-use crate::common::types::{Dimensions, Position, ThumbnailState};
+use crate::common::types::{Dimensions, Position, SourceIdentity, SourceKind, ThumbnailState};
 use crate::config::DisplayConfig;
 use crate::x11::AppContext;
 
@@ -62,6 +62,7 @@ pub struct InputState {
 /// It delegates actual X11 operations (rendering, window management) to `ThumbnailRenderer`.
 pub struct Thumbnail<'a> {
     // === Application State (public, frequently accessed) ===
+    source_kind: SourceKind,
     pub character_name: String,
     remembered_character_name: Option<String>,
     pub state: ThumbnailState,
@@ -85,15 +86,16 @@ impl<'a> Thumbnail<'a> {
     ///
     /// # Arguments
     /// * `ctx` - Application context.
-    /// * `character_name` - Live character name reported by the source window.
-    /// * `remembered_character_name` - Last known character for a logged-out source window.
-    /// * `src` - Source EVE window ID.
+    /// * `character_name` - Live name reported by the source window.
+    /// * `remembered_character_name` - Last known EVE character for a logged-out client.
+    /// * `src` - Source window ID.
     /// * `font_renderer` - Renderer for shared font resources.
     /// * `position` - Optional initial position (if loaded from config).
     /// * `dimensions` - Initial size.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
+        source_kind: SourceKind,
         character_name: String,
         remembered_character_name: Option<String>,
         src: Window,
@@ -117,14 +119,14 @@ impl<'a> Thumbnail<'a> {
         let src_geom = ctx
             .conn
             .get_geometry(src)
-            .context("Failed to send geometry query for source EVE window")?
+            .context("Failed to send geometry query for source window")?
             .reply()
             .context(format!(
                 "Failed to get geometry for source window {} (character: '{}')",
                 src, character_name
             ))?;
 
-        // Use saved position OR top-left of EVE window with 20px padding
+        // Use saved position OR top-left of the source window with the standard padding.
         let Position { x, y } = position.unwrap_or_else(|| {
             Position::new(
                 src_geom.x + positioning::DEFAULT_SPAWN_OFFSET,
@@ -152,6 +154,7 @@ impl<'a> Thumbnail<'a> {
 
         let renderer = ThumbnailRenderer::new(
             ctx,
+            source_kind,
             style_character_name,
             display_character_name,
             src,
@@ -164,6 +167,7 @@ impl<'a> Thumbnail<'a> {
         )?;
 
         Ok(Self {
+            source_kind,
             character_name,
             remembered_character_name,
             state: ThumbnailState::default(),
@@ -178,9 +182,13 @@ impl<'a> Thumbnail<'a> {
 
     // Accessors
 
-    /// Returns the live character name reported by the source window.
+    /// Returns the live display name reported by the source window.
     pub fn live_character_name(&self) -> &str {
         &self.character_name
+    }
+
+    pub fn source_kind(&self) -> SourceKind {
+        self.source_kind
     }
 
     /// Returns the remembered session identity synchronized from SessionState.
@@ -193,9 +201,14 @@ impl<'a> Thumbnail<'a> {
         self.remembered_character_name = remembered_character_name.filter(|name| !name.is_empty());
     }
 
-    /// Returns the identity used for behavior and per-character settings.
+    /// Returns the name used for behavior and per-source settings.
     pub fn effective_character_name(&self) -> &str {
         effective_character_name_from(self.live_character_name(), self.remembered_character_name())
+    }
+
+    pub fn effective_source_identity(&self) -> Option<SourceIdentity> {
+        let name = self.effective_character_name();
+        (!name.is_empty()).then(|| SourceIdentity::new(self.source_kind, name.to_string()))
     }
 
     /// Returns the label that should be shown on the thumbnail.
@@ -209,6 +222,7 @@ impl<'a> Thumbnail<'a> {
 
     fn overlay_identity<'b>(&'b self, display_config: &DisplayConfig) -> OverlayIdentity<'b> {
         OverlayIdentity {
+            kind: self.source_kind,
             style: self.effective_character_name(),
             display: self.display_character_name(display_config),
         }
@@ -219,7 +233,7 @@ impl<'a> Thumbnail<'a> {
         self.renderer.window
     }
 
-    /// Returns the source EVE window ID.
+    /// Returns the source application window ID.
     pub fn src(&self) -> Window {
         self.renderer.src
     }
@@ -358,11 +372,10 @@ impl<'a> Thumbnail<'a> {
         display_config: &DisplayConfig,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
-        // Resolve per-character preview visibility override against the global setting.
+        // Resolve per-source preview visibility override against the global setting.
         // override_render_preview: None = use global, Some(true) = force on, Some(false) = force off
         let should_render = display_config
-            .character_settings
-            .get(self.effective_character_name())
+            .settings_for(self.source_kind, self.effective_character_name())
             .and_then(|s| s.override_render_preview)
             .unwrap_or(display_config.enabled);
 
@@ -377,8 +390,7 @@ impl<'a> Thumbnail<'a> {
         }
 
         let preview_mode = display_config
-            .character_settings
-            .get(self.effective_character_name())
+            .settings_for(self.source_kind, self.effective_character_name())
             .map(|settings| &settings.preview_mode)
             .unwrap_or(&self.preview_mode);
 

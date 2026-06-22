@@ -52,6 +52,22 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    pub fn validate_active_profile(&mut self) -> Result<()> {
+        if let Some(profile) = self.config.get_active_profile() {
+            profile
+                .validate_custom_source_aliases()
+                .map_err(|err| anyhow::anyhow!(err))
+                .with_context(|| {
+                    format!(
+                        "Profile '{}' has invalid custom source aliases",
+                        profile.profile_name
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+
     pub fn new(config: Config, debug_mode: bool) -> Self {
         let selected_profile_idx = config
             .profiles
@@ -91,6 +107,16 @@ impl SharedState {
                 .cloned()
                 .unwrap_or_default();
 
+            selected_profile
+                .validate_custom_source_aliases()
+                .map_err(|err| anyhow::anyhow!(err))
+                .with_context(|| {
+                    format!(
+                        "Profile '{}' has invalid custom source aliases",
+                        selected_profile.profile_name
+                    )
+                })?;
+
             let mut character_thumbnails = selected_profile.character_thumbnails.clone();
             let mut custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
 
@@ -107,21 +133,6 @@ impl SharedState {
                 info!("Auto-save disabled: Syncing explicit disk positions to daemon");
                 character_thumbnails = disk_profile.character_thumbnails.clone();
                 custom_source_thumbnails = disk_profile.custom_source_thumbnails.clone();
-            }
-
-            // Filter based on custom rules in profile.
-            let rules = &selected_profile.custom_windows;
-            let mut move_keys = Vec::new();
-            for key in character_thumbnails.keys() {
-                if rules.iter().any(|r| r.alias == *key) {
-                    move_keys.push(key.clone());
-                }
-            }
-
-            for key in move_keys {
-                if let Some(val) = character_thumbnails.remove(&key) {
-                    custom_source_thumbnails.insert(key, val);
-                }
             }
 
             // Build hotkeys for profile switching (requires looking at all profiles)
@@ -151,6 +162,8 @@ impl SharedState {
     }
 
     pub fn save_config(&mut self, mode: SaveMode) -> Result<()> {
+        self.validate_active_profile()?;
+
         // Prepare config for saving
         // If mode is IMPLICIT (e.g. on exit or settings change),
         // we must ensure we don't accidentally persist transient window movements for profiles
@@ -205,6 +218,8 @@ impl SharedState {
     /// Save config to disk WITHOUT syncing to daemon via IPC
     /// Used when the Daemon already knows about the change (e.g., it initiated the PositionChanged event)
     pub fn save_config_no_sync(&mut self, mode: SaveMode) -> Result<()> {
+        self.validate_active_profile()?;
+
         let mut config_to_save = self.config.clone();
 
         if mode == SaveMode::Implicit {

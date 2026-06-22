@@ -12,6 +12,7 @@ use x11rb::protocol::xproto::*;
 
 use crate::common::constants::eve;
 use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
+use crate::common::types::SourceIdentity;
 use crate::config::DaemonConfig;
 use crate::config::profile::LoggedOutUnidentifiedCycleMode;
 use crate::input::listener::{self, CycleCommand, TimestampedCommand};
@@ -22,7 +23,7 @@ use crate::x11::{
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 
 use super::border_update::sync_focused_borders;
-use super::cycle_state::CycleState;
+use super::cycle_state::{CycleActivation, CycleState};
 use super::dispatcher::{EventContext, handle_event};
 use super::font;
 use super::session_state::SessionState;
@@ -39,7 +40,7 @@ struct HotkeyResources {
     #[allow(dead_code)]
     handle: Option<Vec<JoinHandle<()>>>,
     rx: mpsc::Receiver<TimestampedCommand>,
-    groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
+    groups: HashMap<crate::config::HotkeyBinding, Vec<SourceIdentity>>,
 }
 
 struct DaemonResources<'a> {
@@ -47,6 +48,78 @@ struct DaemonResources<'a> {
     session: SessionState,
     cycle: CycleState,
     eve_clients: HashMap<Window, Thumbnail<'a>>,
+}
+
+fn direct_tracked_source_window(
+    thumbnails: &HashMap<Window, Thumbnail<'_>>,
+    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
+    window: Window,
+) -> Option<Window> {
+    if active_windows.is_some_and(|windows| windows.contains_key(&window)) {
+        return Some(window);
+    }
+
+    if thumbnails.contains_key(&window) {
+        return Some(window);
+    }
+
+    thumbnails.iter().find_map(|(&source_window, thumbnail)| {
+        (thumbnail.window() == window
+            || thumbnail.src() == window
+            || thumbnail.parent() == Some(window))
+        .then_some(source_window)
+    })
+}
+
+fn tracked_source_window_for_window(
+    ctx: &AppContext<'_>,
+    thumbnails: &HashMap<Window, Thumbnail<'_>>,
+    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
+    window: Window,
+) -> Option<Window> {
+    if let Some(source_window) = direct_tracked_source_window(thumbnails, active_windows, window) {
+        return Some(source_window);
+    }
+
+    let mut current = window;
+    for _ in 0..10 {
+        let parent = ctx
+            .conn
+            .query_tree(current)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| reply.parent)?;
+
+        if let Some(source_window) =
+            direct_tracked_source_window(thumbnails, active_windows, parent)
+        {
+            debug!(
+                child = window,
+                parent = parent,
+                source_window = source_window,
+                "Matched focused window to tracked source ancestor"
+            );
+            return Some(source_window);
+        }
+
+        if parent == ctx.screen.root || parent == 0 {
+            break;
+        }
+        current = parent;
+    }
+
+    None
+}
+
+fn active_tracked_source_window(
+    ctx: &AppContext<'_>,
+    thumbnails: &HashMap<Window, Thumbnail<'_>>,
+) -> Option<Window> {
+    let active_window = crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms)
+        .ok()
+        .flatten()?;
+
+    tracked_source_window_for_window(ctx, thumbnails, None, active_window)
 }
 
 enum DaemonControlMessage {
@@ -115,7 +188,7 @@ fn initialize_state(
     let session_state = SessionState::new();
     debug!(
         count = daemon_config.character_thumbnails.len(),
-        "Loaded character positions from config"
+        "Loaded EVE character positions from config"
     );
 
     // Initialize cycle state from config
@@ -128,9 +201,9 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
     // Create channel for hotkey thread → main loop
     let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
 
-    // Build character hotkey list from ALL defined character hotkeys
-    // This ensures detached characters still have their hotkeys registered
-    let mut character_hotkeys: Vec<_> = daemon_config
+    // Build direct-source hotkey listener list from all EVE character hotkeys.
+    // This ensures detached characters still have their hotkeys registered.
+    let mut source_hotkeys: Vec<_> = daemon_config
         .profile
         .character_hotkeys
         .values()
@@ -139,9 +212,10 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
 
     let profile_hotkeys: Vec<_> = daemon_config.profile_hotkeys.keys().cloned().collect();
 
-    // Group characters by hotkey binding to support cycling through multiple characters on the same key
-    // This allows users to bind 'F1' to Cycle [Char1, Char2] effectively
-    let mut hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>> = HashMap::new();
+    // Group typed sources by hotkey binding so one key can rotate through every
+    // EVE character or custom source assigned to it.
+    let mut hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<SourceIdentity>> =
+        HashMap::new();
 
     // Iterate over ALL defined character hotkeys, not just those in the cycle group.
     // This allows characters outside the cycle group to still be activated via hotkey.
@@ -149,7 +223,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
         hotkey_groups
             .entry(binding.clone())
             .or_default()
-            .push(char_name.clone());
+            .push(SourceIdentity::eve(char_name.clone()));
     }
 
     // Include Custom Source hotkeys in the groups
@@ -158,28 +232,28 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
             hotkey_groups
                 .entry(binding.clone())
                 .or_default()
-                .push(rule.alias.clone());
+                .push(SourceIdentity::custom(rule.alias.clone()));
 
-            character_hotkeys.push(binding.clone());
+            source_hotkeys.push(binding.clone());
         }
     }
 
     debug!(
         unique_hotkeys = hotkey_groups.len(),
         cycle_groups = daemon_config.profile.cycle_groups.len(),
-        "Built per-character hotkey groups"
+        "Built direct-source hotkey groups"
     );
 
     // Debug: log each hotkey group
-    for (binding, chars) in &hotkey_groups {
+    for (binding, sources) in &hotkey_groups {
         debug!(
             binding = %binding.display_name(),
-            characters = ?chars,
+            sources = ?sources,
             "Hotkey group registered"
         );
     }
 
-    // Spawn hotkey listener (start if any hotkeys configured: cycle or per-character)
+    // Spawn hotkey listener (start if any hotkeys configured: cycle or direct-source)
     let mut cycle_hotkeys: Vec<(CycleCommand, crate::config::HotkeyBinding)> = daemon_config
         .profile
         .cycle_groups
@@ -217,14 +291,14 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
     }
 
     let has_cycle_keys = !cycle_hotkeys.is_empty();
-    let has_character_hotkeys = !character_hotkeys.is_empty();
+    let has_direct_source_hotkeys = !source_hotkeys.is_empty();
     let _has_profile_hotkeys = !profile_hotkeys.is_empty();
     let has_profile_hotkeys = !profile_hotkeys.is_empty();
     let has_skip_key = daemon_config.profile.hotkey_toggle_skip.is_some();
     let has_toggle_previews_key = daemon_config.profile.hotkey_toggle_previews.is_some();
 
     let hotkey_handle = if has_cycle_keys
-        || has_character_hotkeys
+        || has_direct_source_hotkeys
         || has_profile_hotkeys
         || has_skip_key
         || has_toggle_previews_key
@@ -235,7 +309,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
 
         let hotkey_config = HotkeyConfiguration {
             cycle_hotkeys,
-            character_hotkeys: character_hotkeys.clone(),
+            character_hotkeys: source_hotkeys.clone(),
             profile_hotkeys: profile_hotkeys.clone(),
             toggle_skip_key: daemon_config.profile.hotkey_toggle_skip.clone(),
             toggle_previews_key: daemon_config.profile.hotkey_toggle_previews.clone(),
@@ -256,7 +330,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
                             enabled = true,
                             backend = "x11",
                             has_cycle_keys = has_cycle_keys,
-                            has_character_hotkeys = has_character_hotkeys,
+                            has_direct_source_hotkeys = has_direct_source_hotkeys,
                             has_profile_hotkeys = has_profile_hotkeys,
                             has_skip_key = has_skip_key,
                             has_toggle_previews_key = has_toggle_previews_key,
@@ -288,7 +362,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
                                 enabled = true,
                                 backend = "evdev",
                                 has_cycle_keys = has_cycle_keys,
-                                has_character_hotkeys = has_character_hotkeys,
+                                has_direct_source_hotkeys = has_direct_source_hotkeys,
                                 has_profile_hotkeys = has_profile_hotkeys,
                                 has_skip_key = has_skip_key,
                                 has_toggle_previews_key = has_toggle_previews_key,
@@ -327,7 +401,7 @@ async fn run_event_loop(
     mut font_renderer: crate::daemon::font::FontRenderer,
     mut resources: DaemonResources<'_>,
     mut hotkey_rx: mpsc::Receiver<TimestampedCommand>,
-    hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<String>>,
+    hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<SourceIdentity>>,
     mut sigusr1: tokio::signal::unix::Signal,
     config_rx: IpcReceiver<ConfigMessage>,
     status_tx: IpcSender<DaemonMessage>,
@@ -415,21 +489,25 @@ async fn run_event_loop(
         }
 
         // Sync allowed windows with backend
-        // Include both EVE client source windows AND thumbnail windows to ensure hotkeys
-        // work when focus is on either the clients themselves or their thumbnails.
+        // Include tracked source, parent/frame, and thumbnail windows so hotkeys
+        // work when focus is on a source, its WM frame, or its preview overlay.
         // This is critical when thumbnails are hidden/shown or clients are minimized.
         {
             let mut current_windows: HashSet<u32> = HashSet::new();
 
-            // allow hotkeys for all EVE client source windows known to the cycle state
+            // allow hotkeys for all tracked source windows known to the cycle state
             // (including those without thumbnails/previews)
             for src_window in resources.cycle.get_active_windows().keys() {
                 current_windows.insert(*src_window);
             }
 
-            // allow hotkeys for thumbnail overlay windows
+            // allow hotkeys for thumbnail overlay, source, and known parent/frame windows
             for thumbnail in resources.eve_clients.values() {
                 current_windows.insert(thumbnail.window());
+                current_windows.insert(thumbnail.src());
+                if let Some(parent) = thumbnail.parent() {
+                    current_windows.insert(parent);
+                }
             }
 
             let need_update = {
@@ -489,53 +567,21 @@ async fn run_event_loop(
                 let should_process = if resources.config.profile.hotkey_require_eve_focus {
                     match crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms) {
                         Ok(Some(active_window)) => {
-                            // Check if active window is a known EVE window (thumbnail OR just identified)
-                            let is_known = resources.eve_clients.contains_key(&active_window) ||
-                                         resources.cycle.get_active_windows().contains_key(&active_window);
-
-                            if is_known {
+                            if tracked_source_window_for_window(
+                                &ctx,
+                                &resources.eve_clients,
+                                Some(resources.cycle.get_active_windows()),
+                                active_window,
+                            )
+                            .is_some()
+                            {
                                 true
                             } else {
-                                // NOTE: The active window might be a child (e.g. in Wine/Proton apps like Mod Organizer).
-                                // We must walk the window hierarchy to check if any ancestor is a tracked client.
-                                let mut current = active_window;
-                                let mut found_ancestor = false;
-
-                                // NOTE: Limit traversal depth to prevent infinite loops (X11 cycles) or stalls.
-                                for _ in 0..10 {
-                                    match ctx.conn.query_tree(current) {
-                                        Ok(cookie) => {
-                                            if let Ok(reply) = cookie.reply() {
-                                                if resources.eve_clients.contains_key(&reply.parent) ||
-                                                   resources.cycle.get_active_windows().contains_key(&reply.parent) {
-                                                    found_ancestor = true;
-                                                    debug!(
-                                                        child = active_window,
-                                                        parent = reply.parent,
-                                                        "Hotkey allowed: Found tracked ancestor"
-                                                    );
-                                                    break;
-                                                }
-                                                // Stop if we hit root or invalid window
-                                                if reply.parent == ctx.screen.root || reply.parent == 0 {
-                                                    break;
-                                                }
-                                                current = reply.parent;
-                                            } else {
-                                                break;
-                                            }
-                                        }
-                                        Err(_) => break,
-                                    }
-                                }
-
-                                if !found_ancestor {
-                                    debug!(
-                                        active_window = active_window,
-                                        "Hotkey ignored: Focused window is not a tracked client or descendant"
-                                    );
-                                }
-                                found_ancestor
+                                debug!(
+                                    active_window = active_window,
+                                    "Hotkey ignored: Focused window is not a tracked source or descendant"
+                                );
+                                false
                             }
                         }
                         Ok(None) => false,
@@ -551,7 +597,7 @@ async fn run_event_loop(
                 if should_process {
                     debug!(command = ?command, "Received hotkey command");
 
-                    // Debug: log the actual binding details for per-character hotkeys
+                    // Debug: log the actual binding details for direct-source hotkeys.
                     if let CycleCommand::CharacterHotkey(ref binding) = command {
                         debug!(
                             key_code = binding.key_code,
@@ -560,19 +606,19 @@ async fn run_event_loop(
                             alt = binding.alt,
                             super_key = binding.super_key,
                             devices = ?binding.source_devices,
-                            "Character hotkey binding details"
+                            "Direct-source hotkey binding details"
                         );
                     }
 
-                    if let Some((window, character_name)) = handle_cycle_command(&command, &mut resources, &ctx, &font_renderer, &status_tx, &hotkey_groups) {
-                        let display_name = if character_name.is_empty() {
-                            eve::LOGGED_OUT_DISPLAY_NAME
-                        } else {
-                            &character_name
-                        };
+                    if let Some((window, source_identity)) = handle_cycle_command(&command, &mut resources, &ctx, &font_renderer, &status_tx, &hotkey_groups) {
+                        let display_name = source_identity
+                            .as_ref()
+                            .map(|identity| identity.name.as_str())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(eve::LOGGED_OUT_DISPLAY_NAME);
                         info!(
                             window = window,
-                            character = %display_name,
+                            source = %display_name,
                             "Activating window via hotkey"
                         );
 
@@ -595,7 +641,7 @@ async fn run_event_loop(
                             // FocusIn arrives. The FocusIn handler will confirm this later.
                             resources
                                 .cycle
-                                .set_current_by_window_with_character(window, Some(&character_name));
+                                .set_current_by_window_with_identity(window, source_identity.as_ref());
 
                             let display_config = resources.config.build_display_config();
                             sync_focused_borders(
@@ -626,17 +672,15 @@ async fn run_event_loop(
                                 // start changing other window states.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-                                // Minimize all other EVE clients after successful activation.
-                                // NOTE: exempt_from_minimize for custom sources is stored in the
-                                // rule, not in daemon_config maps; build_display_config() is the
-                                // only place it is resolved into character_settings.
+                                // Minimize all other tracked source windows after successful activation.
+                                // NOTE: Custom source rule overrides are resolved by
+                                // build_display_config() into custom source settings.
                                 let other_windows: Vec<Window> = resources.eve_clients
                                     .iter()
                                     .filter(|(w, _)| **w != window)
                                     .filter(|(_, t)| {
                                         !display_config
-                                            .character_settings
-                                            .get(t.effective_character_name())
+                                            .settings_for(t.source_kind(), t.effective_character_name())
                                             .map(|s| s.exempt_from_minimize)
                                             .unwrap_or(false)
                                     })
@@ -651,7 +695,7 @@ async fn run_event_loop(
                                         if let Err(e) = thumb.border(
                                             &display_config,
                                             false,
-                                            resources.cycle.is_skipped(thumb.effective_character_name()),
+                                            resources.cycle.is_skipped(thumb.effective_source_identity().as_ref()),
                                             &font_renderer,
                                         ) {
                                             warn!(window = other_window, error = %e, "Failed to clear border before minimize");
@@ -690,7 +734,7 @@ async fn run_event_loop(
                         warn!("No window to activate via hotkey");
                     }
                 } else {
-                    info!(hotkey_require_eve_focus = resources.config.profile.hotkey_require_eve_focus, "Hotkey ignored, EVE window not focused (hotkey_require_eve_focus enabled)");
+                    info!(hotkey_require_eve_focus = resources.config.profile.hotkey_require_eve_focus, "Hotkey ignored, tracked source window not focused (hotkey_require_eve_focus enabled)");
                 }
 
 
@@ -822,19 +866,11 @@ async fn run_event_loop(
                             "Received ThumbnailMove delta"
                         );
 
-                        // Find the specific thumbnail by character name AND type (EVE vs custom source)
-                        let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
-                            if t.effective_character_name() != name {
-                                return false;
-                            }
+                        let target_identity = SourceIdentity::from_parts(name.clone(), is_custom);
 
-                            // Verify this thumbnail matches the expected type
-                            // Custom sources and EVE characters can have name collisions
-                            if is_custom {
-                                resources.config.custom_source_thumbnails.contains_key(&name)
-                            } else {
-                                resources.config.character_thumbnails.contains_key(&name)
-                            }
+                        // Find the specific thumbnail by typed identity.
+                        let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
+                            t.effective_source_identity().as_ref() == Some(&target_identity)
                         });
 
                         if let Some(thumb) = thumbnail_opt {
@@ -870,7 +906,7 @@ async fn run_event_loop(
                                 "Position updated by Manager (ThumbnailMove delta)"
                             );
                         } else {
-                            debug!(name = %name, is_custom = is_custom, "ThumbnailMove ignored: character not tracked");
+                            debug!(name = %name, is_custom = is_custom, "ThumbnailMove ignored: source not tracked");
                         }
                     }
                 }
@@ -960,7 +996,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
             formats: &formats,
         };
 
-        // Initial scan for existing EVE windows
+        // Initial scan for existing tracked source windows
         // Now populates cycle_state directly during scan
         eve_clients = super::window_detection::scan_eve_windows(
             &ctx,
@@ -971,18 +1007,22 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
             &mut cycle_state,
             &status_tx,
         )
-        .context("Failed to get initial list of EVE windows")?;
+        .context("Failed to get initial list of tracked source windows")?;
     }
 
     // Initialize border state for all windows (defaults to inactive/cleared)
     // This ensures inactive borders are drawn immediately on startup if enabled
-    let active_eve_window = crate::x11::get_active_eve_window(&conn, screen, &atoms)
-        .ok()
-        .flatten();
+    let init_ctx = AppContext {
+        conn: &conn,
+        screen,
+        atoms: &atoms,
+        formats: &formats,
+    };
+    let active_source_window = active_tracked_source_window(&init_ctx, &eve_clients);
 
     for (window, thumbnail) in eve_clients.iter_mut() {
         // Check if this window currently has focus
-        let is_focused = active_eve_window.map(|w| w == *window).unwrap_or(false);
+        let is_focused = active_source_window.map(|w| w == *window).unwrap_or(false);
 
         // Update state and draw appropriate border
         thumbnail.state = crate::common::types::ThumbnailState::Normal {
@@ -991,7 +1031,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         if let Err(e) = thumbnail.border(
             &config,
             is_focused,
-            cycle_state.is_skipped(thumbnail.effective_character_name()),
+            cycle_state.is_skipped(thumbnail.effective_source_identity().as_ref()),
             &font_renderer,
         ) {
             // Log warning but continue
@@ -1036,8 +1076,8 @@ fn handle_cycle_command(
     ctx: &AppContext<'_>,
     font_renderer: &crate::daemon::font::FontRenderer,
     status_tx: &IpcSender<DaemonMessage>,
-    hotkey_groups: &HashMap<crate::config::HotkeyBinding, Vec<String>>,
-) -> Option<(Window, String)> {
+    hotkey_groups: &HashMap<crate::config::HotkeyBinding, Vec<SourceIdentity>>,
+) -> Option<CycleActivation> {
     // Build logged-out map if feature is enabled in profile
     let logged_out_map = if resources.config.profile.hotkey_logged_out_cycle {
         Some(&resources.session.window_last_character)
@@ -1055,36 +1095,38 @@ fn handle_cycle_command(
             == LoggedOutUnidentifiedCycleMode::AppendToGroups;
 
     match command {
-        CycleCommand::Forward(group) => if append_unidentified {
-            resources.cycle.cycle_forward_with_unidentified(
-                group,
-                logged_out_map,
-                &resources.session.window_last_character,
-                resources.config.profile.hotkey_cycle_reset_index,
-            )
-        } else {
-            resources.cycle.cycle_forward(
-                group,
-                logged_out_map,
-                resources.config.profile.hotkey_cycle_reset_index,
-            )
+        CycleCommand::Forward(group) => {
+            if append_unidentified {
+                resources.cycle.cycle_forward_with_unidentified(
+                    group,
+                    logged_out_map,
+                    &resources.session.window_last_character,
+                    resources.config.profile.hotkey_cycle_reset_index,
+                )
+            } else {
+                resources.cycle.cycle_forward(
+                    group,
+                    logged_out_map,
+                    resources.config.profile.hotkey_cycle_reset_index,
+                )
+            }
         }
-        .map(|(w, s)| (w, s.to_string())),
-        CycleCommand::Backward(group) => if append_unidentified {
-            resources.cycle.cycle_backward_with_unidentified(
-                group,
-                logged_out_map,
-                &resources.session.window_last_character,
-                resources.config.profile.hotkey_cycle_reset_index,
-            )
-        } else {
-            resources.cycle.cycle_backward(
-                group,
-                logged_out_map,
-                resources.config.profile.hotkey_cycle_reset_index,
-            )
+        CycleCommand::Backward(group) => {
+            if append_unidentified {
+                resources.cycle.cycle_backward_with_unidentified(
+                    group,
+                    logged_out_map,
+                    &resources.session.window_last_character,
+                    resources.config.profile.hotkey_cycle_reset_index,
+                )
+            } else {
+                resources.cycle.cycle_backward(
+                    group,
+                    logged_out_map,
+                    resources.config.profile.hotkey_cycle_reset_index,
+                )
+            }
         }
-        .map(|(w, s)| (w, s.to_string())),
         CycleCommand::LoggedOutUnidentifiedForward => {
             if resources
                 .config
@@ -1122,28 +1164,25 @@ fn handle_cycle_command(
             }
         }
         CycleCommand::CharacterHotkey(binding) => {
-            debug!(
-                binding = %binding.display_name(),
-                "Received per-character hotkey command"
-            );
+            debug!(binding = %binding.display_name(), "Received direct-source hotkey command");
 
-            // Find the group of characters sharing this hotkey
-            if let Some(char_group) = hotkey_groups.get(binding) {
+            // Find the group of typed sources sharing this hotkey.
+            if let Some(source_group) = hotkey_groups.get(binding) {
                 debug!(
                     binding = %binding.display_name(),
-                    group = ?char_group,
+                    group = ?source_group,
                     "Found hotkey group"
                 );
 
                 // Delegate logic to CycleState
                 resources
                     .cycle
-                    .activate_next_in_group(char_group, logged_out_map)
+                    .activate_next_in_group(source_group, logged_out_map)
             } else {
                 warn!(
                     binding = %binding.display_name(),
                     available_groups = hotkey_groups.len(),
-                    "Character hotkey binding not found in groups - this shouldn't happen!"
+                    "Direct-source hotkey binding not found in groups - this shouldn't happen!"
                 );
                 None
             }
@@ -1162,20 +1201,17 @@ fn handle_cycle_command(
             None
         }
         CycleCommand::ToggleSkip => {
-            // Identify focused window to determine which character to skip
-            let active_window = crate::x11::get_active_eve_window(ctx.conn, ctx.screen, ctx.atoms)
-                .ok()
-                .flatten();
+            // Identify focused window to determine which source to skip.
+            let active_window = active_tracked_source_window(ctx, &resources.eve_clients);
 
             if let Some(window) = active_window {
                 if let Some(thumbnail) = resources.eve_clients.get_mut(&window) {
-                    let char_name = thumbnail.effective_character_name().to_string();
-                    if char_name.is_empty() {
-                        warn!("Cannot toggle skip: Focused EVE window has no character identity");
+                    let Some(identity) = thumbnail.effective_source_identity() else {
+                        warn!("Cannot toggle skip: Focused window has no source identity");
                         return None;
-                    }
-                    let is_skipped = resources.cycle.toggle_skip(&char_name);
-                    info!(character = %char_name, skipped = is_skipped, "Toggled skip status");
+                    };
+                    let is_skipped = resources.cycle.toggle_skip(&identity);
+                    info!(identity = ?identity, skipped = is_skipped, "Toggled skip status");
 
                     // Force redraw of border to show/hide indicator
                     let focused = thumbnail.state.is_focused();
@@ -1183,13 +1219,13 @@ fn handle_cycle_command(
                     if let Err(e) =
                         thumbnail.border(&display_config, focused, is_skipped, font_renderer)
                     {
-                        warn!(character = %char_name, error = %e, "Failed to update border after toggle skip");
+                        warn!(identity = ?identity, error = %e, "Failed to update border after toggle skip");
                     }
                 } else {
-                    warn!("Focused EVE window not found in client list");
+                    warn!("Focused window not found in client list");
                 }
             } else {
-                warn!("Cannot toggle skip: No EVE window focused");
+                warn!("Cannot toggle skip: No tracked window focused");
             }
             None
         }
@@ -1203,17 +1239,19 @@ fn handle_cycle_command(
             // Force visibility update for all known thumbnails
             let display_config = resources.config.build_display_config();
             for thumbnail in resources.eve_clients.values_mut() {
-                // When revealing, respect per-character overrides: force-hidden thumbnails stay hidden
+                // When revealing, respect per-source overrides: force-hidden thumbnails stay hidden.
                 let should_render = display_config
-                    .character_settings
-                    .get(thumbnail.effective_character_name())
+                    .settings_for(
+                        thumbnail.source_kind(),
+                        thumbnail.effective_character_name(),
+                    )
                     .and_then(|s| s.override_render_preview)
                     .unwrap_or(display_config.enabled);
 
                 let target_visible = !resources.config.runtime_hidden && should_render;
 
                 if let Err(e) = thumbnail.visibility(target_visible) {
-                    warn!(character = %thumbnail.character_name, error = %e, "Failed to update visibility after toggle");
+                    warn!(source = %thumbnail.character_name, error = %e, "Failed to update visibility after toggle");
                 } else if target_visible {
                     // Force update to ensure content is drawn if revealed
                     let _ = thumbnail.update(&display_config, font_renderer);

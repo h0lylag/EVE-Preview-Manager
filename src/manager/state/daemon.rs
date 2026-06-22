@@ -43,6 +43,20 @@ impl SharedState {
             return Ok(());
         }
 
+        if let Err(err) = self.validate_active_profile() {
+            warn!(error = ?err, "Daemon start blocked by invalid active profile");
+            self.daemon_status = DaemonStatus::Stopped;
+            self.status_message = Some(super::types::StatusMessage {
+                text: format!("Daemon not started: {err}"),
+                color: STATUS_STOPPED,
+            });
+            self.config_status_message = Some(super::types::StatusMessage {
+                text: "Fix custom source display names before applying".to_string(),
+                color: COLOR_ERROR,
+            });
+            return Ok(());
+        }
+
         // 1. Create IPC OneShot Server
         let (server, server_name) =
             IpcOneShotServer::<BootstrapMessage>::new().context("Failed to create IPC server")?;
@@ -183,7 +197,13 @@ impl SharedState {
             });
 
             // Sync config to daemon
-            let _ = self.sync_to_daemon();
+            if let Err(err) = self.sync_to_daemon() {
+                error!(error = ?err, "Failed to sync config to daemon");
+                self.status_message = Some(super::types::StatusMessage {
+                    text: format!("Config sync failed: {err}"),
+                    color: STATUS_STOPPED,
+                });
+            }
 
             self.bootstrap_rx = None; // Done
             self.daemon_status = DaemonStatus::Running;

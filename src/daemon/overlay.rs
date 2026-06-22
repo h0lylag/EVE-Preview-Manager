@@ -10,13 +10,14 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::common::constants::x11;
-use crate::common::types::Dimensions;
+use crate::common::types::{Dimensions, SourceKind};
 use crate::config::DisplayConfig;
 
 use super::font::FontRenderer;
 
 #[derive(Clone, Copy)]
 pub struct OverlayIdentity<'a> {
+    pub kind: SourceKind,
     pub style: &'a str,
     pub display: &'a str,
 }
@@ -156,7 +157,7 @@ impl<'a> OverlayRenderer<'a> {
         };
 
         // Render initial name
-        let initial_border_size = renderer.calculate_border_size(config, identity.style, false);
+        let initial_border_size = renderer.calculate_border_size(config, identity, false);
         renderer
             .clear_content_area(dimensions, initial_border_size)
             .context(format!(
@@ -236,10 +237,10 @@ impl<'a> OverlayRenderer<'a> {
     pub fn calculate_border_size(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         focused: bool,
     ) -> u16 {
-        if let Some(settings) = config.character_settings.get(character_name) {
+        if let Some(settings) = config.settings_for(identity.kind, identity.style) {
             if focused {
                 settings
                     .override_active_border_size
@@ -293,7 +294,7 @@ impl<'a> OverlayRenderer<'a> {
         // Resolve settings overrides
         let (display_name, text_color) = if identity.display.is_empty() {
             ("", config.text_color)
-        } else if let Some(settings) = config.character_settings.get(identity.style) {
+        } else if let Some(settings) = config.settings_for(identity.kind, identity.style) {
             let display_name = settings.alias.as_deref().unwrap_or(identity.display);
             let text_color = settings
                 .override_text_color
@@ -482,7 +483,7 @@ impl<'a> OverlayRenderer<'a> {
         }
 
         // Determine effective border size and color source
-        let effective_size = self.calculate_border_size(config, identity.style, focused);
+        let effective_size = self.calculate_border_size(config, identity, focused);
 
         // 3. Draw Text
         // We pass effective_size mainly if text positioning depended on it,
@@ -503,7 +504,7 @@ impl<'a> OverlayRenderer<'a> {
 
         if should_draw_border {
             let (fill_picture, temp_fill_id) =
-                if let Some(settings) = config.character_settings.get(identity.style) {
+                if let Some(settings) = config.settings_for(identity.kind, identity.style) {
                     let override_color_hex = if focused {
                         settings.override_active_border_color.as_ref()
                     } else {

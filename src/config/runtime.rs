@@ -1,7 +1,7 @@
 //! Runtime configuration for the preview daemon
 //!
 //! Loads the selected profile and global settings at startup,
-//! then maintains character positions synchronized with the config file.
+//! then maintains source positions synchronized with the config file.
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use tracing::{error, info};
 use x11rb::protocol::render::Color;
 
 use crate::common::color::{HexColor, Opacity};
-use crate::common::types::{CharacterSettings, Position, TextOffset};
+use crate::common::types::{CharacterSettings, Position, SourceKind, TextOffset};
 
 /// Snapshot of display settings for the renderer.
 #[derive(Debug, Clone)]
@@ -25,12 +25,22 @@ pub struct DisplayConfig {
     pub inactive_border_enabled: bool,
     pub show_logged_out_character_name: bool,
 
-    /// Map of character name -> settings (overrides, aliases, etc)
-    pub character_settings:
-        std::collections::HashMap<String, crate::common::types::CharacterSettings>,
+    /// Map of EVE character name -> settings (overrides, aliases, etc).
+    pub character_settings: HashMap<String, crate::common::types::CharacterSettings>,
+    /// Map of custom source alias -> settings and rule-derived overrides.
+    pub custom_source_settings: HashMap<String, crate::common::types::CharacterSettings>,
     pub inactive_border_color: Color,
     pub inactive_border_size: u16,
     pub minimized_overlay_enabled: bool,
+}
+
+impl DisplayConfig {
+    pub fn settings_for(&self, kind: SourceKind, name: &str) -> Option<&CharacterSettings> {
+        match kind {
+            SourceKind::Eve => self.character_settings.get(name),
+            SourceKind::Custom => self.custom_source_settings.get(name),
+        }
+    }
 }
 use serde::{Deserialize, Serialize};
 
@@ -120,16 +130,15 @@ impl DaemonConfig {
 
         let opacity = Opacity::from_percent(self.profile.thumbnail_opacity).to_argb32();
 
-        let mut character_settings = self.profile.character_thumbnails.clone();
+        let character_settings = self.profile.character_thumbnails.clone();
 
-        // 1. Merge saved custom source thumbnails (positions/modes)
-        character_settings.extend(self.profile.custom_source_thumbnails.clone());
+        let mut custom_source_settings = self.profile.custom_source_thumbnails.clone();
 
-        // 2. Apply Custom Window Rules as default overrides
+        // Apply Custom Window Rules as default overrides
         // If a custom source has a rule, we ensure its overrides are applied to the settings map.
         // This handles cases where a custom source hasn't been "saved" (moved) yet but has config rule overrides.
         for rule in &self.profile.custom_windows {
-            character_settings
+            custom_source_settings
                 .entry(rule.alias.clone())
                 .and_modify(|settings| {
                     // Update existing settings with rule overrides if present (Rule takes precedence or fills gaps?)
@@ -206,6 +215,7 @@ impl DaemonConfig {
             },
             minimized_overlay_enabled: self.profile.client_minimize_show_overlay,
             character_settings,
+            custom_source_settings,
         }
     }
 

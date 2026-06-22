@@ -7,32 +7,37 @@ use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
 use super::super::snapping::{self, Rect};
 use super::super::thumbnail::Thumbnail;
+use super::upsert_spatial_settings;
 use crate::common::constants::mouse;
-use crate::common::types::Position;
+use crate::common::types::{Position, SourceIdentity};
 
 fn set_clicked_cycle_target(
     ctx: &mut EventContext<'_, '_>,
     window: Window,
-    character_name: Option<&str>,
+    source_identity: Option<&SourceIdentity>,
 ) {
-    let cycle_character_name = character_name
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            ctx.session_state
-                .window_last_character
-                .get(&window)
-                .cloned()
-        });
+    let cycle_identity = source_identity.cloned().or_else(|| {
+        ctx.session_state
+            .window_last_character
+            .get(&window)
+            .map(|name| SourceIdentity::eve(name.clone()))
+    });
 
     ctx.cycle_state
-        .set_current_by_window_with_character(window, cycle_character_name.as_deref());
+        .set_current_by_window_with_identity(window, cycle_identity.as_ref());
 
     debug!(
         window = window,
-        character = %cycle_character_name.as_deref().unwrap_or(""),
+        source = %cycle_identity.as_ref().map(|id| id.name.as_str()).unwrap_or(""),
         "Set current window via thumbnail click"
     );
+}
+
+fn remembered_eve_identity(ctx: &EventContext<'_, '_>, window: Window) -> Option<SourceIdentity> {
+    ctx.session_state
+        .window_last_character
+        .get(&window)
+        .map(|name| SourceIdentity::eve(name.clone()))
 }
 
 /// Handle ButtonPress events - start dragging or prime the clicked cycle target
@@ -79,11 +84,11 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
         Vec::new() // No snap targets needed for left-click
     };
 
-    let mut clicked_character_name = None;
+    let mut clicked_identity = None;
 
     // Now get mutable reference to the clicked thumbnail
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_window) {
-        debug!(window = thumbnail.window(), character = %thumbnail.character_name, "ButtonPress on thumbnail");
+        debug!(window = thumbnail.window(), source = %thumbnail.character_name, "ButtonPress on thumbnail");
         let geom = ctx
             .app_ctx
             .conn
@@ -109,14 +114,17 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
             );
         }
         // Left-click primes the exact source window for subsequent cycling. Logged-out
-        // thumbnails have empty live names, so the helper resolves their last character.
+        // EVE thumbnails have empty live names, so the helper resolves their last character.
         if event.detail == mouse::BUTTON_LEFT {
-            clicked_character_name = Some(thumbnail.character_name.clone());
+            clicked_identity = thumbnail.effective_source_identity();
         }
     }
 
     if event.detail == mouse::BUTTON_LEFT {
-        set_clicked_cycle_target(ctx, clicked_window, clicked_character_name.as_deref());
+        if clicked_identity.is_none() {
+            clicked_identity = remembered_eve_identity(ctx, clicked_window);
+        }
+        set_clicked_cycle_target(ctx, clicked_window, clicked_identity.as_ref());
     }
 
     Ok(())
@@ -134,14 +142,14 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         "ButtonRelease received"
     );
 
-    // First pass: identify the visible hovered thumbnail by the EVE window key
+    // First pass: identify the visible hovered thumbnail by tracked window key.
     let clicked_key = ctx
         .eve_clients
         .iter()
         .find(|(_, thumb)| {
             let hovered = thumb.is_hovered(event.root_x, event.root_y) && thumb.is_visible();
             if hovered {
-                debug!(window = thumb.window(), character = %thumb.character_name, "Found hovered thumbnail");
+                debug!(window = thumb.window(), source = %thumb.character_name, "Found hovered thumbnail");
             }
             hovered
         })
@@ -153,17 +161,17 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
     };
 
     let mut clicked_src: Option<Window> = None;
-    let mut clicked_character_name = None;
+    let mut clicked_identity = None;
     let is_left_click = event.detail == mouse::BUTTON_LEFT;
 
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_key) {
-        debug!(window = thumbnail.window(), character = %thumbnail.character_name, "ButtonRelease on thumbnail");
+        debug!(window = thumbnail.window(), source = %thumbnail.character_name, "ButtonRelease on thumbnail");
         let src = thumbnail.src();
         clicked_src = Some(src);
 
         // Collect data we need for border updates before the mutable borrow
         let character_name = thumbnail.character_name.clone();
-        clicked_character_name = Some(character_name.clone());
+        clicked_identity = thumbnail.effective_source_identity();
 
         // Left-click focuses the window (dragging is right-click only)
         if is_left_click {
@@ -216,22 +224,20 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
                     thumbnail.dimensions.height,
                 );
 
-                // Check if this is a Custom Source
-                let is_custom_source = ctx
-                    .daemon_config
-                    .profile
-                    .custom_windows
-                    .iter()
-                    .any(|rule| rule.alias == effective_character_name);
+                let is_custom_source = thumbnail.source_kind().is_custom();
 
                 if is_custom_source {
-                    ctx.daemon_config
-                        .custom_source_thumbnails
-                        .insert(effective_character_name.clone(), settings);
+                    upsert_spatial_settings(
+                        &mut ctx.daemon_config.custom_source_thumbnails,
+                        &effective_character_name,
+                        settings.clone(),
+                    );
                 } else {
-                    ctx.daemon_config
-                        .character_thumbnails
-                        .insert(effective_character_name.clone(), settings);
+                    upsert_spatial_settings(
+                        &mut ctx.daemon_config.character_thumbnails,
+                        &effective_character_name,
+                        settings.clone(),
+                    );
                 }
 
                 let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
@@ -258,7 +264,10 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
 
     // After dropping the thumbnail borrow, update cycle state and borders for left-clicks.
     if is_left_click {
-        set_clicked_cycle_target(ctx, clicked_key, clicked_character_name.as_deref());
+        if clicked_identity.is_none() {
+            clicked_identity = remembered_eve_identity(ctx, clicked_key);
+        }
+        set_clicked_cycle_target(ctx, clicked_key, clicked_identity.as_ref());
 
         sync_focused_borders(
             ctx.eve_clients,
@@ -287,12 +296,10 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
             .iter()
             .filter(|(_, t)| t.src() != clicked_src)
             .filter(|(_, t)| {
-                // NOTE: exempt_from_minimize for custom sources is stored in the rule and
-                // resolved by build_display_config(); daemon_config.custom_source_thumbnails
-                // only holds position/size.
+                // NOTE: custom source minimize exemptions are rule overrides resolved
+                // by build_display_config().
                 !ctx.display_config
-                    .character_settings
-                    .get(t.effective_character_name())
+                    .settings_for(t.source_kind(), t.effective_character_name())
                     .map(|s| s.exempt_from_minimize)
                     .unwrap_or(false)
             })
@@ -307,7 +314,8 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
                 if let Err(e) = thumb.border(
                     ctx.display_config,
                     false,
-                    ctx.cycle_state.is_skipped(thumb.effective_character_name()),
+                    ctx.cycle_state
+                        .is_skipped(thumb.effective_source_identity().as_ref()),
                     ctx.font_renderer,
                 ) {
                     warn!(window = window, error = %e, "Failed to clear border before minimize");

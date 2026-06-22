@@ -161,30 +161,6 @@ pub fn is_window_minimized(
     Ok(false)
 }
 
-pub fn get_active_eve_window(
-    conn: &RustConnection,
-    screen: &Screen,
-    atoms: &CachedAtoms,
-) -> Result<Option<Window>> {
-    let active_window = get_active_window(conn, screen, atoms)?;
-
-    if let Some(active_window) = active_window {
-        if is_window_eve(conn, active_window, atoms)
-            .context(format!(
-                "Failed to check if active window {} is EVE client",
-                active_window
-            ))?
-            .is_some()
-        {
-            Ok(Some(active_window))
-        } else {
-            Ok(None)
-        }
-    } else {
-        Ok(None)
-    }
-}
-
 /// Get the currently focused window ID, if any
 pub fn get_active_window(
     conn: &RustConnection,

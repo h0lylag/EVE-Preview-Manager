@@ -199,19 +199,22 @@ pub fn render_cycle_group_column(
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Characters").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("➕ Add Chars").clicked() {
+                if ui.button("➕ Add Sources").clicked() {
                     state.show_add_characters_popup = true;
                     state.character_selections.clear();
                     // Add EVE characters
                     for char_name in profile.character_thumbnails.keys() {
-                        state.character_selections.insert(char_name.clone(), false);
+                        state.character_selections.insert(
+                            crate::config::profile::CycleSlot::Eve(char_name.clone()),
+                            false,
+                        );
                     }
                     // Add Custom Sources
                     for source in &profile.custom_windows {
-                        // Use alias as the identifier
-                        state
-                            .character_selections
-                            .insert(source.alias.clone(), false);
+                        state.character_selections.insert(
+                            crate::config::profile::CycleSlot::Source(source.alias.clone()),
+                            false,
+                        );
                     }
                 }
             });

@@ -16,7 +16,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::common::constants::x11;
-use crate::common::types::Dimensions;
+use crate::common::types::{Dimensions, SourceKind};
 use crate::x11::{AppContext, to_fixed};
 
 use super::font::FontRenderer;
@@ -35,7 +35,7 @@ pub struct ThumbnailRenderer<'a> {
     // === X11 Window Handles ===
     /// The X11 window ID for the clickable thumbnail.
     pub window: Window,
-    /// The source X11 window ID (the EVE client).
+    /// The source X11 window ID.
     pub src: Window,
     /// The parent window ID, if the source window has been reparented (e.g. by a window manager).
     pub parent: Option<Window>,
@@ -318,6 +318,7 @@ impl<'a> ThumbnailRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
+        source_kind: SourceKind,
         character_name: &str,
         display_character_name: &str,
         src: Window,
@@ -385,6 +386,7 @@ impl<'a> ThumbnailRenderer<'a> {
             ctx.screen.root,
             dimensions,
             OverlayIdentity {
+                kind: source_kind,
                 style: character_name,
                 display: display_character_name,
             },
@@ -638,7 +640,7 @@ impl<'a> ThumbnailRenderer<'a> {
         // However, if we are focused, the next border() call will correct it.
         let border_size = self
             .overlay
-            .calculate_border_size(display_config, identity.style, false);
+            .calculate_border_size(display_config, identity, false);
 
         // Must clear content area explicitly now
         self.overlay

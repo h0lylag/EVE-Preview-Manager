@@ -2,7 +2,7 @@
 //!
 //! Handles profile-based configuration with JSON persistence.
 //! Supports multiple profiles, each with visual settings, hotkey bindings,
-//! and per-character thumbnail positions.
+//! and per-source thumbnail positions.
 
 pub mod backup;
 pub mod hotkey_binding;

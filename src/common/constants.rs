@@ -236,10 +236,10 @@ pub mod defaults {
         /// Minimize other clients when switching via hotkey
         pub const MINIMIZE_CLIENTS_ON_SWITCH: bool = false;
 
-        /// Require EVE window focus for hotkey activation
+        /// Require a tracked source window to be focused for hotkey activation
         pub const HOTKEY_REQUIRE_EVE_FOCUS: bool = true;
 
-        /// Hide thumbnails when EVE window loses focus
+        /// Hide thumbnails when tracked source windows lose focus
         pub const HIDE_WHEN_NO_FOCUS: bool = false;
     }
 }

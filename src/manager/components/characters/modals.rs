@@ -1,7 +1,14 @@
 use super::CharactersState;
 use crate::common::constants::manager_ui::*;
-use crate::config::profile::Profile;
+use crate::config::profile::{CycleSlot, Profile};
 use eframe::egui;
+
+fn slot_label(slot: &CycleSlot) -> String {
+    match slot {
+        CycleSlot::Eve(name) => name.clone(),
+        CycleSlot::Source(name) => format!("[Source] {}", name),
+    }
+}
 
 pub fn render_add_characters_modal(
     ctx: &egui::Context,
@@ -10,14 +17,14 @@ pub fn render_add_characters_modal(
     changed: &mut bool,
 ) {
     let mut open = true;
-    egui::Window::new("Add Characters to Cycle Group")
+    egui::Window::new("Add Sources to Cycle Group")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.set_min_width(300.0);
-            ui.label("Select characters to add to cycle order:");
+            ui.label("Select sources to add to cycle order:");
             ui.add_space(ITEM_SPACING / 2.0);
 
             // Select All / Deselect All toggle
@@ -55,30 +62,18 @@ pub fn render_add_characters_modal(
                 .max_height(300.0)
                 .show(ui, |ui| {
                     // Collect and sort names for stable display
-                    let mut char_names: Vec<String> =
+                    let mut slots: Vec<CycleSlot> =
                         state.character_selections.keys().cloned().collect();
-                    char_names.sort();
+                    slots.sort_by_key(slot_label);
 
-                    for name in char_names {
-                        if let Some(selected) = state.character_selections.get_mut(&name) {
+                    for slot in slots {
+                        if let Some(selected) = state.character_selections.get_mut(&slot) {
                             // Show if already in cycle group
                             let current_group =
                                 &profile.cycle_groups[state.selected_cycle_group_index];
 
-                            let already_in_cycle =
-                                current_group.cycle_list.iter().any(|s| match s {
-                                    crate::config::profile::CycleSlot::Eve(n) => n == &name,
-                                    crate::config::profile::CycleSlot::Source(n) => n == &name,
-                                });
-
-                            let is_custom_source =
-                                profile.custom_windows.iter().any(|r| r.alias == name);
-
-                            let display_name = if is_custom_source {
-                                format!("[Source] {}", name)
-                            } else {
-                                name.clone()
-                            };
+                            let already_in_cycle = current_group.cycle_list.contains(&slot);
+                            let display_name = slot_label(&slot);
 
                             let label_text = if already_in_cycle {
                                 format!("{} (already in this group)", display_name)
@@ -99,23 +94,12 @@ pub fn render_add_characters_modal(
                     let mut added_any = false;
                     let current_group = &mut profile.cycle_groups[state.selected_cycle_group_index];
 
-                    for (name, selected) in &state.character_selections {
+                    for (slot, selected) in &state.character_selections {
                         if *selected {
-                            // Check if already in group (sloppy check against string value inside slot)
-                            let already_exists = current_group.cycle_list.iter().any(|s| match s {
-                                crate::config::profile::CycleSlot::Eve(n) => n == name,
-                                crate::config::profile::CycleSlot::Source(n) => n == name,
-                            });
+                            let already_exists = current_group.cycle_list.contains(slot);
 
                             if !already_exists {
-                                let is_source =
-                                    profile.custom_windows.iter().any(|r| r.alias == *name);
-                                let slot = if is_source {
-                                    crate::config::profile::CycleSlot::Source(name.clone())
-                                } else {
-                                    crate::config::profile::CycleSlot::Eve(name.clone())
-                                };
-                                current_group.cycle_list.push(slot);
+                                current_group.cycle_list.push(slot.clone());
                                 added_any = true;
                             }
                         }

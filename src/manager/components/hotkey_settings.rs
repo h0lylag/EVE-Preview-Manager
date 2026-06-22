@@ -15,7 +15,7 @@ enum CaptureTarget {
     LoggedOutUnidentifiedBackward,
     Profile,
     Character(String),
-    CustomRule(String),
+    CustomRule(usize),
 }
 
 /// State for hotkey settings Manager
@@ -100,8 +100,8 @@ impl HotkeySettingsState {
         self.capture_result = None;
     }
 
-    /// Public method for starting character-specific hotkey capture
-    /// Used by cycle_order_settings component's per-character hotkeys tab
+    /// Public method for starting EVE character-specific hotkey capture.
+    /// Used by the character/cycle hotkey UI.
     pub fn start_key_capture_for_character(
         &mut self,
         character_name: String,
@@ -113,10 +113,10 @@ impl HotkeySettingsState {
     /// Public method for starting custom rule hotkey capture
     pub fn start_key_capture_for_custom_rule(
         &mut self,
-        rule_alias: String,
+        rule_idx: usize,
         backend: crate::config::HotkeyBackendType,
     ) {
-        self.start_key_capture(CaptureTarget::CustomRule(rule_alias), backend);
+        self.start_key_capture(CaptureTarget::CustomRule(rule_idx), backend);
     }
 
     pub fn is_capturing_for(&self, character_name: &str) -> bool {
@@ -127,9 +127,9 @@ impl HotkeySettingsState {
         }
     }
 
-    pub fn is_capturing_custom_rule(&self, alias: &str) -> bool {
-        if let Some(CaptureTarget::CustomRule(ref target)) = self.capture_target {
-            target == alias && self.show_key_capture_dialog
+    pub fn is_capturing_custom_rule(&self, rule_idx: usize) -> bool {
+        if let Some(CaptureTarget::CustomRule(target)) = &self.capture_target {
+            *target == rule_idx && self.show_key_capture_dialog
         } else {
             false
         }
@@ -266,11 +266,11 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
             };
 
             ui.add_enabled_ui(device_selected, |ui| {
-                // Require EVE focus checkbox
-                if ui.checkbox(&mut profile.hotkey_require_eve_focus, "Require EVE window focus").changed() {
+                // Require tracked source focus checkbox
+                if ui.checkbox(&mut profile.hotkey_require_eve_focus, "Require source window focus").changed() {
                     changed = true;
                 }
-                ui.label(egui::RichText::new("Cycle hotkeys only work when an EVE window is focused").small().weak());
+                ui.label(egui::RichText::new("Cycle hotkeys only work when an EVE client or custom source is focused").small().weak());
             });
         });
 
@@ -348,7 +348,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     }
                  });
                  ui.add_space(ITEM_SPACING);
-                 ui.label(egui::RichText::new("Temporarily skip the current character from cycling.").weak().small());
+                 ui.label(egui::RichText::new("Temporarily skip the current source from cycling.").weak().small());
 
                  ui.add_space(ITEM_SPACING);
                  ui.separator();
@@ -547,7 +547,11 @@ pub fn render_key_capture_modal(
                 }
                 Some(CaptureTarget::Profile) => "Switch to Profile".to_string(),
                 Some(CaptureTarget::Character(ref name)) => format!("Character: {}", name),
-                Some(CaptureTarget::CustomRule(ref alias)) => format!("Custom Source: {}", alias),
+                Some(CaptureTarget::CustomRule(rule_idx)) => profile
+                    .custom_windows
+                    .get(rule_idx)
+                    .map(|rule| format!("Custom Source: {}", rule.alias))
+                    .unwrap_or_else(|| "Custom Source".to_string()),
                 None => "Unknown".to_string(),
             };
 
@@ -709,13 +713,8 @@ pub fn render_key_capture_modal(
                                     }
                                 }
 
-                                Some(CaptureTarget::CustomRule(ref alias)) => {
-                                    // Find rule and update hotkey
-                                    if let Some(rule) = profile
-                                        .custom_windows
-                                        .iter_mut()
-                                        .find(|r| r.alias == *alias)
-                                    {
+                                Some(CaptureTarget::CustomRule(rule_idx)) => {
+                                    if let Some(rule) = profile.custom_windows.get_mut(rule_idx) {
                                         rule.hotkey = Some(binding_clone);
                                         changed = true;
                                     }
