@@ -49,6 +49,11 @@ struct DaemonResources<'a> {
     eve_clients: HashMap<Window, Thumbnail<'a>>,
 }
 
+enum DaemonControlMessage {
+    Config(ConfigMessage),
+    ManagerDisconnected,
+}
+
 fn initialize_x11() -> Result<(
     RustConnection,
     usize,
@@ -337,14 +342,22 @@ async fn run_event_loop(
 
     std::thread::spawn(move || {
         while let Ok(msg) = config_rx.recv() {
-            if ipc_config_tx.blocking_send(msg).is_err() {
-                break; // Manager connection lost
+            let is_shutdown = matches!(msg, ConfigMessage::Shutdown);
+            if ipc_config_tx
+                .blocking_send(DaemonControlMessage::Config(msg))
+                .is_err()
+            {
+                return; // Main loop already ended
+            }
+            if is_shutdown {
+                return; // Intentional shutdown; the main loop will exit cleanly.
             }
         }
-        // If config_rx fails (Manager side closed), this thread ends.
-        // We should probably explicitly terminate the daemon here if we want absolute safety.
-        error!("IPC Config channel closed - Manager process likely terminated. Exiting daemon.");
-        std::process::exit(1);
+
+        warn!(
+            "IPC Config channel closed - Manager process likely terminated. Shutting down daemon."
+        );
+        let _ = ipc_config_tx.blocking_send(DaemonControlMessage::ManagerDisconnected);
     });
 
     // Wrap X11 connection in AsyncFd for async polling
@@ -730,9 +743,22 @@ async fn run_event_loop(
             }
 
             // 5. Handle IPC Config Updates (Lower priority - expensive operation)
-            Some(msg) = ipc_config_rx_tokio.recv() => {
+            msg = ipc_config_rx_tokio.recv() => {
+                let Some(msg) = msg else {
+                    info!("IPC bridge closed - shutting down daemon");
+                    return Ok(());
+                };
+
                 match msg {
-                    ConfigMessage::Full(new_config) => {
+                    DaemonControlMessage::ManagerDisconnected => {
+                        info!("Manager IPC disconnected - shutting down daemon");
+                        return Ok(());
+                    }
+                    DaemonControlMessage::Config(ConfigMessage::Shutdown) => {
+                        info!("Graceful shutdown requested by Manager");
+                        return Ok(());
+                    }
+                    DaemonControlMessage::Config(ConfigMessage::Full(new_config)) => {
                         let new_config = *new_config; // Unbox
                         info!("Received full config update via IPC");
 
@@ -778,7 +804,14 @@ async fn run_event_loop(
                         info!("Full config updated");
                     },
 
-                    ConfigMessage::ThumbnailMove { name, is_custom, x, y, width, height } => {
+                    DaemonControlMessage::Config(ConfigMessage::ThumbnailMove {
+                        name,
+                        is_custom,
+                        x,
+                        y,
+                        width,
+                        height,
+                    }) => {
                         debug!(
                             name = %name,
                             is_custom = is_custom,
@@ -875,6 +908,11 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         Ok(ConfigMessage::ThumbnailMove { .. }) => {
             return Err(anyhow::anyhow!(
                 "Expected Full config on startup, got ThumbnailMove"
+            ));
+        }
+        Ok(ConfigMessage::Shutdown) => {
+            return Err(anyhow::anyhow!(
+                "Expected Full config on startup, got Shutdown"
             ));
         }
         Err(e) => return Err(anyhow::anyhow!("Failed to receive initial config: {}", e)),

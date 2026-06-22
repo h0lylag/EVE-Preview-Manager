@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ipc_channel::ipc::IpcOneShotServer;
+use std::process::{Child, ExitStatus};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -12,6 +13,29 @@ use crate::manager::utils::spawn_daemon;
 
 use super::DaemonStatus;
 use super::SharedState;
+
+const GRACEFUL_DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("Failed to query daemon status while stopping")?
+        {
+            return Ok(Some(status));
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+
+        std::thread::sleep((deadline - now).min(DAEMON_SHUTDOWN_POLL_INTERVAL));
+    }
+}
 
 impl SharedState {
     pub fn start_daemon(&mut self) -> Result<()> {
@@ -52,32 +76,71 @@ impl SharedState {
 
     pub fn stop_daemon(&mut self) -> Result<()> {
         if let Some(mut child) = self.daemon.take() {
-            info!(pid = child.id(), "Stopping daemon process");
+            let pid = child.id();
+            info!(pid, "Stopping daemon process");
 
-            if let Err(e) = child.kill() {
-                error!(pid = child.id(), error = %e, "Failed to send SIGKILL to daemon");
+            let had_ipc_channel = if let Some(tx) = self.ipc_config_tx.take() {
+                match tx.send(ConfigMessage::Shutdown) {
+                    Ok(()) => {
+                        debug!(pid, "Sent graceful shutdown request to daemon");
+                    }
+                    Err(e) => {
+                        warn!(
+                            pid,
+                            error = %e,
+                            "Failed to send graceful shutdown request; waiting for daemon anyway"
+                        );
+                    }
+                }
+                true
             } else {
-                debug!(pid = child.id(), "SIGKILL sent successfully");
-            }
+                false
+            };
 
-            match child.wait() {
-                Ok(status) => {
-                    info!(pid = child.id(), status = ?status, "Daemon exited");
-                    self.daemon_status = if status.success() {
-                        DaemonStatus::Stopped
-                    } else {
-                        DaemonStatus::Crashed(status.code())
-                    };
+            let status = if had_ipc_channel {
+                match wait_for_child_exit(&mut child, GRACEFUL_DAEMON_SHUTDOWN_TIMEOUT)? {
+                    Some(status) => status,
+                    None => {
+                        warn!(
+                            pid,
+                            timeout_ms = GRACEFUL_DAEMON_SHUTDOWN_TIMEOUT.as_millis(),
+                            "Daemon did not exit gracefully in time; sending SIGKILL"
+                        );
+                        if let Err(e) = child.kill() {
+                            error!(pid, error = %e, "Failed to send SIGKILL to daemon");
+                        } else {
+                            debug!(pid, "SIGKILL sent successfully");
+                        }
+                        child
+                            .wait()
+                            .context("Failed to wait for daemon after SIGKILL")?
+                    }
                 }
-                Err(e) => {
-                    error!(pid = child.id(), error = %e, "Failed to wait for daemon exit");
-                    self.daemon_status = DaemonStatus::Crashed(None);
+            } else {
+                warn!(pid, "No daemon IPC channel available; sending SIGKILL");
+                if let Err(e) = child.kill() {
+                    error!(pid, error = %e, "Failed to send SIGKILL to daemon");
+                } else {
+                    debug!(pid, "SIGKILL sent successfully");
                 }
-            }
+                child
+                    .wait()
+                    .context("Failed to wait for daemon after SIGKILL")?
+            };
+
+            info!(pid, status = ?status, "Daemon exited");
+            self.daemon_status = if status.success() {
+                DaemonStatus::Stopped
+            } else {
+                DaemonStatus::Crashed(status.code())
+            };
+
             // Clear IPC channels immediately to prevent "Broken pipe" errors if save_config is called (e.g. on exit)
-            self.ipc_config_tx = None;
             self.ipc_status_rx = None;
             self.daemon_status_rx = None;
+            self.bootstrap_rx = None;
+            self.ipc_healthy = false;
+            self.missed_heartbeats = 0;
         }
         Ok(())
     }
@@ -293,5 +356,45 @@ impl SharedState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    fn spawn_shell(script: &str) -> Child {
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn shell child for daemon wait test")
+    }
+
+    #[test]
+    fn wait_for_child_exit_returns_completed_status() {
+        let mut child = spawn_shell("exit 0");
+
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(1))
+            .expect("wait helper should not error")
+            .expect("child should exit before timeout");
+
+        assert!(status.success());
+    }
+
+    #[test]
+    fn wait_for_child_exit_returns_none_on_timeout() {
+        let mut child = spawn_shell("sleep 5");
+
+        let status = wait_for_child_exit(&mut child, Duration::from_millis(10))
+            .expect("wait helper should not error");
+
+        assert!(status.is_none());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

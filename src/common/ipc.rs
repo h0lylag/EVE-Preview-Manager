@@ -26,6 +26,12 @@ pub enum ConfigMessage {
         width: u16,
         height: u16,
     },
+
+    /// Request a graceful daemon shutdown.
+    ///
+    /// The daemon should return from its event loop normally so X11 resources
+    /// are released through existing Drop implementations.
+    Shutdown,
 }
 
 /// Messages sent from Daemon to Manager
