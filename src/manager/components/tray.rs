@@ -5,7 +5,9 @@ use eframe::egui;
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "linux")]
-use crate::manager::{state::SharedState, utils::load_tray_icon_pixmap};
+use crate::manager::{
+    state::SharedState, utils::load_tray_icon_pixmap, window_lifecycle::ShowWindowSignal,
+};
 
 /// System tray icon integration handling menu events and status updates
 #[cfg(target_os = "linux")]
@@ -13,16 +15,13 @@ pub struct AppTray {
     pub state: Arc<Mutex<SharedState>>,
     pub ctx: egui::Context,
     pub is_flatpak: bool,
+    pub(crate) show_window_signal: ShowWindowSignal,
 }
 
 #[cfg(target_os = "linux")]
 impl AppTray {
-    fn show_window(&self) {
-        self.ctx
-            .send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        self.ctx
-            .send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    fn request_show_window(&self) {
+        self.show_window_signal.request();
         self.ctx.request_repaint();
     }
 }
@@ -56,7 +55,7 @@ impl ksni::Tray for AppTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        self.show_window();
+        self.request_show_window();
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -83,7 +82,7 @@ impl ksni::Tray for AppTray {
             StandardItem {
                 label: "Show Window".into(),
                 activate: Box::new(|this: &mut AppTray| {
-                    this.show_window();
+                    this.request_show_window();
                 }),
                 ..Default::default()
             }

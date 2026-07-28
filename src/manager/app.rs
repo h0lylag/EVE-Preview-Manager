@@ -22,6 +22,7 @@ use crate::manager::components::tray::AppTray;
 use crate::manager::state::core::SaveMode;
 use crate::manager::state::{ManagerTab, SharedState, StatusMessage};
 use crate::manager::utils::load_window_icon;
+use crate::manager::window_lifecycle::{StartupMode, WindowConditions, WindowLifecycle};
 
 struct ManagerApp {
     state: Arc<Mutex<SharedState>>,
@@ -39,16 +40,27 @@ struct ManagerApp {
     update_signal: std::sync::Arc<tokio::sync::Notify>,
     #[cfg(target_os = "linux")]
     tray_ready: Arc<AtomicBool>,
-    #[cfg(target_os = "linux")]
-    start_minimized_to_tray_pending: bool,
 
     active_tab: ManagerTab,
-    minimize_to_tray_handled: bool,
+    window_lifecycle: WindowLifecycle,
+}
+
+fn window_startup_mode(config: &Config) -> StartupMode {
+    if config.global.minimize_to_tray && config.global.start_minimized_to_tray {
+        StartupMode::HideWhenTrayReady
+    } else {
+        StartupMode::Show
+    }
 }
 
 impl ManagerApp {
     fn new(cc: &eframe::CreationContext<'_>, config: Config, debug_mode: bool) -> Self {
         debug!("Initializing Manager (debug_mode={})", debug_mode);
+
+        let startup_mode = window_startup_mode(&config);
+        let window_lifecycle = WindowLifecycle::new(startup_mode);
+        #[cfg(target_os = "linux")]
+        let show_window_signal = window_lifecycle.show_signal();
 
         // Run auto-backup if enabled
         if config.global.backup_enabled {
@@ -115,6 +127,7 @@ impl ManagerApp {
                     state: state_clone,
                     ctx,
                     is_flatpak,
+                    show_window_signal,
                 };
 
                 let result = if is_flatpak {
@@ -173,8 +186,6 @@ impl ManagerApp {
             shutdown_signal,
             update_signal,
             tray_ready,
-            start_minimized_to_tray_pending: config.global.minimize_to_tray
-                && config.global.start_minimized_to_tray,
             profile_selector: ProfileSelector::new(),
             behavior_settings_state,
             hotkey_settings_state,
@@ -182,7 +193,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
-            minimize_to_tray_handled: false,
+            window_lifecycle,
         };
 
         #[cfg(not(target_os = "linux"))]
@@ -195,7 +206,7 @@ impl ManagerApp {
             characters_state,
             sources_state: components::sources::SourcesTab::default(),
             active_tab: ManagerTab::Behavior,
-            minimize_to_tray_handled: false,
+            window_lifecycle,
         };
 
         app
@@ -203,8 +214,8 @@ impl ManagerApp {
 }
 
 impl ManagerApp {
-    // Eframe skips `ui` for hidden viewports but continues calling `logic`, so
-    // daemon polling and tray commands must stay in this path.
+    // Eframe still calls `logic` for repaint requests while the UI is hidden, so
+    // daemon polling and viewport transitions remain here.
     fn update_logic(&mut self, ctx: &egui::Context) {
         let mut state_guard = match self.state.lock() {
             Ok(s) => s,
@@ -223,40 +234,32 @@ impl ManagerApp {
             self.update_signal.notify_one();
         }
 
-        // Track window geometry changes and update config.
+        // Read the native state used for lifecycle and geometry updates.
         let (is_minimized, inner_rect) = ctx.input(|input| {
             let viewport = input.viewport();
             (viewport.minimized.unwrap_or(false), viewport.inner_rect)
         });
 
-        if state.config.global.minimize_to_tray && is_minimized {
-            if !self.minimize_to_tray_handled {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.minimize_to_tray_handled = true;
-            }
-        } else if !is_minimized {
-            self.minimize_to_tray_handled = false;
-        }
-
         #[cfg(target_os = "linux")]
-        if self.start_minimized_to_tray_pending {
-            if !state.config.global.minimize_to_tray || !state.config.global.start_minimized_to_tray
-            {
-                self.start_minimized_to_tray_pending = false;
-            } else if self.tray_ready.load(Ordering::Acquire) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                self.start_minimized_to_tray_pending = false;
-            }
-        }
+        let tray_ready = self.tray_ready.load(Ordering::Acquire);
+        #[cfg(not(target_os = "linux"))]
+        let tray_ready = false;
+
+        self.window_lifecycle.update(
+            ctx,
+            WindowConditions {
+                minimize_to_tray_enabled: state.config.global.minimize_to_tray,
+                start_hidden_enabled: state.config.global.start_minimized_to_tray,
+                tray_ready,
+                is_minimized,
+            },
+        );
 
         // Try to get window size from viewport inner_rect first, fall back to content_rect
         let (new_width, new_height) = if let Some(inner_rect) = inner_rect {
             (inner_rect.width() as u16, inner_rect.height() as u16)
         } else {
-            // Fallback for platforms where inner_rect is None (e.g., Wayland)
-            // Use the content rect as window size
+            // Fall back when native window geometry is unavailable.
             let content_rect = ctx.content_rect();
             (content_rect.width() as u16, content_rect.height() as u16)
         };
@@ -272,7 +275,6 @@ impl ManagerApp {
         }
 
         // Handle quit request from tray menu
-
         if state.should_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -504,13 +506,11 @@ pub fn run_manager(debug_mode: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn logic_handles_tray_quit_without_rendering_ui() {
-        let mut shared_state = SharedState::new(Config::default(), false);
-        shared_state.should_quit = true;
+    fn test_app(config: Config) -> ManagerApp {
+        let startup_mode = window_startup_mode(&config);
 
-        let mut app = ManagerApp {
-            state: Arc::new(Mutex::new(shared_state)),
+        ManagerApp {
+            state: Arc::new(Mutex::new(SharedState::new(config, false))),
             profile_selector: ProfileSelector::new(),
             behavior_settings_state: components::behavior_settings::BehaviorSettingsState::default(
             ),
@@ -524,20 +524,180 @@ mod tests {
             update_signal: Arc::new(tokio::sync::Notify::new()),
             #[cfg(target_os = "linux")]
             tray_ready: Arc::new(AtomicBool::new(false)),
-            #[cfg(target_os = "linux")]
-            start_minimized_to_tray_pending: false,
             active_tab: ManagerTab::Behavior,
-            minimize_to_tray_handled: false,
-        };
+            window_lifecycle: WindowLifecycle::new(startup_mode),
+        }
+    }
 
-        let output = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+    fn run_logic(app: &mut ManagerApp, is_minimized: bool) -> egui::FullOutput {
+        let mut raw_input = egui::RawInput::default();
+        raw_input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .minimized = Some(is_minimized);
+
+        egui::Context::default().run_ui(raw_input, |ui| {
             app.update_logic(ui.ctx());
-        });
+        })
+    }
 
-        let close_requested = output
+    fn root_commands(output: &egui::FullOutput) -> &[egui::ViewportCommand] {
+        &output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
-            .is_some_and(|viewport| viewport.commands.contains(&egui::ViewportCommand::Close));
-        assert!(close_requested, "tray quit should close a hidden viewport");
+            .expect("root viewport output should always exist")
+            .commands
+    }
+
+    fn tray_config(startup_mode: StartupMode) -> Config {
+        let mut config = Config::default();
+        config.global.minimize_to_tray = true;
+        config.global.start_minimized_to_tray = startup_mode == StartupMode::HideWhenTrayReady;
+        config
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mark_tray_ready(app: &ManagerApp) {
+        app.tray_ready.store(true, Ordering::Release);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn minimized_window_hides_when_tray_is_ready() {
+        let mut app = test_app(tray_config(StartupMode::Show));
+        mark_tray_ready(&app);
+
+        let output = run_logic(&mut app, true);
+
+        assert_eq!(
+            root_commands(&output),
+            &[
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Visible(false),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn minimized_window_stays_minimized_when_tray_is_unavailable() {
+        let mut app = test_app(tray_config(StartupMode::Show));
+
+        let output = run_logic(&mut app, true);
+
+        assert!(root_commands(&output).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_hide_waits_until_tray_is_ready() {
+        let mut app = test_app(tray_config(StartupMode::HideWhenTrayReady));
+
+        let waiting_output = run_logic(&mut app, false);
+        assert!(root_commands(&waiting_output).is_empty());
+
+        mark_tray_ready(&app);
+        let ready_output = run_logic(&mut app, false);
+        assert_eq!(
+            root_commands(&ready_output),
+            &[
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Visible(false),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabling_either_setting_cancels_pending_startup_hide() {
+        for disable_minimize_to_tray in [false, true] {
+            let mut app = test_app(tray_config(StartupMode::HideWhenTrayReady));
+            {
+                let mut state = app
+                    .state
+                    .lock()
+                    .expect("test shared state lock should not be poisoned");
+                if disable_minimize_to_tray {
+                    state.config.global.minimize_to_tray = false;
+                } else {
+                    state.config.global.start_minimized_to_tray = false;
+                }
+            }
+
+            let _ = run_logic(&mut app, false);
+
+            {
+                let mut state = app
+                    .state
+                    .lock()
+                    .expect("test shared state lock should not be poisoned");
+                state.config.global.minimize_to_tray = true;
+                state.config.global.start_minimized_to_tray = true;
+            }
+            mark_tray_ready(&app);
+
+            let output = run_logic(&mut app, false);
+            assert!(root_commands(&output).is_empty());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tray_show_request_overrides_pending_startup_hide() {
+        let mut app = test_app(tray_config(StartupMode::HideWhenTrayReady));
+        app.window_lifecycle.show_signal().request();
+
+        let output = run_logic(&mut app, true);
+
+        assert_eq!(
+            root_commands(&output),
+            &[
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Visible(true),
+                egui::ViewportCommand::Focus,
+            ]
+        );
+
+        let stale_minimized_output = run_logic(&mut app, true);
+        assert!(root_commands(&stale_minimized_output).is_empty());
+
+        let next_output = run_logic(&mut app, false);
+        assert!(root_commands(&next_output).is_empty());
+
+        mark_tray_ready(&app);
+        let ready_output = run_logic(&mut app, false);
+        assert!(root_commands(&ready_output).is_empty());
+    }
+
+    #[test]
+    fn logic_handles_tray_quit_without_rendering_ui() {
+        let mut app = test_app(Config::default());
+        app.state
+            .lock()
+            .expect("test shared state lock should not be poisoned")
+            .should_quit = true;
+
+        let output = run_logic(&mut app, false);
+        let close_requested = root_commands(&output).contains(&egui::ViewportCommand::Close);
+        assert!(close_requested, "logic should process a tray quit request");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn logic_handles_tray_quit_while_hidden_to_tray() {
+        let mut app = test_app(tray_config(StartupMode::Show));
+        mark_tray_ready(&app);
+        let hide_output = run_logic(&mut app, true);
+        assert!(root_commands(&hide_output).contains(&egui::ViewportCommand::Visible(false)));
+
+        app.state
+            .lock()
+            .expect("test shared state lock should not be poisoned")
+            .should_quit = true;
+
+        let output = run_logic(&mut app, false);
+
+        assert!(root_commands(&output).contains(&egui::ViewportCommand::Close));
     }
 }
