@@ -5,13 +5,13 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use flate2::Compression;
-use flate2::read::GzDecoder;
+use flate2::bufread::GzDecoder;
 use flate2::write::GzEncoder;
 use tracing::{error, info};
 
@@ -46,17 +46,17 @@ impl BackupManager {
         path
     }
 
-    /// Create a new backup of the configuration file
+    /// Create a new backup containing one canonical `config.json` entry.
+    ///
+    /// Existing archive paths are never overwritten, and incomplete output is
+    /// removed if tar or gzip finalization fails.
     pub fn create_backup(is_manual: bool, config_path_override: Option<&Path>) -> Result<PathBuf> {
         let config_file_path = config_path_override
             .map(|p| p.to_path_buf())
             .unwrap_or_else(Config::path);
 
-        // Ensure backup directory exists
         let backup_dir = Self::backup_dir(config_path_override);
-        if !backup_dir.exists() {
-            fs::create_dir_all(&backup_dir).context("Failed to create backup directory")?;
-        }
+        fs::create_dir_all(&backup_dir).context("Failed to create backup directory")?;
 
         // Generate filename: [auto|manual]_backup_YYYYMMDD_HHMMSS.tar.gz
         let now = SystemTime::now();
@@ -71,41 +71,53 @@ impl BackupManager {
         let filename = format!("{}_{}.tar.gz", prefix, timestamp_str);
         let backup_path = backup_dir.join(&filename);
 
-        // Create tar.gz archive
-        let tar_gz = fs::File::create(&backup_path).context("Failed to create backup file")?;
-        let enc = GzEncoder::new(tar_gz, Compression::default());
-        let mut tar = tar::Builder::new(enc);
+        let mut config_file = fs::File::open(&config_file_path).with_context(|| {
+            format!(
+                "Failed to open config file for backup: {}",
+                config_file_path.display()
+            )
+        })?;
+        let tar_gz = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup_path)
+            .context("Failed to create backup file")?;
 
-        // Add config.json to archive
-        // We only backup the config file for now, but could extend to entire dir if needed
-        // (excluding the backups dir itself to avoid recursion)
-        match fs::File::open(&config_file_path) {
-            Ok(mut file) => {
-                tar.append_file(crate::common::constants::config::FILENAME, &mut file)
-                    .context("Failed to add config file to archive")?;
+        let archive_result = (|| -> Result<()> {
+            let enc = GzEncoder::new(tar_gz, Compression::default());
+            let mut tar = tar::Builder::new(enc);
+
+            // The restore path intentionally accepts only this canonical entry.
+            tar.append_file(crate::common::constants::config::FILENAME, &mut config_file)
+                .context("Failed to add config file to archive")?;
+
+            let enc = tar
+                .into_inner()
+                .context("Failed to finish backup archive")?;
+            enc.finish()
+                .context("Failed to finish backup compression")?;
+            Ok(())
+        })();
+
+        if let Err(archive_error) = archive_result {
+            if let Err(cleanup_error) = fs::remove_file(&backup_path) {
+                error!(
+                    path = ?backup_path,
+                    error = %cleanup_error,
+                    "Failed to remove incomplete backup"
+                );
             }
-            Err(e) => {
-                // It's possible the config file doesn't exist yet (fresh install)
-                // In that case, we can try to save the current in-memory config first?
-                // But this function is usually called when app is running.
-                return Err(anyhow::anyhow!(
-                    "Failed to open config file for backup: {}",
-                    e
-                ));
-            }
+            return Err(archive_error);
         }
 
-        let enc = tar
-            .into_inner()
-            .context("Failed to finish backup archive")?;
-        enc.finish()
-            .context("Failed to finish backup compression")?;
-
-        info!("Created backup: {:?}", backup_path);
+        info!(path = ?backup_path, "Created backup");
         Ok(backup_path)
     }
 
-    /// List all available backups, sorted by date (newest first)
+    /// List regular `.tar.gz` backup candidates, sorted newest first.
+    ///
+    /// Symlinks and other non-regular file types are excluded. Only generated
+    /// `auto_backup_` names participate in automatic pruning.
     pub fn list_backups(config_path_override: Option<&Path>) -> Result<Vec<BackupEntry>> {
         let backup_dir = Self::backup_dir(config_path_override);
         if !backup_dir.exists() {
@@ -116,32 +128,38 @@ impl BackupManager {
 
         for entry in fs::read_dir(backup_dir)? {
             let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("gz") {
-                let metadata = fs::metadata(&path)?;
-                let timestamp = metadata.modified().unwrap_or(SystemTime::now());
-                let filename = entry.file_name().to_string_lossy().to_string();
-
-                let is_manual = filename.contains("manual");
-
-                backups.push(BackupEntry {
-                    filename,
-                    path,
-                    timestamp,
-                    is_manual,
-                });
+            if !entry.file_type()?.is_file() {
+                continue;
             }
+
+            let Ok(filename) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !filename.ends_with(".tar.gz") {
+                continue;
+            }
+            // Only application-generated auto backups participate in pruning;
+            // manually copied or renamed archives are retained like manual backups.
+            let is_manual = !filename.starts_with("auto_backup_");
+
+            let metadata = entry.metadata()?;
+            let timestamp = metadata.modified().unwrap_or(SystemTime::now());
+            backups.push(BackupEntry {
+                filename,
+                path: entry.path(),
+                timestamp,
+                is_manual,
+            });
         }
 
-        // Sort by timestamp descending (newest first)
         backups.sort_by_key(|backup| std::cmp::Reverse(backup.timestamp));
 
         Ok(backups)
     }
 
-    /// Restore configuration from a specific backup
+    /// Restore `config.json` from a listed, strictly validated backup archive.
     pub fn restore_backup(filename: &str, config_path_override: Option<&Path>) -> Result<()> {
-        let backup_path = Self::backup_path_for_restore(filename, config_path_override)?;
+        let backup_path = Self::backup_path_for_existing_backup(filename, config_path_override)?;
         let config_contents = Self::read_config_from_backup(&backup_path)?;
 
         let config_file_path = config_path_override
@@ -155,11 +173,11 @@ impl BackupManager {
         fs::write(&config_file_path, config_contents)
             .with_context(|| format!("Failed to restore config to {:?}", config_file_path))?;
 
-        info!("Restored backup: {}", filename);
+        info!(filename, "Restored backup");
         Ok(())
     }
 
-    fn backup_path_for_restore(
+    fn backup_path_for_existing_backup(
         filename: &str,
         config_path_override: Option<&Path>,
     ) -> Result<PathBuf> {
@@ -186,15 +204,8 @@ impl BackupManager {
     }
 
     fn read_config_from_backup(backup_path: &Path) -> Result<Vec<u8>> {
-        if !backup_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Backup file not found: {}",
-                backup_path.display()
-            ));
-        }
-
         let tar_gz = fs::File::open(backup_path).context("Failed to open backup file")?;
-        let dec = GzDecoder::new(tar_gz);
+        let dec = GzDecoder::new(BufReader::new(tar_gz));
         let mut archive = tar::Archive::new(dec);
 
         let mut config_contents = None;
@@ -253,7 +264,7 @@ impl BackupManager {
             config_contents = Some(contents);
         }
 
-        // Tar iteration stops at its first zero end marker. Read the bounded
+        // Tar iteration stops at its first zero header block. Read the bounded
         // remaining padding to force gzip checksum and length validation.
         let mut decoder = archive.into_inner();
         let mut buffer = [0_u8; RESTORE_READ_BUFFER_BYTES];
@@ -281,6 +292,17 @@ impl BackupManager {
                     "Backup archive contains data after its end marker"
                 ));
             }
+        }
+
+        let mut compressed_input = decoder.into_inner();
+        if !compressed_input
+            .fill_buf()
+            .context("Failed to verify end of backup file")?
+            .is_empty()
+        {
+            return Err(anyhow::anyhow!(
+                "Backup file contains data after its gzip stream"
+            ));
         }
 
         let config_contents = config_contents.ok_or_else(|| {
@@ -331,14 +353,12 @@ impl BackupManager {
         }
     }
 
-    /// Delete a specific backup file
+    /// Delete a regular `.tar.gz` file returned by [`Self::list_backups`].
     pub fn delete_backup(filename: &str, config_path_override: Option<&Path>) -> Result<()> {
-        let backup_path = Self::backup_dir(config_path_override).join(filename);
-        if backup_path.exists() {
-            fs::remove_file(&backup_path)
-                .context(format!("Failed to delete backup file: {}", filename))?;
-            info!("Deleted backup: {}", filename);
-        }
+        let backup_path = Self::backup_path_for_existing_backup(filename, config_path_override)?;
+        fs::remove_file(&backup_path)
+            .with_context(|| format!("Failed to delete backup file: {}", filename))?;
+        info!(filename, "Deleted backup");
         Ok(())
     }
 
@@ -347,7 +367,6 @@ impl BackupManager {
     pub fn prune_backups(retention_count: u32, config_path_override: Option<&Path>) -> Result<()> {
         let backups = Self::list_backups(config_path_override)?;
 
-        // Filter for only auto backups
         let auto_backups: Vec<&BackupEntry> = backups.iter().filter(|b| !b.is_manual).collect();
 
         if auto_backups.len() > retention_count as usize {
@@ -371,10 +390,10 @@ impl BackupManager {
 
         let backups = match Self::list_backups(config_path_override) {
             Ok(b) => b,
-            Err(_) => return true, // If we can't list, assume we need one? Or fail safe.
+            // Prefer attempting a backup when retention state cannot be read.
+            Err(_) => return true,
         };
 
-        // Find newest auto-backup
         let newest_auto = backups.iter().find(|b| !b.is_manual);
 
         match newest_auto {
@@ -385,16 +404,16 @@ impl BackupManager {
                         let days_since = duration.as_secs() / 86400;
                         days_since >= interval_days as u64
                     }
-                    Err(_) => true, // Time moved backwards? Run backup.
+                    // A future timestamp should not suppress backups indefinitely.
+                    Err(_) => true,
                 }
             }
-            None => true, // No auto backups exist
+            None => true,
         }
     }
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use std::io::Cursor;
@@ -650,9 +669,7 @@ mod tests {
         assert_eq!(content, "{\"test\": true}");
 
         // 4. Test Pruning
-        // Create a few more dummy backups
-        // Note: files created too fast might have same timestamp, but prune depends on list order
-        // To ensure they are treated as "old", we can just rely on the count since we just made them.
+        // Sleep between creations because backup filenames have one-second resolution.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         for _ in 0..5 {
             BackupManager::create_backup(false, Some(&config_path)).unwrap();
@@ -693,6 +710,52 @@ mod tests {
             fs::read_to_string(&config_path).unwrap(),
             "{\"original\": true}"
         );
+    }
+
+    #[test]
+    fn delete_rejects_backup_filename_path_components() {
+        let (_temp_dir, config_path) = setup_config(b"{\"original\": true}");
+        fs::create_dir_all(BackupManager::backup_dir(Some(&config_path))).unwrap();
+
+        let err = BackupManager::delete_backup("../config.json", Some(&config_path)).unwrap_err();
+
+        assert!(err.to_string().contains("Invalid backup filename"));
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            "{\"original\": true}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_backups_ignores_symlinks() {
+        let (_temp_dir, config_path) = setup_config(b"{\"original\": true}");
+        let backup_dir = BackupManager::backup_dir(Some(&config_path));
+        fs::create_dir_all(&backup_dir).unwrap();
+        std::os::unix::fs::symlink(
+            &config_path,
+            backup_dir.join("manual_backup_symlink.tar.gz"),
+        )
+        .unwrap();
+
+        let backups = BackupManager::list_backups(Some(&config_path)).unwrap();
+
+        assert!(backups.is_empty());
+    }
+
+    #[test]
+    fn create_backup_removes_incomplete_archive_after_write_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let app_dir = temp_dir.path().join("eve-preview-manager");
+        fs::create_dir_all(&app_dir).unwrap();
+        let config_path = app_dir.join(crate::common::constants::config::FILENAME);
+        fs::create_dir(&config_path).unwrap();
+
+        BackupManager::create_backup(true, Some(&config_path))
+            .expect_err("a directory cannot be archived as the config file");
+
+        let backups = BackupManager::list_backups(Some(&config_path)).unwrap();
+        assert!(backups.is_empty());
     }
 
     #[test]
@@ -841,6 +904,30 @@ mod tests {
 
         BackupManager::restore_backup(filename, Some(&config_path))
             .expect_err("a corrupt gzip checksum must not be accepted");
+
+        assert_eq!(fs::read_to_string(&config_path)?, "{\"original\": true}");
+        Ok(())
+    }
+
+    #[test]
+    fn restore_rejects_appended_gzip_member_without_modifying_config() -> Result<()> {
+        let (_temp_dir, config_path) = setup_config(b"{\"original\": true}");
+        let filename = "manual_backup_appended_member.tar.gz";
+        let valid_config = serde_json::to_vec(&Config::default())?;
+        let backup_path = write_backup_archive(
+            &config_path,
+            filename,
+            &[(crate::common::constants::config::FILENAME, &valid_config)],
+        );
+
+        let mut extra_encoder = GzEncoder::new(Vec::new(), Compression::default());
+        extra_encoder.write_all(b"unexpected second gzip member")?;
+        let extra_member = extra_encoder.finish()?;
+        let mut backup_file = fs::OpenOptions::new().append(true).open(&backup_path)?;
+        backup_file.write_all(&extra_member)?;
+
+        BackupManager::restore_backup(filename, Some(&config_path))
+            .expect_err("data after the expected gzip stream must not be accepted");
 
         assert_eq!(fs::read_to_string(&config_path)?, "{\"original\": true}");
         Ok(())
