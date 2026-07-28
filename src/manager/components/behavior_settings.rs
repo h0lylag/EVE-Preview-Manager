@@ -167,7 +167,7 @@ fn window_preview_settings(
         ui,
         &mut profile.thumbnail_auto_save_position,
         "Auto-save thumbnail positions",
-        "When off, only explicit tray saves persist thumbnail positions.",
+        "When off, thumbnail positions persist only when you explicitly save them.",
         action,
     );
 

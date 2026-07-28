@@ -38,6 +38,7 @@ pub struct SharedState {
     pub selected_profile_idx: usize,
     pub should_quit: bool,
     pub last_save_attempt: Instant,
+    pub(super) pending_position_save: bool,
 
     // IPC
     pub ipc_config_tx: Option<IpcSender<ConfigMessage>>,
@@ -87,6 +88,7 @@ impl SharedState {
             selected_profile_idx,
             should_quit: false,
             last_save_attempt: Instant::now(),
+            pending_position_save: false,
 
             ipc_config_tx: None,
             ipc_status_rx: None,
@@ -207,6 +209,7 @@ impl SharedState {
             .unwrap_or(0);
 
         self.settings_changed = false;
+        self.pending_position_save = false;
         self.config_status_message = Some(StatusMessage {
             text: "Configuration saved successfully".to_string(),
             color: COLOR_SUCCESS,
@@ -216,7 +219,7 @@ impl SharedState {
     }
 
     /// Save config to disk WITHOUT syncing to daemon via IPC
-    /// Used when the Daemon already knows about the change (e.g., it initiated the PositionChanged event)
+    /// Used when the Daemon already knows about the change (e.g., it initiated PositionsChanged)
     pub fn save_config_no_sync(&mut self, mode: SaveMode) -> Result<()> {
         self.validate_active_profile()?;
 
@@ -251,6 +254,7 @@ impl SharedState {
             .unwrap_or(0);
 
         self.settings_changed = false;
+        self.pending_position_save = false;
         info!("Configuration saved to disk (no daemon sync)");
         Ok(())
     }
@@ -294,6 +298,7 @@ impl SharedState {
             .unwrap_or(0);
 
         self.settings_changed = false;
+        self.pending_position_save = false;
         self.config_status_message = Some(StatusMessage {
             text: "Changes discarded".to_string(),
             color: COLOR_ERROR,

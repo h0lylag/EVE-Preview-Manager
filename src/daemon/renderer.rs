@@ -710,20 +710,28 @@ impl<'a> ThumbnailRenderer<'a> {
     }
 
     /// Moves the thumbnail window to a new position.
-    pub fn reposition(&mut self, character_name: &str, x: i16, y: i16) -> Result<()> {
+    pub fn reposition(&mut self, x: i16, y: i16) -> Result<()> {
+        self.queue_reposition(x, y)?;
+
+        self.conn
+            .flush()
+            .context("Failed to flush X11 connection after reposition")?;
+        Ok(())
+    }
+
+    /// Queues a thumbnail move without flushing the X11 connection.
+    pub(super) fn queue_reposition(&self, x: i16, y: i16) -> Result<()> {
         self.conn
             .configure_window(
                 self.window,
                 &ConfigureWindowAux::new().x(x as i32).y(y as i32),
             )
-            .context(format!(
-                "Failed to reposition window for '{}' to ({}, {})",
-                character_name, x, y
-            ))?;
-
-        self.conn
-            .flush()
-            .context("Failed to flush X11 connection after reposition")?;
+            .with_context(|| {
+                format!(
+                    "Failed to reposition thumbnail window {} to ({}, {})",
+                    self.window, x, y
+                )
+            })?;
         Ok(())
     }
 

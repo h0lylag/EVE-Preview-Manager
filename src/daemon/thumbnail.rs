@@ -295,13 +295,23 @@ impl<'a> Thumbnail<'a> {
         // No-op
     }
 
-    /// Moves the thumbnail to a new position updates the cached state.
+    /// Moves the thumbnail to a new position and updates the cached state.
     pub fn reposition(&mut self, x: i16, y: i16) -> Result<()> {
-        let effective_character_name = self.effective_character_name().to_string();
-        self.renderer.reposition(&effective_character_name, x, y)?;
+        self.renderer.reposition(x, y)?;
         // Update cached position
         self.current_position = Position::new(x, y);
         Ok(())
+    }
+
+    /// Queues a move without flushing or changing the cached position.
+    pub(super) fn queue_reposition(&self, x: i16, y: i16) -> Result<()> {
+        self.renderer.queue_reposition(x, y)?;
+        Ok(())
+    }
+
+    /// Records a queued position after its shared X11 flush succeeds.
+    pub(super) fn confirm_reposition(&mut self, position: Position) {
+        self.current_position = position;
     }
 
     /// Resizes the thumbnail.

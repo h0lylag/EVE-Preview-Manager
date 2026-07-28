@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::common::types::{CharacterSettings, Position};
+use crate::common::types::{CharacterSettings, Dimensions, Position, SourceIdentity};
 
 /// A named group of typed sources for cycling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,43 +469,38 @@ impl Profile {
 
     /// Update thumbnail position/dimensions if changed.
     /// Returns true if the configuration was modified, false otherwise.
-    pub fn update_thumbnail_position(
+    pub fn update_thumbnail_spatial(
         &mut self,
-        name: &str,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-        is_custom: bool,
+        source: &SourceIdentity,
+        position: Position,
+        dimensions: Dimensions,
     ) -> bool {
-        let map = if is_custom {
+        let map = if source.kind.is_custom() {
             &mut self.custom_source_thumbnails
         } else {
             &mut self.character_thumbnails
         };
 
-        if let Some(existing) = map.get_mut(name) {
+        if let Some(existing) = map.get_mut(&source.name) {
             // Check if anything actually changed
-            if existing.x == x
-                && existing.y == y
-                && existing.dimensions.width == width
-                && existing.dimensions.height == height
+            if existing.x == position.x
+                && existing.y == position.y
+                && existing.dimensions == dimensions
             {
                 // No change
                 return false;
             }
 
             // Update existing entry
-            existing.x = x;
-            existing.y = y;
-            existing.dimensions.width = width;
-            existing.dimensions.height = height;
+            existing.x = position.x;
+            existing.y = position.y;
+            existing.dimensions = dimensions;
             true
         } else {
             // New entry - always a change
             map.insert(
-                name.to_string(),
-                CharacterSettings::new(x, y, width, height),
+                source.name.clone(),
+                CharacterSettings::new(position.x, position.y, dimensions.width, dimensions.height),
             );
             true
         }

@@ -7,7 +7,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
 use crate::common::constants;
-use crate::common::ipc::DaemonMessage;
+use crate::common::ipc::{DaemonMessage, ThumbnailSpatialUpdate};
 use crate::common::types::{Dimensions, Position, SourceIdentity, SourceKind};
 use crate::config::DaemonConfig;
 use crate::config::DisplayConfig;
@@ -646,7 +646,7 @@ pub fn scan_eve_windows<'a>(
             }
             Ok(None) => {
                 // NOTE: Even with rendering disabled, new EVE characters and custom sources
-                // must reach the Manager via PositionChanged so they appear for configuration.
+                // must reach the Manager via PositionsChanged so they appear for configuration.
                 if !display_config.enabled && !identity.name.is_empty() {
                     let is_new = if identity.is_eve() {
                         !daemon_config
@@ -690,13 +690,13 @@ pub fn scan_eve_windows<'a>(
                                 .custom_source_thumbnails
                                 .insert(identity.name.clone(), settings);
                         }
-                        let _ = status_tx.send(DaemonMessage::PositionChanged {
-                            name: identity.name.clone(),
-                            x: spawn_position.x,
-                            y: spawn_position.y,
-                            width: ww,
-                            height: hh,
-                            is_custom: identity.is_custom(),
+                        let update = ThumbnailSpatialUpdate::new(
+                            identity.source_identity(),
+                            spawn_position,
+                            Dimensions::new(ww, hh),
+                        );
+                        let _ = status_tx.send(DaemonMessage::PositionsChanged {
+                            updates: vec![update],
                         });
                         let _ = status_tx.send(DaemonMessage::CharacterDetected {
                             name: identity.name.clone(),

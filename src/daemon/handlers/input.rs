@@ -1,15 +1,227 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use tracing::{debug, warn};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
+use x11rb::rust_connection::RustConnection;
 
 use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
+use super::super::group_drag::{
+    GroupDragMember, GroupDragState, is_group_chord_press, shared_delta, translated_position,
+};
 use super::super::snapping::{self, Rect};
 use super::super::thumbnail::Thumbnail;
 use super::upsert_spatial_settings;
 use crate::common::constants::mouse;
-use crate::common::types::{Position, SourceIdentity};
+use crate::common::ipc::{DaemonMessage, ThumbnailSpatialUpdate};
+use crate::common::types::{Dimensions, Position, SourceIdentity};
+
+fn source_window_for_pointer(
+    ctx: &EventContext<'_, '_>,
+    event_window: Window,
+    root_x: i16,
+    root_y: i16,
+) -> Option<Window> {
+    ctx.eve_clients
+        .iter()
+        .find(|(_, thumbnail)| thumbnail.window() == event_window && thumbnail.is_visible())
+        .or_else(|| {
+            ctx.eve_clients.iter().find(|(_, thumbnail)| {
+                thumbnail.is_hovered(root_x, root_y) && thumbnail.is_visible()
+            })
+        })
+        .map(|(source_window, _)| *source_window)
+}
+
+fn dragging_window(ctx: &EventContext<'_, '_>) -> Option<Window> {
+    ctx.eve_clients
+        .iter()
+        .find(|(_, thumbnail)| thumbnail.input_state.dragging)
+        .map(|(source_window, _)| *source_window)
+}
+
+fn start_group_drag(ctx: &mut EventContext<'_, '_>, anchor: Window, pointer_start: Position) {
+    let members = ctx
+        .eve_clients
+        .iter_mut()
+        .filter_map(|(&source_window, thumbnail)| {
+            thumbnail.input_state.dragging = false;
+            thumbnail.input_state.snap_targets.clear();
+            thumbnail.is_visible().then_some(GroupDragMember {
+                source_window,
+                start_position: thumbnail.current_position,
+            })
+        })
+        .collect::<Vec<_>>();
+    debug_assert!(members.iter().any(|member| member.source_window == anchor));
+
+    debug!(
+        anchor,
+        member_count = members.len(),
+        x = pointer_start.x,
+        y = pointer_start.y,
+        "Started group thumbnail drag"
+    );
+
+    *ctx.group_drag_state = GroupDragState::Active {
+        anchor,
+        pointer_start,
+        members,
+    };
+}
+
+fn commit_thumbnail_positions(ctx: &mut EventContext<'_, '_>, source_windows: &[Window]) {
+    struct Snapshot {
+        source_window: Window,
+        source: Option<SourceIdentity>,
+        position: Position,
+        dimensions: Dimensions,
+    }
+
+    let snapshots = source_windows
+        .iter()
+        .filter_map(|source_window| {
+            ctx.eve_clients
+                .get(source_window)
+                .map(|thumbnail| Snapshot {
+                    source_window: *source_window,
+                    source: thumbnail.effective_source_identity(),
+                    position: thumbnail.current_position,
+                    dimensions: thumbnail.dimensions,
+                })
+        })
+        .collect::<Vec<_>>();
+
+    let mut updates = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        ctx.session_state.update_window_position(
+            snapshot.source_window,
+            snapshot.position.x,
+            snapshot.position.y,
+        );
+
+        let Some(source) = snapshot.source else {
+            continue;
+        };
+
+        let settings = crate::common::types::CharacterSettings::new(
+            snapshot.position.x,
+            snapshot.position.y,
+            snapshot.dimensions.width,
+            snapshot.dimensions.height,
+        );
+        let target = if source.kind.is_custom() {
+            &mut ctx.daemon_config.custom_source_thumbnails
+        } else {
+            &mut ctx.daemon_config.character_thumbnails
+        };
+        upsert_spatial_settings(target, &source.name, settings);
+
+        updates.push(ThumbnailSpatialUpdate::new(
+            source,
+            snapshot.position,
+            snapshot.dimensions,
+        ));
+    }
+
+    if !updates.is_empty() {
+        let update_count = updates.len();
+        if let Err(error) = ctx
+            .status_tx
+            .send(DaemonMessage::PositionsChanged { updates })
+        {
+            warn!(error = %error, update_count, "Failed to send thumbnail position batch");
+        } else {
+            debug!(update_count, "Sent batched thumbnail position update");
+        }
+    }
+}
+
+/// Restores the captured layout when an external event interrupts a group drag.
+/// `excluded_window` identifies a destroyed anchor that can no longer be repositioned.
+pub(in crate::daemon) fn cancel_group_drag(
+    conn: &RustConnection,
+    eve_clients: &mut HashMap<Window, Thumbnail<'_>>,
+    group_drag_state: &mut GroupDragState,
+    excluded_window: Option<Window>,
+) -> Result<usize> {
+    let Some(members) = group_drag_state.cancel_active() else {
+        return Ok(0);
+    };
+
+    let mut queued_positions = Vec::with_capacity(members.len());
+    let mut first_error = None;
+    for member in members {
+        if excluded_window == Some(member.source_window) {
+            continue;
+        }
+        let Some(thumbnail) = eve_clients.get(&member.source_window) else {
+            continue;
+        };
+
+        let restore_result = thumbnail
+            .queue_reposition(member.start_position.x, member.start_position.y)
+            .with_context(|| {
+                format!(
+                    "Failed to restore interrupted group drag for '{}'",
+                    thumbnail.character_name
+                )
+            });
+        match restore_result {
+            Ok(()) => queued_positions.push((member.source_window, member.start_position)),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+
+    let mut flush_succeeded = true;
+    if !queued_positions.is_empty()
+        && let Err(error) = conn
+            .flush()
+            .context("Failed to flush restored group thumbnail positions")
+    {
+        flush_succeeded = false;
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
+
+    if flush_succeeded {
+        for (source_window, position) in &queued_positions {
+            if let Some(thumbnail) = eve_clients.get_mut(source_window) {
+                thumbnail.confirm_reposition(*position);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(queued_positions.len())
+}
+
+fn finish_group_drag(ctx: &mut EventContext<'_, '_>, released_button: u8) {
+    let Some(members) = ctx.group_drag_state.finish_active(released_button) else {
+        return;
+    };
+
+    let moved_windows = members
+        .iter()
+        .filter_map(|member| {
+            ctx.eve_clients
+                .get(&member.source_window)
+                .filter(|thumbnail| thumbnail.current_position != member.start_position)
+                .map(|_| member.source_window)
+        })
+        .collect::<Vec<_>>();
+
+    commit_thumbnail_positions(ctx, &moved_windows);
+
+    debug!(
+        moved_count = moved_windows.len(),
+        released_button, "Finished group thumbnail drag"
+    );
+}
 
 fn set_clicked_cycle_target(
     ctx: &mut EventContext<'_, '_>,
@@ -40,7 +252,7 @@ fn remembered_eve_identity(ctx: &EventContext<'_, '_>, window: Window) -> Option
         .map(|name| SourceIdentity::eve(name.clone()))
 }
 
-/// Handle ButtonPress events - start dragging or prime the clicked cycle target
+/// Handle ButtonPress events - start a single or group drag.
 #[tracing::instrument(skip(ctx), fields(window = event.event))]
 pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> Result<()> {
     debug!(
@@ -50,41 +262,57 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
         "ButtonPress received"
     );
 
-    // First, find which window was clicked (if any)
-    let clicked_window = ctx
-        .eve_clients
-        .iter()
-        .find(|(_, thumb)| thumb.is_hovered(event.root_x, event.root_y) && thumb.is_visible())
-        .map(|(win, _)| *win);
+    if ctx
+        .group_drag_state
+        .should_suppress_press(event.detail, event.state)
+    {
+        return Ok(());
+    }
 
-    let Some(clicked_window) = clicked_window else {
+    let pointer_window = source_window_for_pointer(ctx, event.event, event.root_x, event.root_y);
+
+    if is_group_chord_press(event.detail, event.state) {
+        // If RMB started a normal drag, promote that exact preview even when X11 reports
+        // the second button over a different window under the active pointer grab.
+        let visible_drag_owner = dragging_window(ctx).filter(|source_window| {
+            ctx.eve_clients
+                .get(source_window)
+                .is_some_and(Thumbnail::is_visible)
+        });
+        let Some(anchor) = visible_drag_owner.or(pointer_window) else {
+            return Ok(());
+        };
+        start_group_drag(ctx, anchor, Position::new(event.root_x, event.root_y));
+        return Ok(());
+    }
+
+    let Some(clicked_window) = pointer_window else {
         return Ok(()); // No thumbnail was clicked
     };
 
-    // For right-click drags, collect snap targets BEFORE getting mutable reference
-    let snap_targets = if event.detail == mouse::BUTTON_RIGHT {
-        ctx.eve_clients
-            .iter()
-            .filter(|(win, t)| **win != clicked_window && t.is_visible())
-            .filter_map(|(_, t)| {
-                ctx.app_ctx
-                    .conn
-                    .get_geometry(t.window())
-                    .ok()
-                    .and_then(|req| req.reply().ok())
-                    .map(|geom| Rect {
-                        x: geom.x,
-                        y: geom.y,
-                        width: t.dimensions.width,
-                        height: t.dimensions.height,
-                    })
-            })
-            .collect()
-    } else {
-        Vec::new() // No snap targets needed for left-click
-    };
+    if event.detail != mouse::BUTTON_RIGHT {
+        return Ok(());
+    }
 
-    let mut clicked_identity = None;
+    // Collect snap targets before mutably borrowing the dragged thumbnail.
+    let snap_targets = ctx
+        .eve_clients
+        .iter()
+        .filter(|(win, t)| **win != clicked_window && t.is_visible())
+        .filter_map(|(_, t)| {
+            ctx.app_ctx
+                .conn
+                .get_geometry(t.window())
+                .ok()
+                .and_then(|req| req.reply().ok())
+                .map(|geom| Rect {
+                    x: geom.x,
+                    y: geom.y,
+                    width: t.dimensions.width,
+                    height: t.dimensions.height,
+                })
+        })
+        .collect();
 
     // Now get mutable reference to the clicked thumbnail
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_window) {
@@ -102,37 +330,20 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
         thumbnail.input_state.drag_start = Position::new(event.root_x, event.root_y);
         thumbnail.input_state.win_start = Position::new(geom.x, geom.y);
 
-        // Only allow dragging with right-click
-        if event.detail == mouse::BUTTON_RIGHT {
-            // Store the pre-computed snap targets
-            thumbnail.input_state.snap_targets = snap_targets;
-            thumbnail.input_state.dragging = true;
-            debug!(
-                window = thumbnail.window(),
-                snap_target_count = thumbnail.input_state.snap_targets.len(),
-                "Started dragging thumbnail with cached snap targets"
-            );
-        }
-        // Left-click primes the exact source window for subsequent cycling. Logged-out
-        // EVE thumbnails have empty live names, so the helper resolves their last character.
-        if event.detail == mouse::BUTTON_LEFT {
-            clicked_identity = thumbnail.effective_source_identity();
-        }
-    }
-
-    if event.detail == mouse::BUTTON_LEFT {
-        if clicked_identity.is_none() {
-            clicked_identity = remembered_eve_identity(ctx, clicked_window);
-        }
-        set_clicked_cycle_target(ctx, clicked_window, clicked_identity.as_ref());
+        thumbnail.input_state.snap_targets = snap_targets;
+        thumbnail.input_state.dragging = true;
+        debug!(
+            window = thumbnail.window(),
+            snap_target_count = thumbnail.input_state.snap_targets.len(),
+            "Started dragging thumbnail with cached snap targets"
+        );
     }
 
     Ok(())
 }
 
-/// Handle ButtonRelease events - activate source window and save position after drag
+/// Handle button releases, completing group drags before normal click/drag behavior.
 pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> Result<()> {
-    use crate::common::ipc::DaemonMessage;
     use crate::x11::{activate_window, minimize_window, unminimize_window};
 
     debug!(
@@ -142,18 +353,29 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         "ButtonRelease received"
     );
 
-    // First pass: identify the visible hovered thumbnail by tracked window key.
-    let clicked_key = ctx
-        .eve_clients
-        .iter()
-        .find(|(_, thumb)| {
-            let hovered = thumb.is_hovered(event.root_x, event.root_y) && thumb.is_visible();
-            if hovered {
-                debug!(window = thumb.window(), source = %thumb.character_name, "Found hovered thumbnail");
-            }
-            hovered
-        })
-        .map(|(eve_window, _)| *eve_window);
+    if ctx
+        .group_drag_state
+        .consume_suppressed_release(event.detail)
+    {
+        debug!(detail = event.detail, "Suppressed chord release");
+        return Ok(());
+    }
+
+    if ctx.group_drag_state.is_active()
+        && matches!(event.detail, mouse::BUTTON_LEFT | mouse::BUTTON_RIGHT)
+    {
+        finish_group_drag(ctx, event.detail);
+        return Ok(());
+    }
+
+    let pointer_window = source_window_for_pointer(ctx, event.event, event.root_x, event.root_y);
+    let clicked_key = if event.detail == mouse::BUTTON_RIGHT {
+        // Complete the preview that owns the active RMB drag, even if the pointer was
+        // released outside it or over another preview.
+        dragging_window(ctx).or(pointer_window)
+    } else {
+        pointer_window
+    };
 
     let Some(clicked_key) = clicked_key else {
         debug!("No thumbnail hovered at release position");
@@ -162,6 +384,7 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
 
     let mut clicked_src: Option<Window> = None;
     let mut clicked_identity = None;
+    let mut finished_single_drag = false;
     let is_left_click = event.detail == mouse::BUTTON_LEFT;
 
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&clicked_key) {
@@ -199,67 +422,15 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
             ))?;
         }
 
-        // Save position after drag ends (right-click release)
-        if thumbnail.input_state.dragging {
-            let geom = ctx
-                .app_ctx
-                .conn
-                .get_geometry(thumbnail.window())
-                .context("Failed to send geometry query after drag")?
-                .reply()
-                .context(format!(
-                    "Failed to get geometry after drag for '{}'",
-                    thumbnail.character_name
-                ))?;
-
-            ctx.session_state
-                .update_window_position(clicked_key, geom.x, geom.y);
-
-            let effective_character_name = thumbnail.effective_character_name().to_string();
-            if !effective_character_name.is_empty() {
-                let settings = crate::common::types::CharacterSettings::new(
-                    geom.x,
-                    geom.y,
-                    thumbnail.dimensions.width,
-                    thumbnail.dimensions.height,
-                );
-
-                let is_custom_source = thumbnail.source_kind().is_custom();
-
-                if is_custom_source {
-                    upsert_spatial_settings(
-                        &mut ctx.daemon_config.custom_source_thumbnails,
-                        &effective_character_name,
-                        settings.clone(),
-                    );
-                } else {
-                    upsert_spatial_settings(
-                        &mut ctx.daemon_config.character_thumbnails,
-                        &effective_character_name,
-                        settings.clone(),
-                    );
-                }
-
-                let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                    name: effective_character_name,
-                    x: geom.x,
-                    y: geom.y,
-                    width: thumbnail.dimensions.width,
-                    height: thumbnail.dimensions.height,
-                    is_custom: is_custom_source,
-                });
-            }
-
-            debug!(
-                window = thumbnail.window(),
-                x = geom.x,
-                y = geom.y,
-                "Sent PositionChanged IPC message after drag"
-            );
+        if event.detail == mouse::BUTTON_RIGHT {
+            finished_single_drag = thumbnail.input_state.dragging;
+            thumbnail.input_state.dragging = false;
+            thumbnail.input_state.snap_targets.clear();
         }
+    }
 
-        thumbnail.input_state.dragging = false;
-        thumbnail.input_state.snap_targets.clear();
+    if finished_single_drag {
+        commit_thumbnail_positions(ctx, &[clicked_key]);
     }
 
     // After dropping the thumbnail borrow, update cycle state and borders for left-clicks.
@@ -336,21 +507,55 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
     Ok(())
 }
 
-/// Handle MotionNotify events - process drag motion with snapping
+/// Move a captured group without snapping, or process a single drag with snapping.
 #[tracing::instrument(skip(ctx), fields(window = event.event))]
 pub fn handle_motion_notify(ctx: &mut EventContext, event: MotionNotifyEvent) -> Result<()> {
     use tracing::trace;
 
     trace!(x = event.root_x, y = event.root_y, "MotionNotify received");
 
-    // Find the dragging thumbnail
-    let dragging_window = ctx
-        .eve_clients
-        .iter()
-        .find(|(_, t)| t.input_state.dragging)
-        .map(|(win, _)| *win);
+    let group_state = &*ctx.group_drag_state;
+    let eve_clients = &mut *ctx.eve_clients;
+    if let GroupDragState::Active {
+        pointer_start,
+        members,
+        ..
+    } = group_state
+    {
+        let pointer_start = *pointer_start;
+        let pointer_now = Position::new(event.root_x, event.root_y);
+        let delta = shared_delta(members, pointer_start, pointer_now);
 
-    let Some(dragging_window) = dragging_window else {
+        for member in members {
+            let Some(thumbnail) = eve_clients.get(&member.source_window) else {
+                continue;
+            };
+            let position = translated_position(member.start_position, delta);
+            thumbnail
+                .queue_reposition(position.x, position.y)
+                .with_context(|| {
+                    format!(
+                        "Failed to queue group drag move for '{}'",
+                        thumbnail.character_name
+                    )
+                })?;
+        }
+
+        ctx.app_ctx
+            .conn
+            .flush()
+            .context("Failed to flush group thumbnail drag moves")?;
+        for member in members {
+            if let Some(thumbnail) = eve_clients.get_mut(&member.source_window) {
+                let position = translated_position(member.start_position, delta);
+                thumbnail.confirm_reposition(position);
+            }
+        }
+        return Ok(());
+    }
+
+    // Find the dragging thumbnail
+    let Some(dragging_window) = dragging_window(ctx) else {
         return Ok(());
     };
 
@@ -370,10 +575,12 @@ pub fn handle_motion_notify(ctx: &mut EventContext, event: MotionNotifyEvent) ->
         thumbnail.dimensions.height,
         snap_threshold,
     )
-    .context(format!(
-        "Failed to handle drag motion for '{}'",
-        thumbnail.character_name
-    ))?;
+    .with_context(|| {
+        format!(
+            "Failed to handle drag motion for '{}'",
+            thumbnail.character_name
+        )
+    })?;
 
     Ok(())
 }

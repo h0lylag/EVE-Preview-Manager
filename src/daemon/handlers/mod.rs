@@ -1,6 +1,6 @@
-pub mod input;
-pub mod state;
-pub mod window;
+pub(super) mod input;
+pub(super) mod state;
+pub(super) mod window;
 
 use crate::common::types::CharacterSettings;
 use std::collections::HashMap;

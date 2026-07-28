@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::common::constants::manager_ui::*;
-use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
+use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage, ThumbnailSpatialUpdate};
 
 use super::core::SaveMode;
 use crate::manager::utils::spawn_daemon;
@@ -175,6 +175,42 @@ impl SharedState {
         self.restart_daemon();
     }
 
+    fn apply_thumbnail_positions(&mut self, updates: &[ThumbnailSpatialUpdate]) -> bool {
+        let Some(profile) = self.config.get_active_profile_mut() else {
+            return false;
+        };
+
+        let mut changed = false;
+        for update in updates {
+            changed |= profile.update_thumbnail_spatial(
+                &update.source,
+                update.position,
+                update.dimensions,
+            );
+        }
+        changed
+    }
+
+    fn position_save_due(&self) -> bool {
+        self.pending_position_save
+            && self.last_save_attempt.elapsed() >= Duration::from_millis(AUTO_SAVE_DELAY_MS)
+    }
+
+    fn flush_pending_position_save(&mut self) {
+        if !self.position_save_due() {
+            return;
+        }
+
+        self.last_save_attempt = Instant::now();
+        if let Err(error) = self.save_config_no_sync(SaveMode::Explicit) {
+            error!(error = %error, "Failed to auto-save thumbnail positions");
+            self.pending_position_save = true;
+            self.settings_changed = true;
+        } else {
+            debug!("Deferred thumbnail position auto-save completed");
+        }
+    }
+
     pub fn poll_daemon(&mut self) {
         // 1. Check for Bootstrap handshake
         if let Some(ref rx) = self.bootstrap_rx
@@ -243,20 +279,8 @@ impl SharedState {
                         color: crate::common::constants::manager_ui::STATUS_RUNNING,
                     });
                 }
-                DaemonMessage::PositionChanged {
-                    name,
-                    x,
-                    y,
-                    width,
-                    height,
-                    is_custom,
-                } => {
-                    let mut changed = false;
-                    if let Some(profile) = self.config.get_active_profile_mut() {
-                        changed = profile
-                            .update_thumbnail_position(&name, x, y, width, height, is_custom);
-                    }
-
+                DaemonMessage::PositionsChanged { updates } => {
+                    let changed = self.apply_thumbnail_positions(&updates);
                     if !changed {
                         continue;
                     }
@@ -268,33 +292,19 @@ impl SharedState {
                         .unwrap_or(false);
 
                     debug!("Position changed: auto_save={}", auto_save);
+                    self.settings_changed = true;
+                    self.config_status_message = None;
 
                     if auto_save {
-                        // Debounce save: only write to disk if it's been at least 1 second since last attempt
-                        if self.last_save_attempt.elapsed()
-                            > Duration::from_millis(AUTO_SAVE_DELAY_MS)
+                        // Confirm the complete batch. The daemon will skip its own coordinates
+                        // through the existing idempotency check.
+                        if let Some(ref tx) = self.ipc_config_tx
+                            && let Err(error) = tx.send(ConfigMessage::ThumbnailMoves { updates })
                         {
-                            // Save to disk only (Daemon already has the correct position)
-                            let _ = self.save_config_no_sync(SaveMode::Explicit);
-
-                            // Send lightweight delta to confirm the position
-                            // Daemon will perform idempotency check and skip redundant X11 operations
-                            if let Some(ref tx) = self.ipc_config_tx {
-                                let _ = tx.send(ConfigMessage::ThumbnailMove {
-                                    name: name.clone(),
-                                    is_custom,
-                                    x,
-                                    y,
-                                    width,
-                                    height,
-                                });
-                            }
-
-                            self.last_save_attempt = Instant::now();
-                            debug!("Debounced auto-save triggered with ThumbnailMove delta");
-                        } else {
-                            self.settings_changed = true; // Mark as dirty for final save
+                            warn!(error = %error, "Failed to acknowledge thumbnail position batch");
                         }
+                        self.pending_position_save = true;
+                        self.flush_pending_position_save();
                     }
                 }
                 DaemonMessage::CharacterDetected { name, is_custom } => {
@@ -328,6 +338,8 @@ impl SharedState {
                 warn!("Requested profile '{}' not found", name);
             }
         }
+
+        self.flush_pending_position_save();
 
         // IPC Health Check
         // If connected but no heartbeat for 15s (5s grace * 3), assume hung process
@@ -382,6 +394,8 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::types::{Dimensions, Position, SourceIdentity};
+    use crate::config::profile::Config;
     use std::process::{Command, Stdio};
 
     fn spawn_shell(script: &str) -> Child {
@@ -393,6 +407,23 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn shell child for daemon wait test")
+    }
+
+    fn sample_spatial_update() -> ThumbnailSpatialUpdate {
+        ThumbnailSpatialUpdate::new(
+            SourceIdentity::eve("Character"),
+            Position::new(10, 20),
+            Dimensions::new(300, 200),
+        )
+    }
+
+    fn deliver_positions(state: &mut SharedState, updates: Vec<ThumbnailSpatialUpdate>) {
+        let (sender, receiver) = mpsc::channel();
+        state.daemon_status_rx = Some(receiver);
+        sender
+            .send(DaemonMessage::PositionsChanged { updates })
+            .expect("position batch should enter the manager queue");
+        state.poll_daemon();
     }
 
     #[test]
@@ -416,5 +447,84 @@ mod tests {
         assert!(status.is_none());
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn applies_entire_spatial_batch_before_reporting_change() {
+        let mut state = SharedState::new(Config::default(), false);
+        let updates = vec![
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::eve("Shared Name"),
+                Position::new(10, 20),
+                Dimensions::new(300, 200),
+            ),
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::custom("Shared Name"),
+                Position::new(40, 50),
+                Dimensions::new(640, 360),
+            ),
+        ];
+
+        assert!(state.apply_thumbnail_positions(&updates));
+        let profile = state
+            .config
+            .get_active_profile()
+            .expect("default config should have an active profile");
+        assert_eq!(profile.character_thumbnails["Shared Name"].x, 10);
+        assert_eq!(profile.character_thumbnails["Shared Name"].y, 20);
+        assert_eq!(
+            profile.character_thumbnails["Shared Name"].dimensions,
+            Dimensions::new(300, 200)
+        );
+        assert_eq!(profile.custom_source_thumbnails["Shared Name"].x, 40);
+        assert_eq!(profile.custom_source_thumbnails["Shared Name"].y, 50);
+        assert_eq!(
+            profile.custom_source_thumbnails["Shared Name"].dimensions,
+            Dimensions::new(640, 360)
+        );
+        assert!(!state.apply_thumbnail_positions(&updates));
+    }
+
+    #[test]
+    fn pending_position_save_becomes_due_after_debounce() {
+        let mut state = SharedState::new(Config::default(), false);
+
+        state.pending_position_save = true;
+        assert!(!state.position_save_due());
+
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+        assert!(state.position_save_due());
+    }
+
+    #[test]
+    fn auto_save_off_keeps_position_changes_pending_for_manual_save() {
+        let mut state = SharedState::new(Config::default(), false);
+        state
+            .config
+            .get_active_profile_mut()
+            .expect("default config should have an active profile")
+            .thumbnail_auto_save_position = false;
+
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+
+        assert!(state.settings_changed);
+        assert!(!state.pending_position_save);
+    }
+
+    #[test]
+    fn auto_save_on_schedules_a_deferred_position_save() {
+        let mut state = SharedState::new(Config::default(), false);
+        state
+            .config
+            .get_active_profile_mut()
+            .expect("default config should have an active profile")
+            .thumbnail_auto_save_position = true;
+        state.last_save_attempt = Instant::now();
+
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+
+        assert!(state.settings_changed);
+        assert!(state.pending_position_save);
+        assert!(!state.position_save_due());
     }
 }

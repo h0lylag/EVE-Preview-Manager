@@ -12,10 +12,6 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    pub fn from_is_custom(is_custom: bool) -> Self {
-        if is_custom { Self::Custom } else { Self::Eve }
-    }
-
     pub fn is_custom(self) -> bool {
         matches!(self, Self::Custom)
     }
@@ -47,10 +43,6 @@ impl SourceIdentity {
 
     pub fn custom(name: impl Into<String>) -> Self {
         Self::new(SourceKind::Custom, name)
-    }
-
-    pub fn from_parts(name: impl Into<String>, is_custom: bool) -> Self {
-        Self::new(SourceKind::from_is_custom(is_custom), name)
     }
 }
 

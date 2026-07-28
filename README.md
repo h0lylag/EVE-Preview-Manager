@@ -15,6 +15,7 @@ EVE Preview Manager is a Linux-native tool for managing multiple EVE Online clie
 - One-click character import for cycle groups
 - Optional cycling through logged-off clients
 - Auto-minimize inactive windows and inherit positions for new characters
+- Move one preview with RMB drag or all visible previews with an LMB+RMB drag
 - Option to disable thumbnails altogether
 
 <br>
@@ -38,12 +39,13 @@ EVE Preview Manager is a Linux-native tool for managing multiple EVE Online clie
 2. **Manage Profiles**: Use the GUI to create specific profiles for different activities (e.g., PvP, Mining). You can add, remove, or duplicate profiles to quickly switch between setups.
 3. **Configure Display Settings**: Customize the look and feel of your thumbnails, including size, opacity, fonts, borders, and colors to match your preferences.
 4. **Set Up Hotkeys**: Configure hotkeys to cycle between clients in your active group.
-5. **Manage Characters**:
+5. **Arrange Previews**: Drag a preview with RMB to move it individually. Hold LMB and RMB in either order on any preview, then drag to move the previews visible when the chord begins as one group. Releasing either button ends the group drag; previews that appear later are not added mid-drag.
+6. **Manage Characters**:
    - **Add Characters**: Click the "Add" button to include EVE characters in your cycle group. Active and previously detected clients will appear in the popup.
    - **Manual Entry**: Alternatively, switch to "Text Editor" mode to manually paste a list of character names (one per line).
    - **Individual Hotkeys**: Once added to the cycle group, you can bind specific hotkeys to individual characters for direct access.
-6. **Save & Apply**: Click "Save & Apply" to save your current configuration and refresh the previews.
-7. **Swap Profiles**: Swapping profiles can be done quickly by right-clicking the system tray icon and selecting the desired profile.
+7. **Save & Apply**: Click "Save & Apply" to save your current configuration and refresh the previews.
+8. **Swap Profiles**: Swapping profiles can be done quickly by right-clicking the system tray icon and selecting the desired profile.
 
 **Note**: Configuration is stored in `~/.config/eve-preview-manager/config.json`.
 

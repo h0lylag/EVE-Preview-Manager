@@ -26,6 +26,7 @@ use super::border_update::sync_focused_borders;
 use super::cycle_state::{CycleActivation, CycleState};
 use super::dispatcher::{EventContext, handle_event};
 use super::font;
+use super::group_drag::GroupDragState;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
 
@@ -48,6 +49,28 @@ struct DaemonResources<'a> {
     session: SessionState,
     cycle: CycleState,
     eve_clients: HashMap<Window, Thumbnail<'a>>,
+    group_drag: GroupDragState,
+}
+
+fn restore_interrupted_group_drag(
+    conn: &RustConnection,
+    resources: &mut DaemonResources<'_>,
+    reason: &'static str,
+) {
+    match super::handlers::input::cancel_group_drag(
+        conn,
+        &mut resources.eve_clients,
+        &mut resources.group_drag,
+        None,
+    ) {
+        Ok(0) => {}
+        Ok(restored_count) => {
+            debug!(restored_count, reason, "Restored interrupted group drag")
+        }
+        Err(error) => {
+            warn!(error = %error, reason, "Failed to restore interrupted group drag")
+        }
+    }
 }
 
 fn direct_tracked_source_window(
@@ -473,6 +496,7 @@ async fn run_event_loop(
                         eve_clients: &mut resources.eve_clients,
                         session_state: &mut resources.session,
                         cycle_state: &mut resources.cycle,
+                        group_drag_state: &mut resources.group_drag,
 
                         status_tx: &status_tx,
                         font_renderer: &font_renderer,
@@ -762,6 +786,7 @@ async fn run_event_loop(
             // Only process this branch if there's an active deadline
             () = &mut hide_timer, if resources.session.focus_loss_deadline.is_some() => {
                 debug!("Executing delayed thumbnail hide");
+                restore_interrupted_group_drag(conn, &mut resources, "focus-loss hide");
                 for thumbnail in resources.eve_clients.values_mut() {
                     if let Err(e) = thumbnail.visibility(false) {
                         error!(error = %e, character = %thumbnail.character_name, "Failed to hide thumbnail on focus timeout");
@@ -805,6 +830,7 @@ async fn run_event_loop(
                     DaemonControlMessage::Config(ConfigMessage::Full(new_config)) => {
                         let new_config = *new_config; // Unbox
                         info!("Received full config update via IPC");
+                        restore_interrupted_group_drag(conn, &mut resources, "configuration update");
 
                         // Update DaemonConfig
                         resources.config = new_config;
@@ -848,65 +874,44 @@ async fn run_event_loop(
                         info!("Full config updated");
                     },
 
-                    DaemonControlMessage::Config(ConfigMessage::ThumbnailMove {
-                        name,
-                        is_custom,
-                        x,
-                        y,
-                        width,
-                        height,
+                    DaemonControlMessage::Config(ConfigMessage::ThumbnailMoves {
+                        updates,
                     }) => {
-                        debug!(
-                            name = %name,
-                            is_custom = is_custom,
-                            x = x,
-                            y = y,
-                            width = width,
-                            height = height,
-                            "Received ThumbnailMove delta"
-                        );
+                        debug!(update_count = updates.len(), "Received thumbnail move batch");
 
-                        let target_identity = SourceIdentity::from_parts(name.clone(), is_custom);
+                        for update in updates {
+                            let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
+                                t.effective_source_identity().as_ref() == Some(&update.source)
+                            });
 
-                        // Find the specific thumbnail by typed identity.
-                        let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
-                            t.effective_source_identity().as_ref() == Some(&target_identity)
-                        });
+                            if let Some(thumb) = thumbnail_opt {
+                                if thumb.current_position == update.position
+                                    && thumb.dimensions == update.dimensions
+                                {
+                                    debug!(
+                                        name = %update.source.name,
+                                        "Thumbnail move ignored: position/size unchanged"
+                                    );
+                                    continue;
+                                }
 
-                        if let Some(thumb) = thumbnail_opt {
-                            // IDEMPOTENCY CHECK (Critical for performance)
-                            // If the position/size matches what we already have, skip processing
-                            // This prevents redundant X11 operations when the Daemon initiated the change
-                            if thumb.current_position.x == x
-                                && thumb.current_position.y == y
-                                && thumb.dimensions.width == width
-                                && thumb.dimensions.height == height
-                            {
-                                debug!(
-                                    name = %name,
-                                    "ThumbnailMove ignored: position/size unchanged (idempotent)"
+                                if let Err(e) = thumb.reposition(update.position.x, update.position.y) {
+                                    error!(name = %update.source.name, error = %e, "Failed to reposition thumbnail");
+                                }
+                                if let Err(e) = thumb.resize(update.dimensions.width, update.dimensions.height) {
+                                    error!(name = %update.source.name, error = %e, "Failed to resize thumbnail");
+                                }
+                                info!(
+                                    name = %update.source.name,
+                                    x = update.position.x,
+                                    y = update.position.y,
+                                    width = update.dimensions.width,
+                                    height = update.dimensions.height,
+                                    "Position updated by Manager"
                                 );
-                                continue;  // Skip to next iteration of select! loop
+                            } else {
+                                debug!(name = %update.source.name, kind = ?update.source.kind, "Thumbnail move ignored: source not tracked");
                             }
-
-                            // Position differs - Manager corrected it (e.g., snapping, clamping)
-                            // Apply the Manager's authoritative coordinates
-                            if let Err(e) = thumb.reposition(x, y) {
-                                error!(name = %name, error = %e, "Failed to reposition thumbnail");
-                            }
-                            if let Err(e) = thumb.resize(width, height) {
-                                error!(name = %name, error = %e, "Failed to resize thumbnail");
-                            }
-                            info!(
-                                name = %name,
-                                x = x,
-                                y = y,
-                                width = width,
-                                height = height,
-                                "Position updated by Manager (ThumbnailMove delta)"
-                            );
-                        } else {
-                            debug!(name = %name, is_custom = is_custom, "ThumbnailMove ignored: source not tracked");
                         }
                     }
                 }
@@ -941,9 +946,9 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     debug!("Waiting for initial configuration...");
     let initial_config = match config_rx.recv() {
         Ok(ConfigMessage::Full(config)) => *config,
-        Ok(ConfigMessage::ThumbnailMove { .. }) => {
+        Ok(ConfigMessage::ThumbnailMoves { .. }) => {
             return Err(anyhow::anyhow!(
-                "Expected Full config on startup, got ThumbnailMove"
+                "Expected Full config on startup, got ThumbnailMoves"
             ));
         }
         Ok(ConfigMessage::Shutdown) => {
@@ -1050,6 +1055,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         session: session_state,
         cycle: cycle_state,
         eve_clients,
+        group_drag: GroupDragState::default(),
     };
 
     run_event_loop(
@@ -1230,6 +1236,7 @@ fn handle_cycle_command(
             None
         }
         CycleCommand::TogglePreviews => {
+            restore_interrupted_group_drag(ctx.conn, resources, "preview visibility toggle");
             resources.config.runtime_hidden = !resources.config.runtime_hidden;
             info!(
                 hidden = resources.config.runtime_hidden,

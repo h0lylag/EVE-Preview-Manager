@@ -1,7 +1,26 @@
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use serde::{Deserialize, Serialize};
 
+use crate::common::types::{Dimensions, Position, SourceIdentity};
 use crate::config::DaemonConfig;
+
+/// Spatial state for one thumbnail, shared by Manager/Daemon batch updates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ThumbnailSpatialUpdate {
+    pub source: SourceIdentity,
+    pub position: Position,
+    pub dimensions: Dimensions,
+}
+
+impl ThumbnailSpatialUpdate {
+    pub fn new(source: SourceIdentity, position: Position, dimensions: Dimensions) -> Self {
+        Self {
+            source,
+            position,
+            dimensions,
+        }
+    }
+}
 
 /// Messages sent from Manager to Daemon
 #[derive(Debug, Serialize, Deserialize)]
@@ -10,21 +29,15 @@ pub enum ConfigMessage {
     ///
     /// Used for low-frequency, heavy operations like initial startup, profile switching,
     /// or bulk GUI setting changes. The payload is Boxed to reduce the enum size,
-    /// optimizing the memory footprint for the high-frequency `ThumbnailMove` variant.
+    /// keeping the enum compact for lightweight `ThumbnailMoves` messages.
     Full(Box<DaemonConfig>),
 
-    /// Lightweight spatial delta for a single thumbnail.
+    /// Lightweight spatial deltas for one or more thumbnails.
     ///
-    /// Used during high-frequency drag events to avoid the overhead of full state serialization.
-    /// The Daemon applies this incrementally and enforces idempotency to prevent redundant
-    /// X11 re-configurations during rapid movement.
-    ThumbnailMove {
-        name: String,
-        is_custom: bool,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
+    /// Used to acknowledge daemon-originated position batches without serializing the full
+    /// configuration. The Daemon applies each update idempotently.
+    ThumbnailMoves {
+        updates: Vec<ThumbnailSpatialUpdate>,
     },
 
     /// Request a graceful daemon shutdown.
@@ -49,16 +62,11 @@ pub enum DaemonMessage {
     },
     /// Notification that a thumbnail's spatial state was detected or changed by the Daemon.
     ///
-    /// Upon receipt, the Manager updates its local state, saves to disk, and acknowledges
-    /// with a `ThumbnailMove` delta. This confirms the new position without triggering
-    /// a full config sync cycle.
-    PositionChanged {
-        name: String,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-        is_custom: bool,
+    /// The Manager applies the complete batch to its active profile. When position auto-save
+    /// is enabled, it persists the batch and acknowledges it with `ThumbnailMoves` without
+    /// triggering a full config sync cycle.
+    PositionsChanged {
+        updates: Vec<ThumbnailSpatialUpdate>,
     },
     /// Daemon encountered an error
     Error(String),
@@ -142,6 +150,56 @@ mod tests {
             received.profile_hotkeys.get(&binding),
             Some(&received.profile.profile_name)
         );
+    }
+
+    #[test]
+    fn spatial_update_batches_round_trip_over_ipc() {
+        let updates = vec![
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::eve("EVE Character"),
+                Position::new(10, 20),
+                Dimensions::new(300, 200),
+            ),
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::custom("Custom Source"),
+                Position::new(-50, 125),
+                Dimensions::new(640, 360),
+            ),
+        ];
+        let (config_sender, config_receiver) =
+            ipc::channel::<ConfigMessage>().expect("config IPC channel should be created");
+        let (status_sender, status_receiver) =
+            ipc::channel::<DaemonMessage>().expect("status IPC channel should be created");
+
+        config_sender
+            .send(ConfigMessage::ThumbnailMoves {
+                updates: updates.clone(),
+            })
+            .expect("thumbnail move batch should be sent");
+        let ConfigMessage::ThumbnailMoves {
+            updates: received_config,
+        } = config_receiver
+            .recv()
+            .expect("thumbnail move batch should be received")
+        else {
+            panic!("expected thumbnail move batch");
+        };
+        assert_eq!(received_config, updates);
+
+        status_sender
+            .send(DaemonMessage::PositionsChanged {
+                updates: updates.clone(),
+            })
+            .expect("positions changed batch should be sent");
+        let DaemonMessage::PositionsChanged {
+            updates: received_status,
+        } = status_receiver
+            .recv()
+            .expect("positions changed batch should be received")
+        else {
+            panic!("expected positions changed batch");
+        };
+        assert_eq!(received_status, updates);
     }
 
     #[test]

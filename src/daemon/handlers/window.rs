@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::ErrorKind;
@@ -9,7 +9,10 @@ use x11rb::protocol::xproto::*;
 use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
 use super::upsert_spatial_settings;
-use crate::common::types::{CharacterSettings, Position, ThumbnailState};
+use crate::common::ipc::{DaemonMessage, ThumbnailSpatialUpdate};
+use crate::common::types::{
+    CharacterSettings, Dimensions, Position, SourceIdentity, ThumbnailState,
+};
 
 fn source_window_position(ctx: &crate::x11::AppContext, window: Window) -> Option<Position> {
     ctx.conn
@@ -17,6 +20,29 @@ fn source_window_position(ctx: &crate::x11::AppContext, window: Window) -> Optio
         .ok()
         .and_then(|cookie| cookie.reply().ok())
         .map(|geom| Position::new(geom.x, geom.y))
+}
+
+fn remove_from_group_drag(ctx: &mut EventContext<'_, '_>, source_window: Window) {
+    if ctx.group_drag_state.anchor() == Some(source_window) {
+        match super::input::cancel_group_drag(
+            ctx.app_ctx.conn,
+            ctx.eve_clients,
+            ctx.group_drag_state,
+            Some(source_window),
+        ) {
+            Ok(restored_count) => debug!(
+                source_window,
+                restored_count, "Cancelled group drag after anchor disappeared"
+            ),
+            Err(error) => warn!(
+                source_window,
+                error = %error,
+                "Failed to restore group after anchor disappeared"
+            ),
+        }
+    } else {
+        ctx.group_drag_state.remove_member(source_window);
+    }
 }
 
 /// Handle DamageNotify events - update damaged thumbnail
@@ -56,6 +82,7 @@ pub fn handle_damage_notify(
                     "Ignoring damage event for destroyed source window"
                 );
 
+                remove_from_group_drag(ctx, source_window);
                 ctx.cycle_state.remove_window(source_window);
                 ctx.session_state.remove_window(source_window);
                 ctx.eve_clients.remove(&source_window);
@@ -98,7 +125,6 @@ pub fn process_detected_window(
     window: Window,
     identity: crate::daemon::window_detection::WindowIdentity,
 ) -> Result<()> {
-    use crate::common::ipc::DaemonMessage;
     use crate::daemon::window_detection::check_and_create_window;
 
     debug!(
@@ -164,13 +190,13 @@ pub fn process_detected_window(
                             );
                         }
 
-                        let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                            name: effective_character_name.clone(),
-                            x: settings.x,
-                            y: settings.y,
-                            width: settings.dimensions.width,
-                            height: settings.dimensions.height,
-                            is_custom: identity.is_custom(),
+                        let update = ThumbnailSpatialUpdate::new(
+                            SourceIdentity::new(identity.kind, effective_character_name.clone()),
+                            Position::new(settings.x, settings.y),
+                            settings.dimensions,
+                        );
+                        let _ = ctx.status_tx.send(DaemonMessage::PositionsChanged {
+                            updates: vec![update],
                         });
 
                         // Only send CharacterDetected if this is a new window (avoid spam from Create+Map)
@@ -278,7 +304,7 @@ pub fn process_detected_window(
         }
         Ok(None) => {
             // NOTE: Even with rendering disabled, new EVE characters and custom sources
-            // must reach the Manager via PositionChanged so they appear for configuration.
+            // must reach the Manager via PositionsChanged so they appear for configuration.
             if !ctx.display_config.enabled && !identity.name.is_empty() {
                 let is_new = if identity.is_eve() {
                     !ctx.daemon_config
@@ -328,13 +354,13 @@ pub fn process_detected_window(
                             .custom_source_thumbnails
                             .insert(identity.name.clone(), settings);
                     }
-                    let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                        name: identity.name.clone(),
-                        x: spawn_position.x,
-                        y: spawn_position.y,
-                        width: w,
-                        height: h,
-                        is_custom: identity.is_custom(),
+                    let update = ThumbnailSpatialUpdate::new(
+                        identity.source_identity(),
+                        spawn_position,
+                        Dimensions::new(w, h),
+                    );
+                    let _ = ctx.status_tx.send(DaemonMessage::PositionsChanged {
+                        updates: vec![update],
                     });
                     let _ = ctx.status_tx.send(DaemonMessage::CharacterDetected {
                         name: identity.name.clone(),
@@ -359,7 +385,6 @@ fn refresh_tracked_window(
     window: Window,
     identity: &crate::daemon::window_detection::WindowIdentity,
 ) -> Result<bool> {
-    use crate::common::ipc::DaemonMessage;
     use crate::x11::{get_active_window, is_window_minimized};
 
     if !ctx.eve_clients.contains_key(&window) {
@@ -455,13 +480,10 @@ fn refresh_tracked_window(
             };
 
             if changed {
-                position_changed = Some((
-                    effective_character_name,
-                    settings.x,
-                    settings.y,
-                    settings.dimensions.width,
-                    settings.dimensions.height,
-                    identity.is_custom(),
+                position_changed = Some(ThumbnailSpatialUpdate::new(
+                    SourceIdentity::new(identity.kind, effective_character_name),
+                    Position::new(settings.x, settings.y),
+                    settings.dimensions,
                 ));
             }
         }
@@ -484,14 +506,9 @@ fn refresh_tracked_window(
         }
     }
 
-    if let Some((name, x, y, width, height, is_custom)) = position_changed {
-        let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-            name,
-            x,
-            y,
-            width,
-            height,
-            is_custom,
+    if let Some(update) = position_changed {
+        let _ = ctx.status_tx.send(DaemonMessage::PositionsChanged {
+            updates: vec![update],
         });
     }
 
@@ -581,6 +598,7 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
             client_window = win,
             "DestroyNotify matched tracked source (direct or parent)"
         );
+        remove_from_group_drag(ctx, win);
         ctx.cycle_state.remove_window(win);
         ctx.session_state.remove_window(win);
         ctx.eve_clients.remove(&win);
@@ -595,7 +613,6 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
 
 /// Handle PropertyNotify for identity changes (WM_NAME or WM_CLASS) to detect late-identifying windows
 pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<()> {
-    use crate::common::ipc::DaemonMessage;
     use crate::daemon::window_detection::identify_window;
     use crate::x11::is_window_eve;
 
@@ -718,13 +735,13 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                         is_custom: false,
                     });
 
-                    let _ = ctx.status_tx.send(DaemonMessage::PositionChanged {
-                        name: new_character_name.to_string(),
-                        x: settings.x,
-                        y: settings.y,
-                        width: settings.dimensions.width,
-                        height: settings.dimensions.height,
-                        is_custom: false, // EVE chars are never custom sources
+                    let update = ThumbnailSpatialUpdate::new(
+                        SourceIdentity::eve(new_character_name),
+                        Position::new(settings.x, settings.y),
+                        settings.dimensions,
+                    );
+                    let _ = ctx.status_tx.send(DaemonMessage::PositionsChanged {
+                        updates: vec![update],
                     });
 
                     Some(settings)
