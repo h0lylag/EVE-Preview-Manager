@@ -202,12 +202,11 @@ impl ManagerApp {
     }
 }
 
-impl eframe::App for ManagerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Lock shared state
-        // Clone Arc to separate borrow from self
-        let state_arc = self.state.clone();
-        let mut state_guard = match state_arc.lock() {
+impl ManagerApp {
+    // Eframe skips `ui` for hidden viewports but continues calling `logic`, so
+    // daemon polling and tray commands must stay in this path.
+    fn update_logic(&mut self, ctx: &egui::Context) {
+        let mut state_guard = match self.state.lock() {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to lock shared state: {:?}", e);
@@ -224,11 +223,11 @@ impl eframe::App for ManagerApp {
             self.update_signal.notify_one();
         }
 
-        // Track window geometry changes and update config
-        // Clone viewport info to avoid lifetime issues
-        let viewport_info = ctx.input(|i| i.viewport().clone());
-
-        let is_minimized = viewport_info.minimized.unwrap_or(false);
+        // Track window geometry changes and update config.
+        let (is_minimized, inner_rect) = ctx.input(|input| {
+            let viewport = input.viewport();
+            (viewport.minimized.unwrap_or(false), viewport.inner_rect)
+        });
 
         if state.config.global.minimize_to_tray && is_minimized {
             if !self.minimize_to_tray_handled {
@@ -253,7 +252,7 @@ impl eframe::App for ManagerApp {
         }
 
         // Try to get window size from viewport inner_rect first, fall back to content_rect
-        let (new_width, new_height) = if let Some(inner_rect) = viewport_info.inner_rect {
+        let (new_width, new_height) = if let Some(inner_rect) = inner_rect {
             (inner_rect.width() as u16, inner_rect.height() as u16)
         } else {
             // Fallback for platforms where inner_rect is None (e.g., Wayland)
@@ -279,12 +278,33 @@ impl eframe::App for ManagerApp {
             return;
         }
 
+        ctx.request_repaint_after(Duration::from_millis(DAEMON_CHECK_INTERVAL_MS));
+    }
+}
+
+impl eframe::App for ManagerApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_logic(ctx);
+    }
+
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root_ui.ctx().clone();
+
+        let mut state_guard = match self.state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to lock shared state: {:?}", e);
+                return;
+            }
+        };
+        let state = &mut *state_guard;
+
         let mut action = ProfileAction::None;
 
         // Global Header Panel (Fixed at top)
-        egui::TopBottomPanel::top("global_header").show(ctx, |ui| {
+        egui::Panel::top("global_header").show(root_ui, |ui| {
             action = components::header::render(
-                ctx,
+                &ctx,
                 ui,
                 state,
                 &mut self.active_tab,
@@ -331,7 +351,7 @@ impl eframe::App for ManagerApp {
         }
 
         // Main Content Body
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(root_ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let current_profile = &mut state.config.profiles[state.selected_profile_idx];
 
@@ -406,8 +426,6 @@ impl eframe::App for ManagerApp {
                 }
             });
         });
-
-        ctx.request_repaint_after(Duration::from_millis(DAEMON_CHECK_INTERVAL_MS));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -416,7 +434,7 @@ impl eframe::App for ManagerApp {
                 error!(error = ?err, "Failed to stop daemon during shutdown");
             }
             // Save config (merging daemon positions if needed, though daemon is stopped)
-            // Just saving is enough as update loop keeps state.config fresh
+            // Just saving is enough because the logic callback keeps state.config fresh.
             if let Err(err) = state.save_config(SaveMode::Implicit) {
                 error!(error = ?err, "Failed to save window geometry on exit");
             } else {
@@ -480,4 +498,46 @@ pub fn run_manager(debug_mode: bool) -> Result<()> {
         Box::new(move |cc| Ok(Box::new(ManagerApp::new(cc, config, debug_mode)))),
     )
     .map_err(|err| anyhow!("Failed to launch Manager: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logic_handles_tray_quit_without_rendering_ui() {
+        let mut shared_state = SharedState::new(Config::default(), false);
+        shared_state.should_quit = true;
+
+        let mut app = ManagerApp {
+            state: Arc::new(Mutex::new(shared_state)),
+            profile_selector: ProfileSelector::new(),
+            behavior_settings_state: components::behavior_settings::BehaviorSettingsState::default(
+            ),
+            hotkey_settings_state: components::hotkey_settings::HotkeySettingsState::default(),
+            visual_settings_state: components::visual_settings::VisualSettingsState::default(),
+            characters_state: components::characters::CharactersState::default(),
+            sources_state: components::sources::SourcesTab::default(),
+            #[cfg(target_os = "linux")]
+            shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(target_os = "linux")]
+            update_signal: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(target_os = "linux")]
+            tray_ready: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "linux")]
+            start_minimized_to_tray_pending: false,
+            active_tab: ManagerTab::Behavior,
+            minimize_to_tray_handled: false,
+        };
+
+        let output = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+            app.update_logic(ui.ctx());
+        });
+
+        let close_requested = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|viewport| viewport.commands.contains(&egui::ViewportCommand::Close));
+        assert!(close_requested, "tray quit should close a hidden viewport");
+    }
 }

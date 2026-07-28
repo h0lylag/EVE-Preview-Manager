@@ -206,7 +206,6 @@ impl Serialize for HotkeyBinding {
 }
 
 // Custom deserialization from object format (with backward compatibility for array format)
-// Custom deserialization from object format (with backward compatibility for array format)
 impl<'de> Deserialize<'de> for HotkeyBinding {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -240,10 +239,8 @@ impl<'de> Deserialize<'de> for HotkeyBinding {
                 }
             }
         } else {
-            // Binary format (Bincode) - Strictly object/struct
-            // Since we control serialization, we know it's always the struct format
-            // keys then source_devices
-            // We can map it to the HotkeyObject struct
+            // Non-human-readable IPC formats use the strict object/struct representation.
+            // Serialization always emits keys followed by source_devices.
             let obj = HotkeyObject::deserialize(deserializer)?;
             let mut binding =
                 HotkeyBinding::from_key_array(&obj.keys).map_err(de::Error::custom)?;

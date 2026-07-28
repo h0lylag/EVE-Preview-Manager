@@ -30,7 +30,7 @@ rustPlatform.buildRustPackage rec {
   pname = manifest.name;
   version = manifest.version;
 
-  cargoHash = "sha256-ox9TM0O+u2PsAsBpNlf8xMZkp4L8rACBUKvZOwecZ5U=";
+  cargoHash = "sha256-c06YmLsNiFBTm9W7pG9Ttee1rtQDOuhVR3xURnHBqSk=";
 
   src = pkgs.lib.cleanSource ./.;
 

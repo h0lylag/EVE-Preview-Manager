@@ -217,7 +217,7 @@ impl From<ProfileHelper> for Profile {
     }
 }
 
-// Custom implementation to support both Helper (JSON/Human) and Strict/Binary (Bincode/IPC)
+// Custom implementation to support both flexible JSON and strict binary IPC formats.
 impl<'de> Deserialize<'de> for Profile {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -227,7 +227,7 @@ impl<'de> Deserialize<'de> for Profile {
             // Use ProfileHelper for JSON migration and flexibility
             ProfileHelper::deserialize(deserializer).map(Profile::from)
         } else {
-            // Use strict binary structure for IPC/Bincode (matches Serialize output)
+            // Use the strict binary structure for IPC (matches Serialize output).
             #[derive(Deserialize)]
             struct ProfileBinary {
                 pub profile_name: String,
