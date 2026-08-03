@@ -350,30 +350,63 @@ async fn run_event_loop(
                 formats,
             };
 
-            // Process all pending X11 events without blocking to ensure the queue is drained
-            // This prevents the event channel from filling up during heavy activity
-            while let Some(event) = ctx
-                .conn
-                .poll_for_event()
-                .context("Failed to poll for X11 event")?
-            {
-                // Scope the mutable borrows for event handling
-                {
-                    let mut context = EventContext {
-                        app_ctx: &ctx,
-                        daemon_config: &mut resources.config,
-                        eve_clients: &mut resources.eve_clients,
-                        session_state: &mut resources.session,
-                        cycle_state: &mut resources.cycle,
+            // // Process all pending X11 events without blocking to ensure the queue is drained
+            // // This prevents the event channel from filling up during heavy activity
+            // while let Some(event) = ctx
+            //     .conn
+            //     .poll_for_event()
+            //     .context("Failed to poll for X11 event")?
+            // {
+            //     // Scope the mutable borrows for event handling
+            //     {
+            //         let mut context = EventContext {
+            //             app_ctx: &ctx,
+            //             daemon_config: &mut resources.config,
+            //             eve_clients: &mut resources.eve_clients,
+            //             session_state: &mut resources.session,
+            //             cycle_state: &mut resources.cycle,
 
-                        status_tx: &status_tx,
-                        font_renderer: &font_renderer,
-                        display_config: &display_config,
-                    };
+            //             status_tx: &status_tx,
+            //             font_renderer: &font_renderer,
+            //             display_config: &display_config,
+            //         };
 
-                    let _ = handle_event(&mut context, event)
-                        .inspect_err(|err| error!(error = ?err, "Event handling error"));
-                }
+            //         let _ = handle_event(&mut context, event)
+            //             .inspect_err(|err| error!(error = ?err, "Event handling error"));
+            //     }
+            // }
+
+            // Process a bounded batch of pending X11 events.
+            //
+            // Do not drain the queue indefinitely: under sustained DAMAGE/X11 activity,
+            // new events can arrive as quickly as they are processed. An unbounded drain
+            // can therefore starve the tokio::select! below, preventing hotkeys,
+            // heartbeats, config updates and timers from being serviced.
+            const MAX_X11_EVENTS_PER_TICK: usize = 64;
+
+            for _ in 0..MAX_X11_EVENTS_PER_TICK {
+                let Some(event) = ctx
+                    .conn
+                    .poll_for_event()
+                    .context("Failed to poll for X11 event")?
+                else {
+                    break;
+                };
+
+                let mut context = EventContext {
+                    app_ctx: &ctx,
+                    daemon_config: &mut resources.config,
+                    eve_clients: &mut resources.eve_clients,
+                    session_state: &mut resources.session,
+                    cycle_state: &mut resources.cycle,
+
+                    status_tx: &status_tx,
+                    font_renderer: &font_renderer,
+                    display_config: &display_config,
+                };
+
+                let _ = handle_event(&mut context, event)
+                    .inspect_err(|err| error!(error = ?err, "Event handling error"));
             }
 
             // Flush any pending requests to X server
