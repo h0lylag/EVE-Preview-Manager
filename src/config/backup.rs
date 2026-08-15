@@ -165,12 +165,8 @@ impl BackupManager {
         let config_file_path = config_path_override
             .map(|p| p.to_path_buf())
             .unwrap_or_else(Config::path);
-        if let Some(parent) = config_file_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
-        }
 
-        fs::write(&config_file_path, config_contents)
+        crate::config::write_atomically(&config_file_path, &config_contents)
             .with_context(|| format!("Failed to restore config to {:?}", config_file_path))?;
 
         info!(filename, "Restored backup");
@@ -416,8 +412,7 @@ impl BackupManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
-    use std::io::Write;
+    use std::io::{Cursor, Read, Seek, Write};
     use std::path::{Path, PathBuf};
 
     const TAR_BLOCK_BYTES: usize = 512;
@@ -667,6 +662,7 @@ mod tests {
         BackupManager::restore_backup(&list[0].filename, Some(&config_path)).unwrap();
         let content = fs::read_to_string(&config_path).unwrap();
         assert_eq!(content, "{\"test\": true}");
+        assert_eq!(fs::read_dir(&app_dir).unwrap().count(), 2);
 
         // 4. Test Pruning
         // Sleep between creations because backup filenames have one-second resolution.
@@ -696,6 +692,52 @@ mod tests {
         BackupManager::delete_backup(target, Some(&config_path)).unwrap();
         let list_final = BackupManager::list_backups(Some(&config_path)).unwrap();
         assert!(!list_final.iter().any(|b| b.filename == *target));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restore_atomically_replaces_existing_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let old_config = Config::default();
+        let old_contents = serde_json::to_vec(&old_config).unwrap();
+        let (_temp_dir, config_path) = setup_config(&old_contents);
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
+        let mut old_handle = fs::File::open(&config_path).unwrap();
+
+        let mut restored_config = old_config;
+        restored_config.profiles[0].profile_name = "restored".to_string();
+        restored_config.global.selected_profile = "restored".to_string();
+        let restored_contents = serde_json::to_vec(&restored_config).unwrap();
+        let filename = "manual_backup_atomic_restore.tar.gz";
+        write_backup_archive(
+            &config_path,
+            filename,
+            &[(
+                crate::common::constants::config::FILENAME,
+                &restored_contents,
+            )],
+        );
+
+        BackupManager::restore_backup(filename, Some(&config_path)).unwrap();
+
+        old_handle.rewind().unwrap();
+        let mut contents_from_old_handle = Vec::new();
+        old_handle
+            .read_to_end(&mut contents_from_old_handle)
+            .unwrap();
+        assert_eq!(contents_from_old_handle, old_contents);
+
+        let loaded = Config::load_from(&config_path).unwrap();
+        assert_eq!(loaded.global.selected_profile, "restored");
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            fs::read_dir(config_path.parent().unwrap()).unwrap().count(),
+            2
+        );
     }
 
     #[test]

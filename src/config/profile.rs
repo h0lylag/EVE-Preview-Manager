@@ -707,7 +707,7 @@ impl Config {
 
     /// Save configuration to JSON file.
     ///
-    /// Writes the current in-memory state directly to config.json.
+    /// Atomically replaces config.json with the current in-memory state.
     /// The Manager maintains authoritative state via IPC synchronization.
     pub fn save(&self) -> Result<()> {
         self.save_to(&Self::path())
@@ -715,16 +715,9 @@ impl Config {
 
     /// Save configuration to a specific path
     pub fn save_to(&self, config_path: &std::path::Path) -> Result<()> {
-        // Ensure config directory exists
-        if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
-        }
+        let json = serde_json::to_vec_pretty(self).context("Failed to serialize config to JSON")?;
 
-        let json_string =
-            serde_json::to_string_pretty(self).context("Failed to serialize config to JSON")?;
-
-        fs::write(config_path, json_string)
+        crate::config::write_atomically(config_path, &json)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
 
         info!(path = ?config_path, "Saved config");
@@ -1326,6 +1319,14 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let config_path = temp_dir.path().join("config.json");
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&config_path, b"{}").expect("Failed to create existing config");
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640))
+                .expect("Failed to set config permissions");
+        }
+
         let mut config = Config::default();
         config.global.selected_profile = "filesystem_test".to_string();
 
@@ -1335,15 +1336,79 @@ mod tests {
             .expect("Failed to save config to temp path");
         assert!(config_path.exists());
 
+        let saved = fs::read(&config_path).expect("Failed to read saved config");
+        let saved_config: Config =
+            serde_json::from_slice(&saved).expect("Saved config was not complete JSON");
+        assert_eq!(saved_config.global.selected_profile, "filesystem_test");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+
+        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
+
         // Load from isolated path
         let loaded = Config::load_from(&config_path).expect("Failed to load config from temp path");
         assert_eq!(loaded.global.selected_profile, "filesystem_test");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn save_atomically_replaces_existing_file() {
+        use std::io::{Read, Seek};
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config_path = temp_dir.path().join("config.json");
+
+        let mut old_config = Config::default();
+        old_config.global.selected_profile = "old".to_string();
+        old_config.save_to(&config_path).unwrap();
+        let old_contents = fs::read(&config_path).unwrap();
+        let mut old_handle = fs::File::open(&config_path).unwrap();
+
+        let mut new_config = old_config;
+        new_config.global.selected_profile = "new".to_string();
+        new_config.save_to(&config_path).unwrap();
+
+        old_handle.rewind().unwrap();
+        let mut contents_from_old_handle = Vec::new();
+        old_handle
+            .read_to_end(&mut contents_from_old_handle)
+            .unwrap();
+        assert_eq!(contents_from_old_handle, old_contents);
+
+        let loaded = Config::load_from(&config_path).unwrap();
+        assert_eq!(loaded.global.selected_profile, "new");
+        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn save_cleans_temporary_file_after_failed_replacement() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config_path = temp_dir.path().join("config.json");
+        fs::create_dir(&config_path).unwrap();
+        fs::write(config_path.join("marker"), b"unchanged").unwrap();
+
+        Config::default()
+            .save_to(&config_path)
+            .expect_err("Replacing a non-empty directory must fail");
+
+        assert_eq!(fs::read(config_path.join("marker")).unwrap(), b"unchanged");
+        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn test_default_config_creation() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let config_path = temp_dir.path().join("non_existent_config.json");
+        let config_path = temp_dir
+            .path()
+            .join("nested")
+            .join("non_existent_config.json");
 
         assert!(!config_path.exists());
 
@@ -1355,5 +1420,14 @@ mod tests {
             loaded.global.selected_profile,
             crate::common::constants::defaults::behavior::PROFILE_NAME
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 }
