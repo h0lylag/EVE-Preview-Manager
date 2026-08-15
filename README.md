@@ -124,7 +124,7 @@ cargo build --release
 
 ## Contributing
 
-Contributions are welcome! If you find a bug or have a feature request, please open an issue. Pull requests are also appreciated.
+Contributions are welcome! If you find a bug or have a feature request, please open an issue. See [CONTRIBUTING.md](CONTRIBUTING.md) for pull-request guidelines.
 
 <br>
 
