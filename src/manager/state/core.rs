@@ -53,7 +53,12 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn validate_active_profile(&mut self) -> Result<()> {
+    pub fn validate_config(&self) -> Result<()> {
+        self.config
+            .validate_profile_names()
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("Configuration has invalid profile names")?;
+
         if let Some(profile) = self.config.get_active_profile() {
             profile
                 .validate_custom_source_aliases()
@@ -102,22 +107,14 @@ impl SharedState {
     }
 
     pub fn sync_to_daemon(&self) -> Result<()> {
+        self.validate_config()?;
+
         if let Some(ref tx) = self.ipc_config_tx {
             let selected_profile = self
                 .config
                 .get_active_profile()
                 .cloned()
                 .unwrap_or_default();
-
-            selected_profile
-                .validate_custom_source_aliases()
-                .map_err(|err| anyhow::anyhow!(err))
-                .with_context(|| {
-                    format!(
-                        "Profile '{}' has invalid custom source aliases",
-                        selected_profile.profile_name
-                    )
-                })?;
 
             let mut character_thumbnails = selected_profile.character_thumbnails.clone();
             let mut custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
@@ -164,7 +161,7 @@ impl SharedState {
     }
 
     pub fn save_config(&mut self, mode: SaveMode) -> Result<()> {
-        self.validate_active_profile()?;
+        self.validate_config()?;
 
         // Prepare config for saving
         // If mode is IMPLICIT (e.g. on exit or settings change),
@@ -221,7 +218,7 @@ impl SharedState {
     /// Save config to disk WITHOUT syncing to daemon via IPC
     /// Used when the Daemon already knows about the change (e.g., it initiated PositionsChanged)
     pub fn save_config_no_sync(&mut self, mode: SaveMode) -> Result<()> {
-        self.validate_active_profile()?;
+        self.validate_config()?;
 
         let mut config_to_save = self.config.clone();
 
@@ -259,30 +256,70 @@ impl SharedState {
         Ok(())
     }
 
-    pub fn switch_profile(&mut self, idx: usize) {
-        let profile_name = self
-            .config
-            .profiles
-            .get(idx)
-            .map(|p| p.profile_name.as_str())
-            .unwrap_or("Unknown");
+    pub fn switch_profile(&mut self, idx: usize) -> bool {
+        if let Err(err) = self.validate_config() {
+            warn!(error = ?err, "Profile switch blocked by invalid configuration");
+            self.status_message = Some(StatusMessage {
+                text: format!("Profile switch blocked: {err}"),
+                color: STATUS_STOPPED,
+            });
+            return false;
+        }
+
+        let Some(profile) = self.config.profiles.get(idx) else {
+            return false;
+        };
+        if let Err(err) = profile
+            .validate_custom_source_aliases()
+            .map_err(|err| anyhow::anyhow!(err))
+            .with_context(|| {
+                format!(
+                    "Profile '{}' has invalid custom source aliases",
+                    profile.profile_name
+                )
+            })
+        {
+            warn!(error = ?err, "Profile switch blocked by invalid target profile");
+            self.status_message = Some(StatusMessage {
+                text: format!("Profile switch blocked: {err}"),
+                color: STATUS_STOPPED,
+            });
+            return false;
+        }
+
+        let profile_name = profile.profile_name.clone();
         info!(profile_idx = idx, profile_name = %profile_name, "Profile switch requested");
 
-        if idx < self.config.profiles.len() {
-            self.config.global.selected_profile = self.config.profiles[idx].profile_name.clone();
-            self.selected_profile_idx = idx;
+        let previous_profile_name = self.config.global.selected_profile.clone();
+        let previous_profile_idx = self.selected_profile_idx;
+        self.config.global.selected_profile = profile_name;
+        self.selected_profile_idx = idx;
 
-            // Save config with new selection
-            if let Err(err) = self.save_config(SaveMode::Implicit) {
-                error!(error = ?err, "Failed to save config after profile switch");
-                self.status_message = Some(StatusMessage {
-                    text: format!("Profile switch failed: {err}"),
-                    color: STATUS_STOPPED,
-                });
-            } else {
-                // Reload daemon with new profile
-                self.reload_daemon_config();
+        // Save config with new selection
+        if let Err(err) = self.save_config(SaveMode::Implicit) {
+            error!(error = ?err, "Failed to save config after profile switch");
+            self.config.global.selected_profile = previous_profile_name;
+            self.selected_profile_idx = previous_profile_idx;
+
+            let rollback_error = self.save_config_no_sync(SaveMode::Implicit).err();
+            if let Some(rollback_error) = &rollback_error {
+                error!(error = ?rollback_error, "Failed to restore profile selection on disk");
             }
+            self.status_message = Some(StatusMessage {
+                text: if let Some(rollback_error) = rollback_error {
+                    format!(
+                        "Profile switch failed: {err}; failed to restore previous selection: {rollback_error}"
+                    )
+                } else {
+                    format!("Profile switch failed: {err}")
+                },
+                color: STATUS_STOPPED,
+            });
+            false
+        } else {
+            // Reload daemon with new profile
+            self.reload_daemon_config();
+            true
         }
     }
 
@@ -353,6 +390,75 @@ mod tests {
 
         // Should find index 1
         assert_eq!(state.selected_profile_idx, 1);
+    }
+
+    #[test]
+    fn invalid_profile_names_block_profile_switch() {
+        let mut config = Config::default();
+        config.profiles[0].profile_name = "Mining".to_string();
+        config.profiles.push(Profile::default_with_name(
+            "MINING".to_string(),
+            String::new(),
+        ));
+        config.global.selected_profile = "Mining".to_string();
+        let mut state = SharedState::new(config, false);
+
+        assert!(!state.switch_profile(1));
+
+        assert_eq!(state.selected_profile_idx, 0);
+        assert_eq!(state.config.global.selected_profile, "Mining");
+        assert!(
+            state
+                .status_message
+                .as_ref()
+                .is_some_and(|message| message.text.starts_with("Profile switch blocked:"))
+        );
+    }
+
+    #[test]
+    fn profile_name_switch_rejects_invalid_target_profile() {
+        let mut config = Config::default();
+        let mut target = Profile::default_with_name("Target".to_string(), String::new());
+        for alias in ["Browser", " browser "] {
+            target.custom_windows.push(
+                serde_json::from_value(serde_json::json!({ "alias": alias }))
+                    .expect("test custom source rule should deserialize"),
+            );
+        }
+        config.profiles.push(target);
+        let mut state = SharedState::new(config, false);
+
+        assert!(!state.switch_profile(1));
+
+        assert_eq!(state.selected_profile_idx, 0);
+        assert_eq!(state.config.global.selected_profile, "default");
+        assert!(
+            state
+                .status_message
+                .as_ref()
+                .is_some_and(|message| message.text.starts_with("Profile switch blocked:"))
+        );
+    }
+
+    #[test]
+    fn failed_profile_switch_restores_persisted_selection() {
+        let mut config = Config::default();
+        config.profiles.push(Profile::default_with_name(
+            "Failed IPC Target".to_string(),
+            String::new(),
+        ));
+        config.save().unwrap();
+
+        let mut state = SharedState::new(config, false);
+        let (sender, receiver) = ipc_channel::ipc::channel().unwrap();
+        drop(receiver);
+        state.ipc_config_tx = Some(sender);
+
+        assert!(!state.switch_profile(1));
+
+        assert_eq!(state.selected_profile_idx, 0);
+        assert_eq!(state.config.global.selected_profile, "default");
+        assert_eq!(Config::load().unwrap().global.selected_profile, "default");
     }
 
     #[test]

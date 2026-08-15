@@ -318,18 +318,10 @@ impl eframe::App for ManagerApp {
 
         // Handle Actions
         match action {
-            ProfileAction::SwitchProfile => {
-                let current_profile = &state.config.profiles[state.selected_profile_idx];
-                self.characters_state.load_from_profile(current_profile);
-
-                if let Err(err) = state.save_config(SaveMode::Implicit) {
-                    error!(error = ?err, "Failed to save config after profile switch");
-                    state.status_message = Some(StatusMessage {
-                        text: format!("Save failed: {err}"),
-                        color: COLOR_ERROR,
-                    });
-                } else {
-                    state.reload_daemon_config();
+            ProfileAction::SwitchProfile(new_idx) => {
+                if state.switch_profile(new_idx) {
+                    let current_profile = &state.config.profiles[state.selected_profile_idx];
+                    self.characters_state.load_from_profile(current_profile);
                     #[cfg(target_os = "linux")]
                     self.update_signal.notify_one();
                 }

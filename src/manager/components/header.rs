@@ -110,7 +110,13 @@ pub fn render(
             }
 
             // Save button
-            if ui.button("💾 Save & Apply").clicked() {
+            if ui
+                .add_enabled(
+                    state.config.validate_profile_names().is_ok(),
+                    egui::Button::new("💾 Save & Apply"),
+                )
+                .clicked()
+            {
                 if let Err(err) = state.save_config(SaveMode::Explicit) {
                     error!(error = ?err, "Failed to save config");
                     state.status_message = Some(StatusMessage {

@@ -648,6 +648,51 @@ impl Default for Profile {
 }
 
 impl Config {
+    pub fn validate_profile_name(
+        &self,
+        excluded_idx: Option<usize>,
+        candidate: &str,
+    ) -> std::result::Result<String, String> {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            return Err("Profile name cannot be empty".to_string());
+        }
+
+        let normalized = trimmed.to_lowercase();
+        if self.profiles.iter().enumerate().any(|(idx, profile)| {
+            Some(idx) != excluded_idx && profile.profile_name.trim().to_lowercase() == normalized
+        }) {
+            return Err(format!("Another profile already uses '{}'", trimmed));
+        }
+
+        Ok(trimmed.to_string())
+    }
+
+    pub fn validate_profile_names(&self) -> std::result::Result<(), String> {
+        let mut seen: HashMap<String, String> = HashMap::new();
+
+        for profile in &self.profiles {
+            let trimmed = profile.profile_name.trim();
+            if trimmed.is_empty() {
+                return Err("Profile name cannot be empty".to_string());
+            }
+            if profile.profile_name != trimmed {
+                return Err(format!(
+                    "Profile name '{}' has leading or trailing whitespace",
+                    trimmed
+                ));
+            }
+
+            let normalized = trimmed.to_lowercase();
+            if let Some(existing) = seen.get(&normalized) {
+                return Err(format!("Duplicate profile name '{}'", existing));
+            }
+            seen.insert(normalized, trimmed.to_string());
+        }
+
+        Ok(())
+    }
+
     pub fn path() -> PathBuf {
         // Allow overriding config directory via env var (for testing isolation)
         if let Ok(dir) = std::env::var("EVE_PREVIEW_MANAGER_CONFIG_DIR") {
@@ -715,6 +760,10 @@ impl Config {
 
     /// Save configuration to a specific path
     pub fn save_to(&self, config_path: &std::path::Path) -> Result<()> {
+        self.validate_profile_names()
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("Configuration has invalid profile names")?;
+
         let json = serde_json::to_vec_pretty(self).context("Failed to serialize config to JSON")?;
 
         crate::config::write_atomically(config_path, &json)
@@ -762,6 +811,23 @@ mod tests {
         }
     }
 
+    fn config_with_profile_names(names: &[&str]) -> Config {
+        let mut config = Config::default();
+        let template = config.profiles[0].clone();
+        config.profiles = names
+            .iter()
+            .map(|name| {
+                let mut profile = template.clone();
+                profile.profile_name = (*name).to_string();
+                profile
+            })
+            .collect();
+        if let Some(name) = names.first() {
+            config.global.selected_profile = (*name).to_string();
+        }
+        config
+    }
+
     #[test]
     fn test_profile_default_with_name() {
         let profile =
@@ -779,6 +845,110 @@ mod tests {
         );
         assert!(profile.character_thumbnails.is_empty());
         assert!(profile.custom_source_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn profile_name_validation_returns_trimmed_name() {
+        let config = config_with_profile_names(&["Mining"]);
+
+        assert_eq!(
+            config.validate_profile_name(None, "  PvP  "),
+            Ok("PvP".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_empty_names() {
+        let config = Config::default();
+
+        for candidate in ["", " \t\n"] {
+            assert_eq!(
+                config.validate_profile_name(None, candidate),
+                Err("Profile name cannot be empty".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_case_insensitive_trimmed_duplicates() {
+        let config = config_with_profile_names(&["Mining"]);
+
+        for candidate in [" mining ", "MINING"] {
+            assert_eq!(
+                config.validate_profile_name(None, candidate),
+                Err(format!(
+                    "Another profile already uses '{}'",
+                    candidate.trim()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn profile_name_validation_excludes_profile_being_edited() {
+        let config = config_with_profile_names(&["Mining", "PvP"]);
+
+        assert_eq!(
+            config.validate_profile_name(Some(0), " MINING "),
+            Ok("MINING".to_string())
+        );
+        assert_eq!(
+            config.validate_profile_name(Some(0), "pvp"),
+            Err("Another profile already uses 'pvp'".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_names_validation_rejects_noncanonical_names() {
+        let blank = config_with_profile_names(&[" \t"]);
+        assert_eq!(
+            blank.validate_profile_names(),
+            Err("Profile name cannot be empty".to_string())
+        );
+
+        let padded = config_with_profile_names(&[" Mining "]);
+        assert_eq!(
+            padded.validate_profile_names(),
+            Err("Profile name 'Mining' has leading or trailing whitespace".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_names_validation_rejects_case_insensitive_duplicates() {
+        let config = config_with_profile_names(&["Mining", "MINING"]);
+
+        assert_eq!(
+            config.validate_profile_names(),
+            Err("Duplicate profile name 'Mining'".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_profile_names_do_not_replace_saved_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let valid = config_with_profile_names(&["Mining"]);
+        valid.save_to(&config_path).unwrap();
+        let saved = fs::read(&config_path).unwrap();
+
+        let invalid = config_with_profile_names(&["Mining", "MINING"]);
+        assert!(invalid.save_to(&config_path).is_err());
+        assert_eq!(fs::read(&config_path).unwrap(), saved);
+    }
+
+    #[test]
+    fn invalid_profile_names_load_for_repair() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let invalid = config_with_profile_names(&["Mining", "MINING"]);
+        fs::write(&config_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
+
+        let loaded = Config::load_from(&config_path).unwrap();
+        assert_eq!(loaded.profiles.len(), 2);
+        assert_eq!(
+            loaded.validate_profile_names(),
+            Err("Duplicate profile name 'Mining'".to_string())
+        );
     }
 
     #[test]

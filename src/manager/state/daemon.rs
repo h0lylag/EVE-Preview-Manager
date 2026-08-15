@@ -43,15 +43,15 @@ impl SharedState {
             return Ok(());
         }
 
-        if let Err(err) = self.validate_active_profile() {
-            warn!(error = ?err, "Daemon start blocked by invalid active profile");
+        if let Err(err) = self.validate_config() {
+            warn!(error = ?err, "Daemon start blocked by invalid configuration");
             self.daemon_status = DaemonStatus::Stopped;
             self.status_message = Some(super::types::StatusMessage {
                 text: format!("Daemon not started: {err}"),
                 color: STATUS_STOPPED,
             });
             self.config_status_message = Some(super::types::StatusMessage {
-                text: "Fix custom source display names before applying".to_string(),
+                text: "Fix profile or custom source names before applying".to_string(),
                 color: COLOR_ERROR,
             });
             return Ok(());

@@ -72,17 +72,16 @@ impl ProfileSelector {
 
                 // Load button - only enabled if a different profile is selected
                 let has_pending_change = self.pending_profile_idx.is_some()
-                    && self.pending_profile_idx != Some(*selected_idx);
+                    && self.pending_profile_idx != Some(*selected_idx)
+                    && config.validate_profile_names().is_ok();
 
                 if ui
                     .add_enabled(has_pending_change, egui::Button::new("⬇ Load"))
                     .clicked()
                     && let Some(new_idx) = self.pending_profile_idx
                 {
-                    *selected_idx = new_idx;
-                    config.global.selected_profile = config.profiles[new_idx].profile_name.clone();
                     self.pending_profile_idx = None;
-                    action = ProfileAction::SwitchProfile;
+                    action = ProfileAction::SwitchProfile(new_idx);
                 }
             });
         });
@@ -143,6 +142,10 @@ impl ProfileSelector {
                 ui.label("(Cannot delete last profile)");
             }
         });
+
+        if let Err(err) = config.validate_profile_names() {
+            ui.colored_label(egui::Color32::RED, err);
+        }
     }
 
     /// Render just the modal dialogs (called separately from context level)
@@ -180,7 +183,7 @@ impl ProfileSelector {
             ProfileAction::ProfileCreated
             | ProfileAction::ProfileDeleted
             | ProfileAction::ProfileUpdated
-            | ProfileAction::SwitchProfile => {
+            | ProfileAction::SwitchProfile(_) => {
                 self.pending_profile_idx = None;
                 self.action_target_idx = None;
             }
@@ -199,6 +202,12 @@ impl ProfileSelector {
             .show(ctx, |ui| {
                 ui.label("Profile Name:");
                 ui.text_edit_singleline(&mut self.edit_profile_name);
+                let profile_name = config.validate_profile_name(None, &self.edit_profile_name);
+                if let Err(err) = &profile_name
+                    && !self.edit_profile_name.is_empty()
+                {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
 
                 ui.label("Description (optional):");
                 ui.text_edit_singleline(&mut self.edit_profile_desc);
@@ -206,10 +215,14 @@ impl ProfileSelector {
                 ui.add_space(ITEM_SPACING);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Create").clicked() && !self.edit_profile_name.is_empty() {
+                    if ui
+                        .add_enabled(profile_name.is_ok(), egui::Button::new("Create"))
+                        .clicked()
+                        && let Ok(profile_name) = profile_name
+                    {
                         // Create new profile from default template
                         let new_profile = Profile::default_with_name(
-                            self.edit_profile_name.clone(),
+                            profile_name,
                             self.edit_profile_desc.clone(),
                         );
                         config.profiles.push(new_profile);
@@ -240,6 +253,12 @@ impl ProfileSelector {
             .show(ctx, |ui| {
                 ui.label("New Profile Name:");
                 ui.text_edit_singleline(&mut self.edit_profile_name);
+                let profile_name = config.validate_profile_name(None, &self.edit_profile_name);
+                if let Err(err) = &profile_name
+                    && !self.edit_profile_name.is_empty()
+                {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
 
                 ui.label("Description (optional):");
                 ui.text_edit_singleline(&mut self.edit_profile_desc);
@@ -247,9 +266,13 @@ impl ProfileSelector {
                 ui.add_space(ITEM_SPACING);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Duplicate").clicked() && !self.edit_profile_name.is_empty() {
+                    if ui
+                        .add_enabled(profile_name.is_ok(), egui::Button::new("Duplicate"))
+                        .clicked()
+                        && let Ok(profile_name) = profile_name
+                    {
                         let mut new_profile = config.profiles[source_idx].clone();
-                        new_profile.profile_name = self.edit_profile_name.clone();
+                        new_profile.profile_name = profile_name;
                         new_profile.profile_description = self.edit_profile_desc.clone();
                         config.profiles.push(new_profile);
 
@@ -281,6 +304,13 @@ impl ProfileSelector {
             .show(ctx, |ui| {
                 ui.label("Profile Name:");
                 ui.text_edit_singleline(&mut self.edit_profile_name);
+                let profile_name =
+                    config.validate_profile_name(Some(target_idx), &self.edit_profile_name);
+                if let Err(err) = &profile_name
+                    && !self.edit_profile_name.is_empty()
+                {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
 
                 ui.label("Description (optional):");
                 ui.text_edit_singleline(&mut self.edit_profile_desc);
@@ -288,9 +318,13 @@ impl ProfileSelector {
                 ui.add_space(ITEM_SPACING);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() && !self.edit_profile_name.is_empty() {
+                    if ui
+                        .add_enabled(profile_name.is_ok(), egui::Button::new("Save"))
+                        .clicked()
+                        && let Ok(profile_name) = profile_name
+                    {
                         let profile = &mut config.profiles[target_idx];
-                        profile.profile_name = self.edit_profile_name.clone();
+                        profile.profile_name = profile_name;
                         profile.profile_description = self.edit_profile_desc.clone();
 
                         // Only update global selection if we modified the active profile
@@ -367,7 +401,7 @@ impl ProfileSelector {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProfileAction {
     None,
-    SwitchProfile,
+    SwitchProfile(usize),
     ProfileCreated,
     ProfileDeleted,
     ProfileUpdated,
