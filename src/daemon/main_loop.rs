@@ -733,7 +733,7 @@ async fn run_event_loop(
                                 // Minimize Manager GUI as well (to prevent focus stealing/clutter)
                                 // We search for "eve-preview-manager" class.
                                 // NOTE: Thumbnails are now "eve-preview-thumbnail", so this is safe/unique.
-                                let manager_window = crate::x11::get_client_list(ctx.conn, ctx.atoms)
+                                let manager_window = crate::x11::get_client_list(ctx.conn, ctx.screen, ctx.atoms)
                                     .ok()
                                     .and_then(|windows| {
                                         windows.into_iter().find(|&w| {

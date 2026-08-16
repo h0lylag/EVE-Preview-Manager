@@ -551,7 +551,7 @@ pub fn scan_eve_windows<'a>(
     // window IDs. Under reparenting WMs (e.g. KWin), query_tree(root) returns WM frame
     // windows whose properties (WM_CLASS, WM_NAME) don't match app rules, causing custom
     // sources and EVE clients to go undetected on daemon startup.
-    let windows = crate::x11::get_client_list(ctx.conn, ctx.atoms)
+    let windows = crate::x11::get_client_list(ctx.conn, ctx.screen, ctx.atoms)
         .context("Failed to get window list via _NET_CLIENT_LIST")?;
 
     for w in windows {

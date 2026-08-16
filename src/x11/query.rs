@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use tracing::debug;
-use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
@@ -266,12 +265,16 @@ pub fn is_normal_window(
     }
 }
 
-/// Get the list of client windows from _NET_CLIENT_LIST property on root window
-pub fn get_client_list(conn: &RustConnection, atoms: &CachedAtoms) -> Result<Vec<Window>> {
+/// Get the client windows advertised on the selected screen's root window
+pub fn get_client_list(
+    conn: &RustConnection,
+    screen: &Screen,
+    atoms: &CachedAtoms,
+) -> Result<Vec<Window>> {
     let prop = conn
         .get_property(
             false,
-            conn.setup().roots[0].root,
+            screen.root,
             atoms.net_client_list,
             AtomEnum::WINDOW,
             0,
