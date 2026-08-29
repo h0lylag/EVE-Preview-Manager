@@ -106,60 +106,65 @@ impl SharedState {
         }
     }
 
+    /// Send the daemon's startup configuration snapshot.
+    ///
+    /// Success means the snapshot was transmitted over an active IPC command channel.
     pub fn send_initial_config_to_daemon(&self) -> Result<()> {
         self.validate_config()?;
 
-        if let Some(ref tx) = self.ipc_config_tx {
-            let selected_profile = self
-                .config
-                .get_active_profile()
-                .cloned()
-                .unwrap_or_default();
+        let tx = self
+            .ipc_config_tx
+            .as_ref()
+            .context("Daemon IPC command channel is unavailable")?;
+        let selected_profile = self
+            .config
+            .get_active_profile()
+            .cloned()
+            .unwrap_or_default();
 
-            let mut character_thumbnails = selected_profile.character_thumbnails.clone();
-            let mut custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
+        let mut character_thumbnails = selected_profile.character_thumbnails.clone();
+        let mut custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
 
-            // If "Auto Save" is disabled, the startup snapshot must use the LAST SAVED state,
-            // not the current transient in-memory state. This ensures that actions like "Refresh"
-            // or "Profile Switch" revert to the saved positions as expected.
-            if !selected_profile.thumbnail_auto_save_position
-                && let Ok(disk_config) = crate::config::profile::Config::load()
-                && let Some(disk_profile) = disk_config
-                    .profiles
-                    .iter()
-                    .find(|p| p.profile_name == selected_profile.profile_name)
-            {
-                info!("Auto-save disabled: using explicit disk positions for daemon startup");
-                character_thumbnails = disk_profile.character_thumbnails.clone();
-                custom_source_thumbnails = disk_profile.custom_source_thumbnails.clone();
-            }
+        // If "Auto Save" is disabled, the startup snapshot must use the LAST SAVED state,
+        // not the current transient in-memory state. This ensures that actions like "Refresh"
+        // or "Profile Switch" revert to the saved positions as expected.
+        if !selected_profile.thumbnail_auto_save_position
+            && let Ok(disk_config) = crate::config::profile::Config::load()
+            && let Some(disk_profile) = disk_config
+                .profiles
+                .iter()
+                .find(|p| p.profile_name == selected_profile.profile_name)
+        {
+            info!("Auto-save disabled: using explicit disk positions for daemon startup");
+            character_thumbnails = disk_profile.character_thumbnails.clone();
+            custom_source_thumbnails = disk_profile.custom_source_thumbnails.clone();
+        }
 
-            // Build hotkeys for profile switching (requires looking at all profiles)
-            let mut profile_hotkeys = std::collections::HashMap::new();
-            for profile in &self.config.profiles {
-                if let Some(ref binding) = profile.hotkey_profile_switch {
-                    profile_hotkeys.insert(binding.clone(), profile.profile_name.clone());
-                }
-            }
-
-            let daemon_config = DaemonConfig {
-                profile: selected_profile,
-                character_thumbnails,
-                custom_source_thumbnails,
-                profile_hotkeys,
-                runtime_hidden: false,
-            };
-
-            if let Err(e) = tx.send(ConfigMessage::InitialConfig(Box::new(daemon_config))) {
-                error!(error = %e, "Failed to send initial config to daemon");
-                return Err(anyhow::anyhow!(
-                    "Failed to send initial config to daemon: {}",
-                    e
-                ));
-            } else {
-                debug!("Sent initial config to daemon");
+        // Build hotkeys for profile switching (requires looking at all profiles)
+        let mut profile_hotkeys = std::collections::HashMap::new();
+        for profile in &self.config.profiles {
+            if let Some(ref binding) = profile.hotkey_profile_switch {
+                profile_hotkeys.insert(binding.clone(), profile.profile_name.clone());
             }
         }
+
+        let daemon_config = DaemonConfig {
+            profile: selected_profile,
+            character_thumbnails,
+            custom_source_thumbnails,
+            profile_hotkeys,
+            runtime_hidden: false,
+        };
+
+        if let Err(e) = tx.send(ConfigMessage::InitialConfig(Box::new(daemon_config))) {
+            error!(error = %e, "Failed to send initial config to daemon");
+            return Err(anyhow::anyhow!(
+                "Failed to send initial config to daemon: {}",
+                e
+            ));
+        }
+
+        debug!("Sent initial config to daemon");
         Ok(())
     }
 
@@ -421,6 +426,18 @@ mod tests {
             panic!("expected startup path to send InitialConfig");
         };
         assert_eq!(config.profile.profile_name, "default");
+    }
+
+    #[test]
+    fn send_initial_config_to_daemon_requires_command_channel() {
+        let state = SharedState::new(Config::default(), false);
+
+        let error = state.send_initial_config_to_daemon().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Daemon IPC command channel is unavailable"
+        );
     }
 
     #[test]

@@ -38,6 +38,15 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<Ex
 }
 
 impl SharedState {
+    fn clear_daemon_ipc_state(&mut self) {
+        self.ipc_config_tx = None;
+        self.ipc_status_rx = None;
+        self.bootstrap_rx = None;
+        self.daemon_status_rx = None;
+        self.ipc_healthy = false;
+        self.missed_heartbeats = 0;
+    }
+
     pub fn start_daemon(&mut self) -> Result<()> {
         if self.daemon.is_some() {
             return Ok(());
@@ -149,12 +158,8 @@ impl SharedState {
                 DaemonStatus::Crashed(status.code())
             };
 
-            // Clear IPC channels immediately to prevent "Broken pipe" errors if save_config is called (e.g. on exit)
-            self.ipc_status_rx = None;
-            self.daemon_status_rx = None;
-            self.bootstrap_rx = None;
-            self.ipc_healthy = false;
-            self.missed_heartbeats = 0;
+            // Clear IPC channels immediately to prevent later sends to a stopped daemon.
+            self.clear_daemon_ipc_state();
         }
         Ok(())
     }
@@ -232,22 +237,40 @@ impl SharedState {
                 }
             });
 
-            // Send the startup-only configuration snapshot.
-            if let Err(err) = self.send_initial_config_to_daemon() {
-                error!(error = ?err, "Failed to send initial config to daemon");
-                self.status_message = Some(super::types::StatusMessage {
-                    text: format!("Initial config failed: {err}"),
-                    color: STATUS_STOPPED,
-                });
-            }
-
             self.bootstrap_rx = None; // Done
-            self.daemon_status = DaemonStatus::Running;
 
-            // initialize heartbeats
-            self.ipc_healthy = true;
-            self.last_heartbeat = Instant::now();
-            self.missed_heartbeats = 0;
+            // InitialConfig transmission completes the bootstrap contract. Do not report the
+            // daemon as running until the required startup snapshot has been sent.
+            match self.send_initial_config_to_daemon() {
+                Ok(()) => {
+                    self.daemon_status = DaemonStatus::Running;
+                    self.ipc_healthy = true;
+                    self.last_heartbeat = Instant::now();
+                    self.missed_heartbeats = 0;
+                    self.status_message = None;
+                }
+                Err(err) => {
+                    error!(error = ?err, "Failed to send initial config to daemon");
+                    let cleanup_error = self.stop_daemon().err();
+                    self.clear_daemon_ipc_state();
+
+                    let text = if let Some(cleanup_error) = cleanup_error {
+                        error!(error = ?cleanup_error, "Failed to clean up daemon after bootstrap failure");
+                        self.daemon_status = DaemonStatus::Crashed(None);
+                        format!("Initial config failed: {err}; cleanup failed: {cleanup_error}")
+                    } else {
+                        if self.daemon_status == DaemonStatus::Starting {
+                            self.daemon_status = DaemonStatus::Stopped;
+                        }
+                        format!("Initial config failed: {err}")
+                    };
+                    self.status_message = Some(super::types::StatusMessage {
+                        text,
+                        color: STATUS_STOPPED,
+                    });
+                    return;
+                }
+            }
         }
 
         // 2. Poll Status Messages
@@ -378,9 +401,7 @@ impl SharedState {
                     } else {
                         DaemonStatus::Crashed(status.code())
                     };
-                    self.ipc_config_tx = None;
-                    self.ipc_status_rx = None;
-                    self.daemon_status_rx = None;
+                    self.clear_daemon_ipc_state();
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -426,6 +447,14 @@ mod tests {
         state.poll_daemon();
     }
 
+    fn queue_bootstrap(state: &mut SharedState, bootstrap: BootstrapMessage) {
+        let (sender, receiver) = mpsc::channel();
+        state.bootstrap_rx = Some(receiver);
+        sender
+            .send(bootstrap)
+            .expect("bootstrap message should enter the Manager queue");
+    }
+
     #[test]
     fn wait_for_child_exit_returns_completed_status() {
         let mut child = spawn_shell("exit 0");
@@ -447,6 +476,77 @@ mod tests {
         assert!(status.is_none());
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn successful_bootstrap_sends_initial_config_and_marks_daemon_running() {
+        let mut state = SharedState::new(Config::default(), false);
+        state.daemon_status = DaemonStatus::Starting;
+        state.missed_heartbeats = 3;
+        state.status_message = Some(crate::manager::state::StatusMessage {
+            text: "Initial config failed: previous attempt".to_string(),
+            color: STATUS_STOPPED,
+        });
+
+        let (config_sender, config_receiver) =
+            ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        let (status_sender, status_receiver) =
+            ipc_channel::ipc::channel::<DaemonMessage>().unwrap();
+        queue_bootstrap(&mut state, (config_sender, status_receiver));
+
+        state.poll_daemon();
+
+        assert!(matches!(
+            config_receiver.recv().unwrap(),
+            ConfigMessage::InitialConfig(_)
+        ));
+        assert_eq!(state.daemon_status, DaemonStatus::Running);
+        assert!(state.ipc_healthy);
+        assert_eq!(state.missed_heartbeats, 0);
+        assert!(state.status_message.is_none());
+        assert!(state.bootstrap_rx.is_none());
+        assert!(state.ipc_config_tx.is_some());
+        assert!(state.daemon_status_rx.is_some());
+
+        drop(status_sender);
+    }
+
+    #[test]
+    fn failed_bootstrap_cleans_up_without_marking_daemon_running() {
+        let mut state = SharedState::new(Config::default(), false);
+        state.daemon = Some(spawn_shell("exit 0"));
+        state.daemon_status = DaemonStatus::Starting;
+        state.ipc_healthy = true;
+        state.missed_heartbeats = 3;
+
+        let (config_sender, config_receiver) =
+            ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        drop(config_receiver);
+        let (status_sender, status_receiver) =
+            ipc_channel::ipc::channel::<DaemonMessage>().unwrap();
+        let (_legacy_status_sender, legacy_status_receiver) =
+            ipc_channel::ipc::channel::<DaemonMessage>().unwrap();
+        state.ipc_status_rx = Some(legacy_status_receiver);
+        queue_bootstrap(&mut state, (config_sender, status_receiver));
+
+        state.poll_daemon();
+
+        assert_eq!(state.daemon_status, DaemonStatus::Stopped);
+        assert!(state.daemon.is_none());
+        assert!(!state.ipc_healthy);
+        assert_eq!(state.missed_heartbeats, 0);
+        assert!(state.ipc_config_tx.is_none());
+        assert!(state.ipc_status_rx.is_none());
+        assert!(state.bootstrap_rx.is_none());
+        assert!(state.daemon_status_rx.is_none());
+        assert!(
+            state
+                .status_message
+                .as_ref()
+                .is_some_and(|message| message.text.starts_with("Initial config failed:"))
+        );
+
+        drop(status_sender);
     }
 
     #[test]
