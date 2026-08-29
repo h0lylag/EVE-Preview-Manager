@@ -418,10 +418,10 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
 async fn run_event_loop(
     conn: &RustConnection,
     screen: &Screen,
-    mut display_config: crate::config::DisplayConfig,
+    display_config: crate::config::DisplayConfig,
     atoms: &CachedAtoms,
     formats: &crate::x11::CachedFormats,
-    mut font_renderer: crate::daemon::font::FontRenderer,
+    font_renderer: crate::daemon::font::FontRenderer,
     mut resources: DaemonResources<'_>,
     mut hotkey_rx: mpsc::Receiver<TimestampedCommand>,
     hotkey_groups: HashMap<crate::config::HotkeyBinding, Vec<SourceIdentity>>,
@@ -813,13 +813,15 @@ async fn run_event_loop(
                 }
             }
 
-            // 4. Handle SIGUSR1 (Lower priority)
+            // 4. Handle legacy SIGUSR1 notifications (lower priority)
             _ = sigusr1.recv() => {
-                info!("SIGUSR1 received - config is now managed by Manager via IPC");
-                let _ = status_tx.send(DaemonMessage::Status("SIGUSR1 received: Syncing config...".to_string()));
+                info!("SIGUSR1 received; configuration changes require a Manager-driven daemon restart");
+                let _ = status_tx.send(DaemonMessage::Status(
+                    "SIGUSR1 ignored: use Save & Apply to reload configuration".to_string(),
+                ));
             }
 
-            // 5. Handle IPC Config Updates (Lower priority - expensive operation)
+            // 5. Handle Manager IPC commands (lower priority)
             msg = ipc_config_rx_tokio.recv() => {
                 let Some(msg) = msg else {
                     info!("IPC bridge closed - shutting down daemon");
@@ -835,52 +837,11 @@ async fn run_event_loop(
                         info!("Graceful shutdown requested by Manager");
                         return Ok(());
                     }
-                    DaemonControlMessage::Config(ConfigMessage::Full(new_config)) => {
-                        let new_config = *new_config; // Unbox
-                        info!("Received full config update via IPC");
-                        restore_interrupted_group_drag(conn, &mut resources, "configuration update");
-
-                        // Update DaemonConfig
-                        resources.config = new_config;
-
-                        // Only rebuild font renderer if font settings actually changed
-                        let font_name = &resources.config.profile.thumbnail_text_font;
-                        let font_size = resources.config.profile.thumbnail_text_size as f32;
-
-                        if !font_renderer.matches_config(font_name, font_size) {
-                            debug!("Font settings changed, rebuilding renderer");
-                            let new_renderer = crate::daemon::font::FontRenderer::resolve_from_config(
-                                conn,
-                                font_name,
-                                font_size,
-                            );
-
-                            match new_renderer {
-                                Ok(renderer) => {
-                                    font_renderer = renderer;
-                                    info!("Font renderer updated");
-                                }
-                                Err(e) => {
-                                    error!(error = %e, "Failed to update font renderer");
-                                }
-                            }
-                        } else {
-                            debug!("Font settings unchanged, skipping rebuild");
-                        }
-
-                        // Update CycleState (hotkeys)
-                        // NOTE: Do NOT recreate CycleState here! It would wipe out active_windows tracking.
-                        // CycleState is only created once at startup and maintains window state across config reloads.
-
-                        // Force redraw of all thumbnails with new settings
-                        display_config = resources.config.build_display_config();
-                        for thumbnail in resources.eve_clients.values_mut() {
-                             let _ = thumbnail.refresh_name_overlay(&display_config, &font_renderer);
-                             let _ = thumbnail.update(&display_config, &font_renderer);
-                        }
-
-                        info!("Full config updated");
-                    },
+                    DaemonControlMessage::Config(ConfigMessage::InitialConfig(_)) => {
+                        return Err(anyhow::anyhow!(
+                            "Received InitialConfig after daemon initialization"
+                        ));
+                    }
 
                     DaemonControlMessage::Config(ConfigMessage::ThumbnailMoves {
                         updates,
@@ -953,15 +914,15 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
 
     debug!("Waiting for initial configuration...");
     let initial_config = match config_rx.recv() {
-        Ok(ConfigMessage::Full(config)) => *config,
+        Ok(ConfigMessage::InitialConfig(config)) => *config,
         Ok(ConfigMessage::ThumbnailMoves { .. }) => {
             return Err(anyhow::anyhow!(
-                "Expected Full config on startup, got ThumbnailMoves"
+                "Expected InitialConfig on startup, got ThumbnailMoves"
             ));
         }
         Ok(ConfigMessage::Shutdown) => {
             return Err(anyhow::anyhow!(
-                "Expected Full config on startup, got Shutdown"
+                "Expected InitialConfig on startup, got Shutdown"
             ));
         }
         Err(e) => return Err(anyhow::anyhow!("Failed to receive initial config: {}", e)),
@@ -977,7 +938,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     let sigusr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
         .context("Failed to register SIGUSR1 handler")?;
 
-    debug!("Registered SIGUSR1 handler for manual position save");
+    debug!("Registered legacy SIGUSR1 handler");
 
     // 4. Setup Hotkeys
     let allowed_windows = Arc::new(RwLock::new(HashSet::new()));

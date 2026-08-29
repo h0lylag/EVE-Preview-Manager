@@ -365,7 +365,7 @@ impl eframe::App for ManagerApp {
                             BehaviorSettingsAction::RestoreTriggered => {
                                 // Reload config from disk (disk was just updated by restore)
                                 state.discard_changes();
-                                // Sync new config to daemon
+                                // Restart the daemon with the restored configuration.
                                 state.reload_daemon_config();
                                 // Override the "Changes discarded" message from discard_changes
                                 state.config_status_message = Some(StatusMessage {

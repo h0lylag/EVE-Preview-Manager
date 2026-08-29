@@ -25,12 +25,12 @@ impl ThumbnailSpatialUpdate {
 /// Messages sent from Manager to Daemon
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ConfigMessage {
-    /// Full state synchronization.
+    /// Complete configuration snapshot used only during daemon startup.
     ///
-    /// Used for low-frequency, heavy operations like initial startup, profile switching,
-    /// or bulk GUI setting changes. The payload is Boxed to reduce the enum size,
-    /// keeping the enum compact for lightweight `ThumbnailMoves` messages.
-    Full(Box<DaemonConfig>),
+    /// Config-derived runtime resources such as cycle state and hotkey listeners are
+    /// constructed from this payload. Applying later configuration changes requires
+    /// restarting the daemon and sending a new startup snapshot.
+    InitialConfig(Box<DaemonConfig>),
 
     /// Lightweight spatial deltas for one or more thumbnails.
     ///
@@ -64,7 +64,7 @@ pub enum DaemonMessage {
     ///
     /// The Manager applies the complete batch to its active profile. When position auto-save
     /// is enabled, it persists the batch and acknowledges it with `ThumbnailMoves` without
-    /// triggering a full config sync cycle.
+    /// restarting the daemon.
     PositionsChanged {
         updates: Vec<ThumbnailSpatialUpdate>,
     },
@@ -78,7 +78,7 @@ pub enum DaemonMessage {
 }
 
 /// The bootstrap payload sent over the initial server channel.
-/// Contains the channel for receiving config updates and the channel for sending status updates.
+/// Contains the Manager-to-Daemon command sender and Daemon-to-Manager status receiver.
 pub type BootstrapMessage = (IpcSender<ConfigMessage>, IpcReceiver<DaemonMessage>);
 
 #[cfg(test)]
@@ -92,7 +92,7 @@ mod tests {
     use crate::config::profile::{CycleSlot, Profile};
 
     #[test]
-    fn full_config_round_trips_over_ipc() {
+    fn initial_config_round_trips_over_ipc() {
         let binding = HotkeyBinding::with_devices(
             15,
             true,
@@ -103,14 +103,20 @@ mod tests {
         );
         let mut profile = Profile {
             hotkey_toggle_previews: Some(binding.clone()),
+            thumbnail_opacity: 73,
             ..Profile::default()
         };
-        profile
+        let cycle_group = profile
             .cycle_groups
             .first_mut()
-            .expect("default profile should contain a cycle group")
+            .expect("default profile should contain a cycle group");
+        cycle_group
             .cycle_list
             .push(CycleSlot::Eve("Test Character".to_string()));
+        cycle_group.hotkey_forward = Some(binding.clone());
+        profile
+            .character_hotkeys
+            .insert("Test Character".to_string(), binding.clone());
 
         let mut profile_hotkeys = HashMap::new();
         profile_hotkeys.insert(binding.clone(), profile.profile_name.clone());
@@ -126,13 +132,13 @@ mod tests {
             ipc::channel::<ConfigMessage>().expect("config IPC channel should be created");
 
         sender
-            .send(ConfigMessage::Full(Box::new(config)))
-            .expect("full config should serialize and send");
+            .send(ConfigMessage::InitialConfig(Box::new(config)))
+            .expect("initial config should serialize and send");
 
-        let ConfigMessage::Full(received) =
-            receiver.recv().expect("full config should be received")
+        let ConfigMessage::InitialConfig(received) =
+            receiver.recv().expect("initial config should be received")
         else {
-            panic!("expected a full config message");
+            panic!("expected an initial config message");
         };
         assert_eq!(
             received.profile.hotkey_toggle_previews.as_ref(),
@@ -147,9 +153,22 @@ mod tests {
             Some(CycleSlot::Eve(name)) if name == "Test Character"
         ));
         assert_eq!(
+            received
+                .profile
+                .cycle_groups
+                .first()
+                .and_then(|group| group.hotkey_forward.as_ref()),
+            Some(&binding)
+        );
+        assert_eq!(
+            received.profile.character_hotkeys.get("Test Character"),
+            Some(&binding)
+        );
+        assert_eq!(
             received.profile_hotkeys.get(&binding),
             Some(&received.profile.profile_name)
         );
+        assert_eq!(received.profile.thumbnail_opacity, 73);
     }
 
     #[test]

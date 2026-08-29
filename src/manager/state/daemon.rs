@@ -202,7 +202,7 @@ impl SharedState {
         }
 
         self.last_save_attempt = Instant::now();
-        if let Err(error) = self.save_config_no_sync(SaveMode::Explicit) {
+        if let Err(error) = self.persist_config(SaveMode::Explicit) {
             error!(error = %error, "Failed to auto-save thumbnail positions");
             self.pending_position_save = true;
             self.settings_changed = true;
@@ -232,11 +232,11 @@ impl SharedState {
                 }
             });
 
-            // Sync config to daemon
-            if let Err(err) = self.sync_to_daemon() {
-                error!(error = ?err, "Failed to sync config to daemon");
+            // Send the startup-only configuration snapshot.
+            if let Err(err) = self.send_initial_config_to_daemon() {
+                error!(error = ?err, "Failed to send initial config to daemon");
                 self.status_message = Some(super::types::StatusMessage {
-                    text: format!("Config sync failed: {err}"),
+                    text: format!("Initial config failed: {err}"),
                     color: STATUS_STOPPED,
                 });
             }

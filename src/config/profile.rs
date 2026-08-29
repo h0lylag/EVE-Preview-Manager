@@ -753,7 +753,7 @@ impl Config {
     /// Save configuration to JSON file.
     ///
     /// Atomically replaces config.json with the current in-memory state.
-    /// The Manager maintains authoritative state via IPC synchronization.
+    /// Structural changes take effect when the Manager restarts the daemon.
     pub fn save(&self) -> Result<()> {
         self.save_to(&Self::path())
     }

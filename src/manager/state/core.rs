@@ -106,7 +106,7 @@ impl SharedState {
         }
     }
 
-    pub fn sync_to_daemon(&self) -> Result<()> {
+    pub fn send_initial_config_to_daemon(&self) -> Result<()> {
         self.validate_config()?;
 
         if let Some(ref tx) = self.ipc_config_tx {
@@ -119,7 +119,7 @@ impl SharedState {
             let mut character_thumbnails = selected_profile.character_thumbnails.clone();
             let mut custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
 
-            // If "Auto Save" is disabled, we must ensure we sync the LAST SAVED state to the daemon,
+            // If "Auto Save" is disabled, the startup snapshot must use the LAST SAVED state,
             // not the current transient in-memory state. This ensures that actions like "Refresh"
             // or "Profile Switch" revert to the saved positions as expected.
             if !selected_profile.thumbnail_auto_save_position
@@ -129,7 +129,7 @@ impl SharedState {
                     .iter()
                     .find(|p| p.profile_name == selected_profile.profile_name)
             {
-                info!("Auto-save disabled: Syncing explicit disk positions to daemon");
+                info!("Auto-save disabled: using explicit disk positions for daemon startup");
                 character_thumbnails = disk_profile.character_thumbnails.clone();
                 custom_source_thumbnails = disk_profile.custom_source_thumbnails.clone();
             }
@@ -150,17 +150,33 @@ impl SharedState {
                 runtime_hidden: false,
             };
 
-            if let Err(e) = tx.send(ConfigMessage::Full(Box::new(daemon_config))) {
-                error!(error = %e, "Failed to send config update to daemon");
-                return Err(anyhow::anyhow!("Failed to send config to daemon: {}", e));
+            if let Err(e) = tx.send(ConfigMessage::InitialConfig(Box::new(daemon_config))) {
+                error!(error = %e, "Failed to send initial config to daemon");
+                return Err(anyhow::anyhow!(
+                    "Failed to send initial config to daemon: {}",
+                    e
+                ));
             } else {
-                debug!("Sent config update to daemon");
+                debug!("Sent initial config to daemon");
             }
         }
         Ok(())
     }
 
     pub fn save_config(&mut self, mode: SaveMode) -> Result<()> {
+        self.persist_config(mode)?;
+
+        self.config_status_message = Some(StatusMessage {
+            text: "Configuration saved successfully".to_string(),
+            color: COLOR_SUCCESS,
+        });
+        info!("Configuration saved to disk");
+        Ok(())
+    }
+
+    /// Persist Manager-owned configuration without sending a daemon command.
+    /// Runtime application is handled by explicit daemon restart or narrow IPC deltas.
+    pub(super) fn persist_config(&mut self, mode: SaveMode) -> Result<()> {
         self.validate_config()?;
 
         // Prepare config for saving
@@ -189,13 +205,9 @@ impl SharedState {
             }
         }
 
-        // Write current state to disk - Manager maintains authoritative state via IPC synchronization
+        // Write current state to disk. The Manager applies structural changes by restarting
+        // the daemon; live position acknowledgements use ConfigMessage::ThumbnailMoves.
         config_to_save.save()?;
-
-        // Sync with daemon via IPC.
-        // NOTE: If Auto-Save is disabled, `sync_to_daemon` will enforce the disk-based positions,
-        // causing transient moves to snap back. This is intentional.
-        self.sync_to_daemon()?;
 
         // Re-sync selected_profile_idx with the potentially reloaded profile list
         self.selected_profile_idx = self
@@ -207,52 +219,7 @@ impl SharedState {
 
         self.settings_changed = false;
         self.pending_position_save = false;
-        self.config_status_message = Some(StatusMessage {
-            text: "Configuration saved successfully".to_string(),
-            color: COLOR_SUCCESS,
-        });
-        info!("Configuration saved to disk");
-        Ok(())
-    }
-
-    /// Save config to disk WITHOUT syncing to daemon via IPC
-    /// Used when the Daemon already knows about the change (e.g., it initiated PositionsChanged)
-    pub fn save_config_no_sync(&mut self, mode: SaveMode) -> Result<()> {
-        self.validate_config()?;
-
-        let mut config_to_save = self.config.clone();
-
-        if mode == SaveMode::Implicit {
-            if let Ok(disk_config) = crate::config::profile::Config::load() {
-                for profile in config_to_save.profiles.iter_mut() {
-                    if !profile.thumbnail_auto_save_position
-                        && let Some(disk_profile) = disk_config
-                            .profiles
-                            .iter()
-                            .find(|p| p.profile_name == profile.profile_name)
-                    {
-                        profile.character_thumbnails = disk_profile.character_thumbnails.clone();
-                        profile.custom_source_thumbnails =
-                            disk_profile.custom_source_thumbnails.clone();
-                    }
-                }
-            } else {
-                warn!("Failed to load disk config for position revert - saving current state");
-            }
-        }
-
-        config_to_save.save()?;
-
-        self.selected_profile_idx = self
-            .config
-            .profiles
-            .iter()
-            .position(|p| p.profile_name == self.config.global.selected_profile)
-            .unwrap_or(0);
-
-        self.settings_changed = false;
-        self.pending_position_save = false;
-        info!("Configuration saved to disk (no daemon sync)");
+        debug!("Configuration persisted without daemon synchronization");
         Ok(())
     }
 
@@ -301,7 +268,7 @@ impl SharedState {
             self.config.global.selected_profile = previous_profile_name;
             self.selected_profile_idx = previous_profile_idx;
 
-            let rollback_error = self.save_config_no_sync(SaveMode::Implicit).err();
+            let rollback_error = self.persist_config(SaveMode::Implicit).err();
             if let Some(rollback_error) = &rollback_error {
                 error!(error = ?rollback_error, "Failed to restore profile selection on disk");
             }
@@ -357,7 +324,8 @@ impl SharedState {
 
 #[cfg(test)]
 mod tests {
-    use super::SharedState;
+    use super::{SaveMode, SharedState};
+    use crate::common::ipc::ConfigMessage;
     use crate::config::profile::{Config, Profile};
 
     #[test]
@@ -441,24 +409,32 @@ mod tests {
     }
 
     #[test]
-    fn failed_profile_switch_restores_persisted_selection() {
-        let mut config = Config::default();
-        config.profiles.push(Profile::default_with_name(
-            "Failed IPC Target".to_string(),
-            String::new(),
-        ));
-        config.save().unwrap();
-
+    fn send_initial_config_to_daemon_emits_initial_config() {
+        let config = Config::default();
         let mut state = SharedState::new(config, false);
         let (sender, receiver) = ipc_channel::ipc::channel().unwrap();
-        drop(receiver);
         state.ipc_config_tx = Some(sender);
 
-        assert!(!state.switch_profile(1));
+        state.send_initial_config_to_daemon().unwrap();
 
-        assert_eq!(state.selected_profile_idx, 0);
-        assert_eq!(state.config.global.selected_profile, "default");
-        assert_eq!(Config::load().unwrap().global.selected_profile, "default");
+        let ConfigMessage::InitialConfig(config) = receiver.recv().unwrap() else {
+            panic!("expected startup path to send InitialConfig");
+        };
+        assert_eq!(config.profile.profile_name, "default");
+    }
+
+    #[test]
+    fn save_config_is_disk_only_even_with_a_disconnected_daemon_channel() {
+        let config = Config::default();
+        let mut state = SharedState::new(config, false);
+        let (sender, receiver) = ipc_channel::ipc::channel().unwrap();
+        state.ipc_config_tx = Some(sender);
+
+        state.save_config(SaveMode::Explicit).unwrap();
+        assert!(receiver.try_recv().is_err());
+
+        drop(receiver);
+        state.save_config(SaveMode::Explicit).unwrap();
     }
 
     #[test]

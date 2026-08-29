@@ -440,20 +440,6 @@ impl<'a> Thumbnail<'a> {
         Ok(())
     }
 
-    /// Redraw the name overlay after display-related config changes.
-    pub fn refresh_name_overlay(
-        &self,
-        display_config: &DisplayConfig,
-        font_renderer: &FontRenderer,
-    ) -> Result<()> {
-        self.renderer.update_name(
-            display_config,
-            self.overlay_identity(display_config),
-            self.dimensions,
-            font_renderer,
-        )
-    }
-
     /// Called when character name changes (e.g. login detection update).
     pub fn set_character_name(
         &mut self,
