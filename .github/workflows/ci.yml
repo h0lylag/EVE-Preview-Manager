@@ -3,7 +3,7 @@ name: Rust CI
 on:
   pull_request:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   workflow_dispatch:
 
 permissions:
@@ -52,3 +52,11 @@ jobs:
       - name: cargo test
         if: matrix.job == 'test'
         run: cargo test --locked --all-features
+
+  nix:
+    name: Nix build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - run: nix flake check --no-update-lock-file --print-build-logs

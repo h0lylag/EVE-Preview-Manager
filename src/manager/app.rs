@@ -529,9 +529,15 @@ mod tests {
             .or_default()
             .minimized = Some(is_minimized);
 
-        egui::Context::default().run_ui(raw_input, |ui| {
+        let ctx = egui::Context::default();
+        // Test lifecycle commands without egui's automatic window-theme command.
+        ctx.options_mut(|options| options.sync_window_theme = false);
+        let mut output = ctx.run_ui(raw_input, |ui| {
             app.update_logic(ui.ctx());
-        })
+        });
+        // Headless tests have no renderer to consume texture updates.
+        output.textures_delta.clear();
+        output
     }
 
     fn root_commands(output: &egui::FullOutput) -> &[egui::ViewportCommand] {

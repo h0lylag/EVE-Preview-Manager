@@ -950,9 +950,11 @@ mod tests {
                 events,
                 ..RawInput::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            let mut output = ctx.run_ui(input, |ui| {
                 tab.ui(ui, &mut profile, &mut hotkeys);
             });
+            // Headless tests have no renderer to consume texture updates.
+            output.textures_delta.clear();
             profile.custom_windows[0].alias.clone()
         };
         frame(Vec::new());

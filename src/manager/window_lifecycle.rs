@@ -146,9 +146,15 @@ mod tests {
         lifecycle: &mut WindowLifecycle,
         conditions: WindowConditions,
     ) -> egui::FullOutput {
-        egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+        let ctx = egui::Context::default();
+        // Test lifecycle commands without egui's automatic window-theme command.
+        ctx.options_mut(|options| options.sync_window_theme = false);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             lifecycle.update(ui.ctx(), conditions);
-        })
+        });
+        // Headless tests have no renderer to consume texture updates.
+        output.textures_delta.clear();
+        output
     }
 
     fn root_commands(output: &egui::FullOutput) -> &[egui::ViewportCommand] {
