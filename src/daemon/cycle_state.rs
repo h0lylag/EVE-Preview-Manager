@@ -349,6 +349,16 @@ impl CycleState {
             group_state.current_index = 0;
         }
 
+        // Appended clients have no named slot for the focus handler to synchronize.
+        // Resolve their current index against the live candidate list before cycling.
+        if let Some(window) = self.current_window
+            && let Some(index) = candidates
+                .iter()
+                .position(|candidate| *candidate == CycleCandidate::Unidentified(window))
+        {
+            group_state.current_index = index;
+        }
+
         if reset_on_switch {
             let group_changed = self.last_active_group.as_deref() != Some(group_name);
             if group_changed {
@@ -645,10 +655,9 @@ impl CycleState {
         {
             pos
         } else if let Some(default_group) = self.groups.get("Default")
-            && !default_group.order.is_empty()
+            && let Some(current_identity) = default_group.order.get(default_group.current_index)
         {
             // Fallback to "Default" group index logic if available
-            let current_identity = &default_group.order[default_group.current_index];
             if let Some(pos) = sorted_candidates
                 .iter()
                 .position(|candidate| *candidate == current_identity)
@@ -1042,5 +1051,61 @@ mod tests {
         add_source(&mut state, "h0ly lag", 200);
 
         assert_eq!(state.cycle_forward("G1", None, false), None);
+    }
+
+    #[test]
+    fn direct_hotkey_after_appended_unidentified_client() {
+        let mut state = CycleState::new(vec![test_group("Default", &["Pilot"])]);
+        add_eve(&mut state, "Pilot", 10);
+        add_logged_out(&mut state, 20);
+        assert_eq!(
+            state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), false),
+            unidentified_activation(20)
+        );
+        state.set_current_by_window_with_identity(20, None);
+
+        assert_eq!(
+            state.activate_next_in_group(&[SourceIdentity::eve("Pilot")], None),
+            eve_activation(10, "Pilot")
+        );
+    }
+
+    #[test]
+    fn manually_focused_appended_client_sets_forward_and_backward_start() {
+        let mut state = CycleState::new(vec![test_group("Default", &["Pilot"])]);
+        add_eve(&mut state, "Pilot", 10);
+        add_logged_out(&mut state, 20);
+        add_logged_out(&mut state, 30);
+        state.set_current_by_window_with_identity(30, None);
+
+        assert_eq!(
+            state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), false),
+            eve_activation(10, "Pilot")
+        );
+        assert_eq!(
+            state.cycle_backward_with_unidentified("Default", None, &HashMap::new(), false),
+            unidentified_activation(20)
+        );
+
+        // Removing an earlier appended client must not leave a stale index.
+        state.remove_window(20);
+        assert_eq!(
+            state.cycle_backward_with_unidentified("Default", None, &HashMap::new(), false),
+            eve_activation(10, "Pilot")
+        );
+    }
+
+    #[test]
+    fn group_reset_takes_precedence_over_focused_appended_client() {
+        let mut state = CycleState::new(vec![test_group("Default", &["Pilot"])]);
+        add_eve(&mut state, "Pilot", 10);
+        add_logged_out(&mut state, 20);
+        add_logged_out(&mut state, 30);
+        state.set_current_by_window_with_identity(20, None);
+
+        assert_eq!(
+            state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), true),
+            eve_activation(10, "Pilot")
+        );
     }
 }

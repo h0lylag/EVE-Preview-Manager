@@ -3,14 +3,39 @@ use std::collections::HashMap;
 
 use crate::common::types::{CharacterSettings, Position};
 use crate::config::profile::{
-    CustomWindowRule, CycleGroup, HotkeyBackendType, LoggedOutUnidentifiedCycleMode, Profile,
-    default_auto_save_thumbnail_positions, default_border_enabled, default_border_size,
+    CustomWindowRule, CycleGroup, CycleSlot, HotkeyBackendType, LoggedOutUnidentifiedCycleMode,
+    Profile, default_auto_save_thumbnail_positions, default_border_enabled, default_border_size,
     default_hotkey_backend, default_inactive_border_color, default_inactive_border_enabled,
     default_logged_out_unidentified_cycle_mode, default_preserve_thumbnail_position_on_swap,
     default_profile_name, default_show_logged_out_character_name, default_snap_threshold,
     default_text_font_family, default_thumbnail_enabled, default_thumbnail_height,
     default_thumbnail_width,
 };
+
+// Keep legacy strings distinct until the profile's custom rules are available.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CycleSlotHelper {
+    Legacy(String),
+    Typed(CycleSlot),
+}
+
+#[derive(Deserialize)]
+struct CycleGroupHelper {
+    name: String,
+    #[serde(default, alias = "characters", alias = "slots")]
+    cycle_list: Vec<CycleSlotHelper>,
+    hotkey_forward: Option<crate::config::HotkeyBinding>,
+    hotkey_backward: Option<crate::config::HotkeyBinding>,
+}
+
+fn migrate_legacy_slot(name: String, rules: &[CustomWindowRule]) -> CycleSlot {
+    if rules.iter().any(|rule| rule.alias == name) {
+        CycleSlot::Source(name)
+    } else {
+        CycleSlot::Eve(name)
+    }
+}
 
 /// Helper struct for migration during deserialization
 #[derive(Deserialize)]
@@ -101,7 +126,7 @@ struct ProfileHelper {
 
     // New field
     #[serde(default)]
-    cycle_groups: Vec<CycleGroup>,
+    cycle_groups: Vec<CycleGroupHelper>,
 
     // Legacy fields for migration
     #[serde(default)]
@@ -114,7 +139,25 @@ struct ProfileHelper {
 
 impl From<ProfileHelper> for Profile {
     fn from(helper: ProfileHelper) -> Self {
-        let mut cycle_groups = helper.cycle_groups;
+        let mut cycle_groups: Vec<CycleGroup> = helper
+            .cycle_groups
+            .into_iter()
+            .map(|group| CycleGroup {
+                name: group.name,
+                cycle_list: group
+                    .cycle_list
+                    .into_iter()
+                    .map(|slot| match slot {
+                        CycleSlotHelper::Legacy(name) => {
+                            migrate_legacy_slot(name, &helper.custom_windows)
+                        }
+                        CycleSlotHelper::Typed(slot) => slot,
+                    })
+                    .collect(),
+                hotkey_forward: group.hotkey_forward,
+                hotkey_backward: group.hotkey_backward,
+            })
+            .collect();
 
         // Migration logic:
         // If we have legacy fields but no cycle groups, create a "Default" group from them
@@ -128,7 +171,7 @@ impl From<ProfileHelper> for Profile {
                 cycle_list: helper
                     .hotkey_cycle_group
                     .into_iter()
-                    .map(crate::config::profile::CycleSlot::Eve)
+                    .map(|name| migrate_legacy_slot(name, &helper.custom_windows))
                     .collect(),
                 hotkey_forward: helper.hotkey_cycle_forward,
                 hotkey_backward: helper.hotkey_cycle_backward,
@@ -404,5 +447,61 @@ impl<'de> Deserialize<'de> for Profile {
                 custom_windows: p.custom_windows,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_cycle_strings_migrate_without_changing_typed_entries() {
+        for field in ["cycle_list", "characters", "slots"] {
+            let mut value = serde_json::to_value(Profile::default()).unwrap();
+            value["custom_windows"] = json!([{
+                "alias": "Browser", "class_pattern": "firefox"
+            }]);
+            value["cycle_groups"] = json!([{
+                "name": "Default",
+                field: ["Browser", "Pilot", {"eve": "Browser"}, {"source": "Browser"}]
+            }]);
+
+            let profile: Profile = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                profile.cycle_groups[0].cycle_list,
+                vec![
+                    CycleSlot::Source("Browser".to_string()),
+                    CycleSlot::Eve("Pilot".to_string()),
+                    CycleSlot::Eve("Browser".to_string()),
+                    CycleSlot::Source("Browser".to_string()),
+                ]
+            );
+            let reloaded: Profile =
+                serde_json::from_value(serde_json::to_value(&profile).unwrap()).unwrap();
+            assert_eq!(
+                reloaded.cycle_groups[0].cycle_list,
+                profile.cycle_groups[0].cycle_list
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_flat_cycle_list_resolves_custom_sources() {
+        let mut value = serde_json::to_value(Profile::default()).unwrap();
+        value["custom_windows"] = json!([{
+            "alias": "Browser", "class_pattern": "firefox"
+        }]);
+        value["cycle_groups"] = json!([]);
+        value["hotkey_cycle_group"] = json!(["Browser", "Pilot"]);
+
+        let profile: Profile = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![
+                CycleSlot::Source("Browser".to_string()),
+                CycleSlot::Eve("Pilot".to_string())
+            ]
+        );
     }
 }

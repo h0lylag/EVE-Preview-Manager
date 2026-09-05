@@ -3,6 +3,22 @@ use crate::manager::x11_utils::{WindowInfo, get_running_applications};
 use egui::{ScrollArea, Ui};
 use std::collections::HashSet;
 
+fn edit_source_alias(ui: &mut Ui, id: egui::Id, alias: &str) -> Option<String> {
+    let mut draft = ui
+        .data_mut(|data| data.get_temp::<String>(id))
+        .unwrap_or_else(|| alias.to_string());
+    let mut submitted = false;
+    ui.horizontal(|ui| {
+        let response = ui.add(egui::TextEdit::singleline(&mut draft).id(id));
+        submitted = (response.lost_focus()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+            || ui.button("Rename").clicked();
+    });
+    // Keep unfinished text intact; canonicalization happens only on submission.
+    ui.data_mut(|data| data.insert_temp(id, draft.clone()));
+    submitted.then_some(draft)
+}
+
 pub struct SourcesTab {
     // Component state
     new_rule: CustomWindowRule,
@@ -134,8 +150,8 @@ impl SourcesTab {
                                 .show(ui, |ui| {
                                     // Alias
                                     ui.label("Display Name:");
-                                    let mut alias_text = rule.alias.clone();
-                                    if ui.text_edit_singleline(&mut alias_text).changed() {
+                                    let id = egui::Id::new(("source_alias", &profile.profile_name, idx, &rule.alias));
+                                    if let Some(alias_text) = edit_source_alias(ui, id, &rule.alias) {
                                         pending_alias_rename = Some((idx, alias_text));
                                     }
                                     ui.end_row();
@@ -670,8 +686,10 @@ impl SourcesTab {
                 }
 
                 if let Some((idx, alias)) = pending_alias_rename {
+                    let id = egui::Id::new(("source_alias", &profile.profile_name, idx, &profile.custom_windows[idx].alias));
                     match profile.rename_custom_source_alias(idx, &alias) {
                         Ok(alias_changed) => {
+                            ui.data_mut(|data| data.remove::<String>(id));
                             if alias_changed {
                                 changed = true;
                             }
@@ -892,5 +910,74 @@ impl SourcesTab {
         }
 
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::profile::{CycleSlot, Profile};
+    use crate::manager::components::hotkey_settings::HotkeySettingsState;
+    use egui::{Context, Event, Key, Modifiers, RawInput};
+
+    fn key(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn source_alias_keeps_spaces_and_validates_only_on_submission() {
+        let ctx = Context::default();
+        let mut tab = SourcesTab::default();
+        let mut profile = Profile::default();
+        let mut rule = tab.new_rule.clone();
+        rule.alias = "Browser".to_string();
+        rule.class_pattern = Some("firefox".to_string());
+        profile.custom_windows.push(rule.clone());
+        rule.alias = "Browser Tools".to_string();
+        profile.custom_windows.push(rule);
+        profile.cycle_groups[0].cycle_list = vec![CycleSlot::Source("Browser".to_string())];
+        tab.expanded_rows.insert(0);
+        let mut hotkeys = HotkeySettingsState::new();
+        let id = egui::Id::new(("source_alias", &profile.profile_name, 0_usize, "Browser"));
+        let mut frame = |events| {
+            let input = RawInput {
+                events,
+                ..RawInput::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                tab.ui(ui, &mut profile, &mut hotkeys);
+            });
+            profile.custom_windows[0].alias.clone()
+        };
+        frame(Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        assert_eq!(
+            frame(vec![key(Key::End), Event::Text(" ".to_string())]),
+            "Browser"
+        );
+        assert_eq!(frame(vec![Event::Text("Tools".to_string())]), "Browser");
+        // A duplicate is rejected without replacing the name or losing the draft.
+        assert_eq!(frame(vec![key(Key::Enter)]), "Browser");
+        assert_eq!(
+            ctx.data(|data| data.get_temp::<String>(id)).as_deref(),
+            Some("Browser Tools")
+        );
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        assert_eq!(
+            frame(vec![key(Key::End), Event::Text(" Two".to_string())]),
+            "Browser"
+        );
+        assert_eq!(frame(vec![key(Key::Enter)]), "Browser Tools Two");
+        assert!(tab.error_msg.is_none());
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Source("Browser Tools Two".to_string())]
+        );
     }
 }
