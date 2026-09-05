@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use tracing::{debug, info, warn};
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
@@ -8,6 +9,7 @@ use x11rb::protocol::xproto::*;
 
 use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
+use super::super::thumbnail::Thumbnail;
 use super::upsert_spatial_settings;
 use crate::common::ipc::{DaemonMessage, ThumbnailSpatialUpdate};
 use crate::common::types::{
@@ -42,6 +44,22 @@ fn remove_from_group_drag(ctx: &mut EventContext<'_, '_>, source_window: Window)
         }
     } else {
         ctx.group_drag_state.remove_member(source_window);
+    }
+}
+
+fn source_window_for_destroy_event(
+    destroyed_window: Window,
+    active_windows: &HashMap<Window, Option<SourceIdentity>>,
+    thumbnails: &HashMap<Window, Thumbnail<'_>>,
+) -> Option<Window> {
+    if active_windows.contains_key(&destroyed_window) || thumbnails.contains_key(&destroyed_window)
+    {
+        Some(destroyed_window)
+    } else {
+        thumbnails
+            .iter()
+            .find(|(_, thumbnail)| thumbnail.parent() == Some(destroyed_window))
+            .map(|(source_window, _)| *source_window)
     }
 }
 
@@ -583,14 +601,11 @@ pub fn handle_map_notify(ctx: &mut EventContext, event: MapNotifyEvent) -> Resul
 
 /// Handle DestroyNotify events - remove destroyed window
 pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) -> Result<()> {
-    let window_to_remove = if ctx.eve_clients.contains_key(&event.window) {
-        Some(event.window)
-    } else {
-        ctx.eve_clients
-            .iter()
-            .find(|(_, thumb)| thumb.parent() == Some(event.window))
-            .map(|(win, _)| *win)
-    };
+    let window_to_remove = source_window_for_destroy_event(
+        event.window,
+        ctx.cycle_state.get_active_windows(),
+        ctx.eve_clients,
+    );
 
     if let Some(win) = window_to_remove {
         info!(
@@ -823,4 +838,24 @@ pub fn handle_configure_notify(ctx: &mut EventContext, event: ConfigureNotifyEve
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destroy_matcher_recognizes_tracked_source_without_thumbnail() {
+        let active_windows = HashMap::from([(42, None)]);
+        let thumbnails = HashMap::new();
+
+        assert_eq!(
+            source_window_for_destroy_event(42, &active_windows, &thumbnails),
+            Some(42)
+        );
+        assert_eq!(
+            source_window_for_destroy_event(99, &active_windows, &thumbnails),
+            None
+        );
+    }
 }

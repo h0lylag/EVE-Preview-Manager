@@ -461,24 +461,16 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         // other clients, otherwise some WMs can redirect focus during restore.
         std::thread::sleep(std::time::Duration::from_millis(25));
 
-        // Collect windows to minimize and clear their borders first
-        let windows_to_minimize: Vec<Window> = ctx
-            .eve_clients
-            .iter()
-            .filter(|(_, t)| t.src() != clicked_src)
-            .filter(|(_, t)| {
-                // NOTE: custom source minimize exemptions are rule overrides resolved
-                // by build_display_config().
-                !ctx.display_config
-                    .settings_for(t.source_kind(), t.effective_character_name())
-                    .map(|s| s.exempt_from_minimize)
-                    .unwrap_or(false)
-            })
-            .map(|(w, _)| *w)
-            .collect();
+        // Select from every tracked source, including sources without a rendered preview.
+        let windows_to_minimize = super::source_windows_to_minimize(
+            ctx.cycle_state,
+            ctx.session_state,
+            ctx.display_config,
+            clicked_src,
+        );
 
         for window in windows_to_minimize {
-            // Clear border BEFORE minimizing to prevent stale active borders
+            // Clear the border when a thumbnail exists; minimization does not require one.
             if let Some(thumb) = ctx.eve_clients.get_mut(&window) {
                 // Don't change state here - let the minimize handler set it to Minimized
                 // Just clear the border for now

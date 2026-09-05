@@ -696,31 +696,19 @@ async fn run_event_loop(
                                 // start changing other window states.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-                                // Minimize all other EVE clients after successful activation.
-                                // NOTE: exempt_from_minimize for custom sources is stored in the
-                                // rule, not in daemon_config maps; build_display_config() is the
-                                // only place it is resolved into character_settings.
-                                let other_windows: Vec<Window> = resources
-                                    .cycle
-                                    .get_active_windows()
-                                    .iter()
-                                    .filter(|(other_window, _)| **other_window != window)
-                                    .filter(|(_, source_identity)| {
-                                        !source_identity
-                                            .as_ref()
-                                            .and_then(|identity| {
-                                                display_config.character_settings.get(&identity.name)
-                                            })
-                                            .map(|s| s.exempt_from_minimize)
-                                            .unwrap_or(false)
-                                    })
-                                    .map(|(other_window, _)| *other_window)
-                                    .collect();
+                                // Select from every tracked source, including sources without a
+                                // rendered preview, while preserving typed and remembered exemptions.
+                                let other_windows = super::handlers::source_windows_to_minimize(
+                                    &resources.cycle,
+                                    &resources.session,
+                                    &display_config,
+                                    window,
+                                );
 
                                 for other_window in other_windows {
                                     // Clear border on the window BEFORE minimizing it
                                     // This prevents leaving stale active borders on minimized windows
-                                    // Thumbnail is optional — it may not exist when thumbnails are disabled.
+                                    // The thumbnail is optional and only needed for border cleanup.
                                     if let Some(thumb) = resources.eve_clients.get_mut(&other_window) {
                                         // Don't change state here - let the minimize handler set it to Minimized
                                         // Just clear the border for now
