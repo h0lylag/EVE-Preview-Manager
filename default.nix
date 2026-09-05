@@ -30,12 +30,9 @@ rustPlatform.buildRustPackage rec {
   pname = manifest.name;
   version = manifest.version;
 
-  cargoHash = "sha256-c06YmLsNiFBTm9W7pG9Ttee1rtQDOuhVR3xURnHBqSk=";
+  cargoLock.lockFile = ./Cargo.lock;
 
   src = pkgs.lib.cleanSource ./.;
-
-  # Skip tests in build
-  doCheck = false;
 
   nativeBuildInputs = with pkgs; [
     pkg-config

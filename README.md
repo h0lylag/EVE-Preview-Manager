@@ -113,11 +113,21 @@ chmod +x ./eve-preview-manager
 
 ### Build from Source
 
-**Build dependencies:** Rust/Cargo, pkg-config, fontconfig, dbus, X11, libxkbcommon
+**Build dependencies:** Rust/Cargo, pkg-config, fontconfig, dbus, X11, libxkbcommon, Wayland, OpenGL.
+
+Use the Rust version in [rust-toolchain.toml](rust-toolchain.toml) (selected automatically by rustup).
 
 ```bash
 git clone https://github.com/h0lylag/EVE-Preview-Manager.git
-cargo build --release
+cd EVE-Preview-Manager
+cargo build --locked --release
+```
+
+With Nix flakes, the development shell provides the toolchain and dependencies:
+
+```bash
+nix develop
+cargo build --locked --release
 ```
 
 <br>

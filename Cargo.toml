@@ -2,6 +2,7 @@
 name = "eve-preview-manager"
 version = "1.8.0"
 edition = "2024"
+rust-version = "1.97.1"
 
 [profile.release]
 lto = true
@@ -17,18 +18,18 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 dirs = "6.0.0"
 evdev = "0.13.2"
-fontdue = "0.9.3"
+fontdue = "0.9.4"
 fontconfig = "0.11.0"
-clap = { version = "4.6.4", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 libc = "0.2.189"
 
-eframe = { version = "0.35.0", default-features = false, features = ["glow", "x11"] }
-egui = "0.35.0"
-ipc-channel = "0.22.0"
+eframe = { version = "0.36.1", default-features = false, features = ["glow", "x11"] }
+egui = "0.36.1"
+ipc-channel = "0.23.0"
 ksni = "0.3.6"
-tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "signal"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "signal", "time"] }
 png = "0.18.1"
 chrono = "0.4.45"
-flate2 = "1.1.9"
+flate2 = "1.1.10"
 tar = "0.4.46"
 tempfile = "3.27.0"
