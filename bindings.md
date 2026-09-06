@@ -1,4 +1,4 @@
-# Keyboard and mouse bindings
+# Keyboard and Mouse bindings
 
 Use previews to switch between clients and arrange your layout, or assign hotkeys to switch without reaching for the mouse.
 
