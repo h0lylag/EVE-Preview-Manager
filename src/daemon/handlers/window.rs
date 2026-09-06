@@ -561,12 +561,8 @@ pub fn handle_create_notify(ctx: &mut EventContext, event: CreateNotifyEvent) ->
 
     debug!(window = event.window, "CreateNotify received");
 
-    // Subscribe to property changes so we can detect late-identifying windows (e.g. WM_CLASS set after creation)
-    let _ = ctx.app_ctx.conn.change_window_attributes(
-        event.window,
-        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-    );
-
+    // Identification excludes EPM windows before subscribing to late title/class
+    // updates, preserving the preview's existing mouse subscriptions.
     if let Some(identity) = identify_window(
         ctx.app_ctx,
         event.window,

@@ -144,7 +144,8 @@ impl<'a> ThumbnailRenderer<'a> {
         character_name: &str,
         display_character_name: &str,
     ) -> Result<()> {
-        // Set PID so we can identify our own thumbnail windows
+        // Publish PID and class before the title or mapping. Source detection
+        // rechecks ownership after matching, including during another instance's setup.
         let pid = std::process::id();
         ctx.conn
             .change_property32(

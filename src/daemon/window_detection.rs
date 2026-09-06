@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use ipc_channel::ipc::IpcSender;
 use tracing::debug;
 use x11rb::connection::Connection;
+use x11rb::errors::ReplyError;
+use x11rb::protocol::ErrorKind;
 use x11rb::protocol::xproto::*;
 
 use crate::common::constants;
@@ -26,8 +28,7 @@ fn source_window_position(ctx: &AppContext, window: Window) -> Option<Position> 
         .map(|geom| Position::new(geom.x, geom.y))
 }
 
-/// Check if a window is an EVE client and return its character name
-/// Returns Some(character_name) for EVE windows, None for non-EVE windows
+/// Identity of a detected EVE client or configured custom source.
 #[derive(Debug, Clone)]
 pub struct WindowIdentity {
     pub name: String,
@@ -65,6 +66,45 @@ impl WindowIdentity {
     }
 }
 
+/// Exclude daemon-owned windows and previews from any EPM instance as sources.
+/// Check before initial subscriptions and again after matching, before tracking.
+fn should_ignore_source_window(ctx: &AppContext, window: Window) -> Result<bool> {
+    let prop = match ctx
+        .conn
+        .get_property(
+            false,
+            window,
+            ctx.atoms.net_wm_pid,
+            AtomEnum::CARDINAL,
+            0,
+            1,
+        )
+        .context(format!("Failed to query _NET_WM_PID for {}", window))?
+        .reply()
+    {
+        Ok(prop) => prop,
+        Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => {
+            return Ok(true); // The candidate disappeared before it could be inspected.
+        }
+        Err(error) => {
+            return Err(error).context(format!("Failed to read _NET_WM_PID for {}", window));
+        }
+    };
+
+    // EWMH defines a PID as one CARDINAL/32. Missing or malformed properties
+    // provide no ownership information; still check the thumbnail class below.
+    if prop.type_ == u32::from(AtomEnum::CARDINAL)
+        && prop.bytes_after == 0
+        && prop.value.len() == constants::x11::PID_PROPERTY_SIZE
+        && prop.value32().and_then(|mut values| values.next()) == Some(std::process::id())
+    {
+        return Ok(true);
+    }
+
+    Ok(get_window_class(ctx.conn, window, ctx.atoms)?
+        .is_some_and(|class| class.eq_ignore_ascii_case("eve-preview-thumbnail")))
+}
+
 /// Identify a window as either an EVE client or a Custom Source
 pub fn identify_window(
     ctx: &AppContext,
@@ -72,14 +112,38 @@ pub fn identify_window(
     state: &mut SessionState,
     custom_rules: &[CustomWindowRule],
 ) -> Result<Option<WindowIdentity>> {
-    // Check for EVE Client identity first (Standard/Steam/Wine) using robust detection
-    if let Some(eve_window) = check_eve_window_internal(ctx, window, state)? {
-        let name = eve_window;
-        return Ok(Some(WindowIdentity::new_eve(name)));
+    if should_ignore_source_window(ctx, window)? {
+        return Ok(None);
     }
 
-    // 2. Check Custom Rules
-    // Get window properties once to avoid repeated round-trips
+    // Subscribe before checking identity so late title/class changes can be detected.
+    ctx.conn.change_window_attributes(
+        window,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+    )?;
+
+    if let Some(eve_window) = is_window_eve(ctx.conn, window, ctx.atoms)? {
+        // A different client can finish setting ownership metadata while we read
+        // the title. Recheck before updating session state or returning an identity.
+        if should_ignore_source_window(ctx, window)? {
+            return Ok(None);
+        }
+
+        let character_name = eve_window.character_name().to_string();
+        debug!(window, character = %character_name, "Confirmed EVE Client");
+        state.update_last_character(window, &character_name);
+
+        ctx.conn.change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().event_mask(
+                EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE | EventMask::STRUCTURE_NOTIFY,
+            ),
+        )?;
+
+        return Ok(Some(WindowIdentity::new_eve(character_name)));
+    }
+
+    // Read title and class for custom-rule matching.
     let wm_name_cookie =
         ctx.conn
             .get_property(false, window, ctx.atoms.wm_name, AtomEnum::STRING, 0, 1024)?;
@@ -183,6 +247,12 @@ pub fn identify_window(
         }
 
         if matched {
+            // EPM publishes PID/class before its title. Another instance may have
+            // completed that setup since the initial exclusion check.
+            if should_ignore_source_window(ctx, window)? {
+                return Ok(None);
+            }
+
             debug!(
                 window = window,
                 alias = %rule.alias,
@@ -198,67 +268,6 @@ pub fn identify_window(
     }
 
     Ok(None)
-}
-
-/// Internal helper to check EVE specifics (extracted from original check_eve_window)
-fn check_eve_window_internal(
-    ctx: &AppContext,
-    window: Window,
-    state: &mut SessionState,
-) -> Result<Option<String>> {
-    // 1. Get PID (Optimization to skip own windows)
-    let pid_atom = ctx.atoms.net_wm_pid;
-    let pid = if let Ok(prop) = ctx
-        .conn
-        .get_property(false, window, pid_atom, AtomEnum::CARDINAL, 0, 1)
-        .context(format!("Failed to query _NET_WM_PID for {}", window))?
-        .reply()
-    {
-        if !prop.value.is_empty() {
-            Some(u32::from_ne_bytes(
-                prop.value[0..constants::x11::PID_PROPERTY_SIZE]
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            ))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Skip our own windows to avoid recursion
-    if pid.is_some_and(|p| p == std::process::id()) {
-        return Ok(None);
-    }
-
-    // 2. Title Verification
-    ctx.conn.change_window_attributes(
-        window,
-        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-    )?;
-
-    if let Some(eve_window) = is_window_eve(ctx.conn, window, ctx.atoms)? {
-        let character_name = eve_window.character_name().to_string();
-
-        debug!(
-            window = window,
-            character = %character_name,
-            "Confirmed EVE Client"
-        );
-        state.update_last_character(window, &character_name);
-
-        ctx.conn.change_window_attributes(
-            window,
-            &ChangeWindowAttributesAux::new().event_mask(
-                EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE | EventMask::STRUCTURE_NOTIFY,
-            ),
-        )?;
-
-        Ok(Some(character_name))
-    } else {
-        Ok(None)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -294,7 +303,7 @@ pub fn check_and_create_window<'a>(
         }
 
         // IMPORTANT: Register for events on this custom source window!
-        // This is done for EVE windows inside check_eve_window_internal, but we must do it here for custom sources.
+        // identify_window does this for EVE clients; custom sources need it here.
         // We need:
         // - FOCUS_CHANGE: To detect when it gains/loses focus (for borders)
         // - PROPERTY_CHANGE: To detect name/state changes
@@ -391,8 +400,8 @@ pub fn check_and_create_window<'a>(
         }
     }
 
-    // Cycle state registration is handled separately in `scan_eve_windows` for the initial list
-    // and `handle_create_notify` calls `identify_window` before calling this.
+    // Cycle state registration is handled by scan_eve_windows at startup and
+    // process_detected_window for Create, Map, and identity-change events.
     // This function is strictly for determining if we should create a renderable thumbnail.
 
     let remembered_character_name = if identity.is_eve() {
@@ -719,4 +728,274 @@ pub fn scan_eve_windows<'a>(
         .flush()
         .context("Failed to flush X11 connection after creating thumbnails")?;
     Ok(eve_clients)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Display-dependent source detection regressions. Run only on an isolated Xvfb display.
+    //!
+    //! From the repository root, enter `nix develop`, then run:
+    //!
+    //! ```sh
+    //! cargo test --locked --all-features --no-run
+    //! xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp -noreset" \
+    //!   env EPM_X11_TESTS=1 timeout 60s \
+    //!   cargo test --locked --all-features daemon::window_detection::tests -- --ignored --test-threads=1
+    //! ```
+
+    use crate::daemon::{
+        cycle_state::CycleState,
+        dispatcher::{EventContext, handle_event},
+        font::FontRenderer,
+        group_drag::GroupDragState,
+        session_state::SessionState,
+    };
+    use crate::{
+        common::ipc::DaemonMessage,
+        config::{DaemonConfig, profile::Profile},
+        x11::{AppContext, CachedAtoms, CachedFormats},
+    };
+    use ipc_channel::{
+        TryRecvError,
+        ipc::{self, IpcReceiver},
+    };
+    use std::collections::HashMap;
+    use x11rb::{
+        connection::Connection,
+        protocol::{Event, xproto::*},
+        wrapper::ConnectionExt as _,
+    };
+
+    fn with_x11(test: impl FnOnce(&AppContext<'_>)) {
+        assert_eq!(
+            std::env::var("EPM_X11_TESTS").as_deref(),
+            Ok("1"),
+            "run display tests with EPM_X11_TESTS=1 under an isolated Xvfb server"
+        );
+        let (conn, screen_number) = x11rb::connect(None).expect("connect to isolated Xvfb");
+        let screen = &conn.setup().roots[screen_number];
+        let atoms = CachedAtoms::new(&conn).unwrap();
+        let formats = CachedFormats::new(&conn, screen).unwrap();
+        let ctx = AppContext {
+            conn: &conn,
+            screen,
+            atoms: &atoms,
+            formats: &formats,
+        };
+        // All fixture windows are owned by this connection and die when it closes.
+        test(&ctx);
+    }
+
+    fn with_sources(
+        ctx: &AppContext<'_>,
+        test: impl FnOnce(&mut EventContext<'_, '_>, &IpcReceiver<DaemonMessage>),
+    ) {
+        let rule = serde_json::from_value(serde_json::json!({
+            "alias": "YouTube", "title_pattern": "YouTube", "limit": false
+        }))
+        .unwrap();
+        let mut config = DaemonConfig {
+            profile: Profile {
+                custom_windows: vec![rule],
+                ..Profile::default()
+            },
+            character_thumbnails: HashMap::new(),
+            custom_source_thumbnails: HashMap::new(),
+            profile_hotkeys: HashMap::new(),
+            runtime_hidden: false,
+        };
+        let display = config.build_display_config();
+        let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
+        let mut previews = HashMap::new();
+        let mut session = SessionState::new();
+        let mut cycle = CycleState::new(config.profile.cycle_groups.clone());
+        let mut drag = GroupDragState::default();
+        let (tx, rx) = ipc::channel().unwrap();
+        test(
+            &mut EventContext {
+                app_ctx: ctx,
+                daemon_config: &mut config,
+                eve_clients: &mut previews,
+                session_state: &mut session,
+                cycle_state: &mut cycle,
+                group_drag_state: &mut drag,
+                status_tx: &tx,
+                font_renderer: &font,
+                display_config: &display,
+            },
+            &rx,
+        );
+    }
+
+    fn set_title(ctx: &AppContext<'_>, window: Window, title: &str) {
+        ctx.conn
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                ctx.atoms.wm_name,
+                AtomEnum::STRING,
+                title.as_bytes(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    fn window(ctx: &AppContext<'_>, title: &str, class: &str) -> Window {
+        let window = ctx.conn.generate_id().unwrap();
+        ctx.conn
+            .create_window(
+                ctx.screen.root_depth,
+                window,
+                ctx.screen.root,
+                0,
+                0,
+                500,
+                400,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                ctx.screen.root_visual,
+                &CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        set_title(ctx, window, title);
+        ctx.conn
+            .change_property8(
+                PropMode::REPLACE,
+                window,
+                ctx.atoms.wm_class,
+                AtomEnum::STRING,
+                format!("instance\0{class}\0").as_bytes(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        ctx.conn.map_window(window).unwrap().check().unwrap();
+        window
+    }
+
+    fn create_event(ctx: &AppContext<'_>, window: Window) -> Event {
+        Event::CreateNotify(CreateNotifyEvent {
+            response_type: CREATE_NOTIFY_EVENT,
+            parent: ctx.screen.root,
+            window,
+            width: 500,
+            height: 400,
+            ..Default::default()
+        })
+    }
+
+    fn detection_events(ctx: &AppContext<'_>, window: Window) -> [Event; 4] {
+        [
+            create_event(ctx, window),
+            Event::MapNotify(MapNotifyEvent {
+                response_type: MAP_NOTIFY_EVENT,
+                event: ctx.screen.root,
+                window,
+                ..Default::default()
+            }),
+            property_event(window, ctx.atoms.wm_name),
+            property_event(window, ctx.atoms.wm_class),
+        ]
+    }
+
+    fn property_event(window: Window, atom: Atom) -> Event {
+        Event::PropertyNotify(PropertyNotifyEvent {
+            response_type: PROPERTY_NOTIFY_EVENT,
+            window,
+            atom,
+            state: Property::NEW_VALUE,
+            ..Default::default()
+        })
+    }
+
+    fn drain_messages(rx: &IpcReceiver<DaemonMessage>) {
+        // A bounded drain also catches an unexpected stream of source registrations.
+        for _ in 0..32 {
+            match rx.try_recv() {
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => return,
+                Err(error) => panic!("unexpected IPC error: {error}"),
+            }
+        }
+        panic!("too many source registration messages");
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn preview_events_do_not_create_recursive_sources() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, rx| {
+                let src = window(ctx, "YouTube", "browser");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                assert_eq!(events.eve_clients.len(), 1);
+                let preview = events.eve_clients[&src].window();
+                let config_before = serde_json::to_value(&*events.daemon_config).unwrap();
+                let sources_before = events.cycle_state.get_active_windows().clone();
+                let positions_before = events.session_state.window_positions.clone();
+                let characters_before = events.session_state.window_last_character.clone();
+                drain_messages(rx);
+
+                // Fail on the first extra preview, rather than allowing runaway allocation.
+                for _ in 0..3 {
+                    set_title(ctx, preview, "EPM Thumbnail - YouTube renamed");
+                    for event in detection_events(ctx, preview) {
+                        handle_event(events, event).unwrap();
+                        assert_eq!(events.eve_clients.len(), 1, "preview became a source");
+                    }
+                }
+                assert_eq!(*events.cycle_state.get_active_windows(), sources_before);
+                assert_eq!(events.session_state.window_positions, positions_before);
+                assert_eq!(
+                    events.session_state.window_last_character,
+                    characters_before
+                );
+                assert_eq!(
+                    serde_json::to_value(&*events.daemon_config).unwrap(),
+                    config_before
+                );
+                assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn create_notifications_preserve_preview_mouse_subscriptions() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, _rx| {
+                let src = window(ctx, "YouTube", "browser");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                let preview = events.eve_clients[&src].window();
+                let before = ctx
+                    .conn
+                    .get_window_attributes(preview)
+                    .unwrap()
+                    .reply()
+                    .unwrap()
+                    .your_event_mask;
+                assert!(before.contains(
+                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION
+                ));
+                // Isolate subscription preservation from whether a custom rule matches.
+                events.daemon_config.profile.custom_windows.clear();
+                for event in detection_events(ctx, preview) {
+                    handle_event(events, event).unwrap();
+                    let after = ctx
+                        .conn
+                        .get_window_attributes(preview)
+                        .unwrap()
+                        .reply()
+                        .unwrap()
+                        .your_event_mask;
+                    assert_eq!(
+                        after, before,
+                        "source discovery replaced preview input subscriptions"
+                    );
+                }
+            })
+        });
+    }
 }
