@@ -116,11 +116,29 @@ pub fn identify_window(
         return Ok(None);
     }
 
-    // Subscribe before checking identity so late title/class changes can be detected.
-    ctx.conn.change_window_attributes(
-        window,
-        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-    )?;
+    // Add identity notifications without dropping this connection's existing
+    // subscriptions. A tracked custom source may take the refresh path without
+    // reinstalling its focus/structure mask during thumbnail creation.
+    let event_mask = match ctx
+        .conn
+        .get_window_attributes(window)
+        .context(format!("Failed to query event mask for {}", window))?
+        .reply()
+    {
+        Ok(attributes) => attributes.your_event_mask,
+        Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error).context(format!("Failed to read event mask for {}", window));
+        }
+    };
+    if !event_mask.contains(EventMask::PROPERTY_CHANGE) {
+        ctx.conn.change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().event_mask(event_mask | EventMask::PROPERTY_CHANGE),
+        )?;
+    }
 
     if let Some(eve_window) = is_window_eve(ctx.conn, window, ctx.atoms)? {
         // A different client can finish setting ownership metadata while we read
@@ -958,6 +976,69 @@ mod tests {
                 );
                 assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
             })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn custom_source_redetection_preserves_event_subscriptions() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, _rx| {
+                let src = window(ctx, "YouTube", "browser");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                let preview = events.eve_clients[&src].window();
+                let required = EventMask::PROPERTY_CHANGE
+                    | EventMask::FOCUS_CHANGE
+                    | EventMask::STRUCTURE_NOTIFY;
+
+                for _ in 0..3 {
+                    for event in detection_events(ctx, src) {
+                        handle_event(events, event).unwrap();
+                        let mask = ctx
+                            .conn
+                            .get_window_attributes(src)
+                            .unwrap()
+                            .reply()
+                            .unwrap()
+                            .your_event_mask;
+                        assert!(
+                            mask.contains(required),
+                            "custom source lost subscriptions: {mask:?}"
+                        );
+                        assert_eq!(events.eve_clients.len(), 1);
+                        assert_eq!(events.eve_clients[&src].window(), preview);
+                    }
+                }
+
+                // Check real server delivery, not only the reported event mask.
+                ctx.conn
+                    .set_input_focus(InputFocus::POINTER_ROOT, src, x11rb::CURRENT_TIME)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                ctx.conn
+                    .configure_window(src, &ConfigureWindowAux::new().width(520))
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                ctx.conn.get_input_focus().unwrap().reply().unwrap();
+                let mut saw_focus = false;
+                let mut saw_configure = false;
+                for _ in 0..128 {
+                    let Some(event) = ctx.conn.poll_for_event().unwrap() else {
+                        break;
+                    };
+                    match event {
+                        Event::FocusIn(event) if event.event == src => saw_focus = true,
+                        Event::ConfigureNotify(event) if event.window == src => {
+                            saw_configure = true
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(saw_focus, "source FocusIn was not delivered");
+                assert!(saw_configure, "source ConfigureNotify was not delivered");
+            });
         });
     }
 
