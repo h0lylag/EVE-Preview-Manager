@@ -326,8 +326,9 @@ impl ManagerApp {
     fn reload_restored_config(
         state: &mut SharedState,
         behavior: &mut components::behavior_settings::BehaviorSettingsState,
+        profile_selector: &mut ProfileSelector,
     ) {
-        let (text, color) = match state.discard_changes() {
+        let (text, color) = match profile_selector.reload_config(state) {
             Ok(()) => {
                 state.reload_daemon_config();
                 (
@@ -498,6 +499,7 @@ impl eframe::App for ManagerApp {
                                 Self::reload_restored_config(
                                     state,
                                     &mut self.behavior_settings_state,
+                                    &mut self.profile_selector,
                                 );
                             }
                             BehaviorSettingsAction::None => {}
@@ -758,7 +760,11 @@ mod tests {
         let (sender, receiver) = ipc_channel::ipc::channel().unwrap();
         state.ipc_config_tx = Some(sender);
 
-        ManagerApp::reload_restored_config(&mut state, &mut app.behavior_settings_state);
+        ManagerApp::reload_restored_config(
+            &mut state,
+            &mut app.behavior_settings_state,
+            &mut app.profile_selector,
+        );
 
         assert_eq!(
             state.daemon_status,

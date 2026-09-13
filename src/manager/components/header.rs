@@ -106,7 +106,7 @@ pub fn render(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Discard button
             if ui.button("✖ Discard Changes").clicked()
-                && let Err(err) = state.discard_changes()
+                && let Err(err) = profile_selector.reload_config(state)
             {
                 error!(error = %err, "Failed to discard changes");
             }
