@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::process::Child;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
@@ -7,6 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::common::constants::manager_ui::*;
 use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
+use crate::common::types::{Position, SourceIdentity};
 use crate::config::DaemonConfig;
 use crate::config::profile::Config;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
@@ -16,13 +18,17 @@ use super::{DaemonStatus, StatusMessage};
 /// Determines the behavior of `save_config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveMode {
-    /// Explicitly requested save (e.g. "Save Thumbnail Positions").
+    /// Explicitly requested full save ("Save & Apply").
     /// Saves EVERYTHING currently in memory, including window positions.
     Explicit,
     /// Implicit save (e.g. Exit, Settings Change).
     /// Saves settings but REVERTS window positions to their last saved state
     /// if "Auto-Save" is disabled for the profile.
     Implicit,
+    /// Save only spatial fields for profiles with pending automatic position saves.
+    AutoPositions,
+    /// Save only spatial fields across all profiles, regardless of auto-save settings.
+    Positions,
 }
 
 // Core application state shared between Manager and Tray
@@ -41,6 +47,7 @@ pub struct SharedState {
     pub should_quit: bool,
     pub last_save_attempt: Instant,
     pub(super) pending_position_save: bool,
+    pub(super) spatial_dirty_profiles: HashSet<String>,
 
     // IPC
     pub ipc_config_tx: Option<IpcSender<ConfigMessage>>,
@@ -105,6 +112,7 @@ impl SharedState {
             should_quit: false,
             last_save_attempt: Instant::now(),
             pending_position_save: false,
+            spatial_dirty_profiles: HashSet::new(),
 
             ipc_config_tx: None,
             ipc_status_rx: None,
@@ -190,6 +198,17 @@ impl SharedState {
         Ok(())
     }
 
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.settings_changed || !self.spatial_dirty_profiles.is_empty()
+    }
+
+    pub(super) fn has_automatic_position_changes(&self) -> bool {
+        self.config.profiles.iter().any(|profile| {
+            profile.thumbnail_auto_save_position
+                && self.spatial_dirty_profiles.contains(&profile.profile_name)
+        })
+    }
+
     /// Persist Manager-owned configuration without sending a daemon command.
     /// Runtime application is handled by explicit daemon restart or narrow IPC deltas.
     pub(super) fn persist_config(&mut self, mode: SaveMode) -> Result<()> {
@@ -198,6 +217,67 @@ impl SharedState {
         }
         self.validate_config()?;
         let disk_config = self.read_config_for_reload()?;
+
+        if matches!(mode, SaveMode::AutoPositions | SaveMode::Positions) {
+            let mut config_to_save = disk_config;
+            let mut saved_profiles = Vec::new();
+            for profile in &self.config.profiles {
+                if mode == SaveMode::AutoPositions
+                    && (!profile.thumbnail_auto_save_position
+                        || !self.spatial_dirty_profiles.contains(&profile.profile_name))
+                {
+                    continue;
+                }
+                let disk_profile = config_to_save
+                    .profiles
+                    .iter_mut()
+                    .find(|saved| saved.profile_name == profile.profile_name)
+                    .with_context(|| {
+                        format!(
+                            "Cannot save positions: profile '{}' is not saved",
+                            profile.profile_name
+                        )
+                    })?;
+                for (custom, thumbnails) in [
+                    (false, &profile.character_thumbnails),
+                    (true, &profile.custom_source_thumbnails),
+                ] {
+                    for (name, settings) in thumbnails {
+                        if custom
+                            && !disk_profile.custom_source_thumbnails.contains_key(name)
+                            && !disk_profile
+                                .custom_windows
+                                .iter()
+                                .any(|rule| rule.alias == *name)
+                        {
+                            anyhow::bail!(
+                                "Cannot save positions: custom source '{name}' in profile '{}' is not saved",
+                                profile.profile_name
+                            );
+                        }
+                        let source = if custom {
+                            SourceIdentity::custom(name)
+                        } else {
+                            SourceIdentity::eve(name)
+                        };
+                        disk_profile.update_thumbnail_spatial(
+                            &source,
+                            Position::new(settings.x, settings.y),
+                            settings.dimensions,
+                        );
+                    }
+                }
+                saved_profiles.push(profile.profile_name.clone());
+            }
+            if !saved_profiles.is_empty() {
+                config_to_save.save_to(&self.config_path)?;
+            }
+            for name in saved_profiles {
+                self.spatial_dirty_profiles.remove(&name);
+            }
+            self.pending_position_save = self.has_automatic_position_changes();
+            return Ok(());
+        }
 
         // Prepare config for saving
         // If mode is IMPLICIT (e.g. on exit or settings change),
@@ -235,6 +315,7 @@ impl SharedState {
 
         self.settings_changed = false;
         self.pending_position_save = false;
+        self.spatial_dirty_profiles.clear();
         debug!("Configuration persisted without daemon synchronization");
         Ok(())
     }
@@ -332,6 +413,7 @@ impl SharedState {
 
         self.settings_changed = false;
         self.pending_position_save = false;
+        self.spatial_dirty_profiles.clear();
         self.config_status_message = Some(StatusMessage {
             text: "Changes discarded".to_string(),
             color: COLOR_ERROR,
@@ -341,7 +423,7 @@ impl SharedState {
     }
 
     pub fn save_thumbnail_positions(&mut self) -> Result<()> {
-        self.save_config(SaveMode::Explicit)
+        self.persist_config(SaveMode::Positions)
             .context("Failed to save configuration")?;
 
         self.config_status_message = Some(StatusMessage {
@@ -496,12 +578,14 @@ mod tests {
         state.config.global.window_width = 999;
         state.settings_changed = true;
         state.pending_position_save = true;
+        state.spatial_dirty_profiles.insert("Second".into());
         let edited = serde_json::to_value(&state.config).unwrap();
         std::fs::write(&path, b"{broken").unwrap();
 
         assert!(state.discard_changes().is_err());
         assert_eq!(serde_json::to_value(&state.config).unwrap(), edited);
         assert_eq!(state.selected_profile_idx, 1);
+        assert_eq!(state.spatial_dirty_profiles, ["Second".into()].into());
         assert!(state.settings_changed && state.pending_position_save);
         assert!(
             state
@@ -510,20 +594,31 @@ mod tests {
                 .unwrap()
                 .contains("Saving is blocked")
         );
-        for mode in [SaveMode::Explicit, SaveMode::Implicit] {
+        for mode in [
+            SaveMode::Explicit,
+            SaveMode::Implicit,
+            SaveMode::AutoPositions,
+            SaveMode::Positions,
+        ] {
             assert!(state.save_config(mode).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
         }
 
         config.save_to(&path).unwrap();
         let repaired = std::fs::read(&path).unwrap();
-        for mode in [SaveMode::Explicit, SaveMode::Implicit] {
+        for mode in [
+            SaveMode::Explicit,
+            SaveMode::Implicit,
+            SaveMode::AutoPositions,
+            SaveMode::Positions,
+        ] {
             assert!(state.save_config(mode).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), repaired);
         }
         state.discard_changes().unwrap();
         assert!(state.config_load_error.is_none());
         assert!(!state.settings_changed && !state.pending_position_save);
+        assert!(state.spatial_dirty_profiles.is_empty());
         assert_eq!(
             serde_json::to_value(&state.config).unwrap(),
             serde_json::to_value(config).unwrap()
@@ -535,7 +630,12 @@ mod tests {
 
     #[test]
     fn saves_detect_unreadable_or_missing_config_before_writing() {
-        for mode in [SaveMode::Explicit, SaveMode::Implicit] {
+        for mode in [
+            SaveMode::Explicit,
+            SaveMode::Implicit,
+            SaveMode::AutoPositions,
+            SaveMode::Positions,
+        ] {
             for missing in [false, true] {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("config.json");
@@ -594,5 +694,225 @@ mod tests {
             state.last_heartbeat.elapsed() < Duration::from_secs(1),
             "Heartbeat should update timestamp"
         );
+    }
+
+    #[test]
+    fn position_merge_preserves_saved_settings_and_source_identities() {
+        use crate::common::types::{CharacterSettings, Dimensions};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        let profile = &mut config.profiles[0];
+        profile.thumbnail_auto_save_position = true;
+        profile
+            .custom_windows
+            .push(serde_json::from_value(serde_json::json!({"alias": "New Custom"})).unwrap());
+        let saved = CharacterSettings {
+            alias: Some("Saved alias".into()),
+            notes: Some("Saved notes".into()),
+            exempt_from_minimize: true,
+            ..CharacterSettings::new(1, 2, 30, 40)
+        };
+        profile
+            .character_thumbnails
+            .insert("Shared".into(), saved.clone());
+        profile
+            .custom_source_thumbnails
+            .insert("Shared".into(), saved.clone());
+        config.save_to(&path).unwrap();
+        let mut state = SharedState::at_path(config.clone(), &path);
+        state.config.global.window_width += 100;
+        let profile = &mut state.config.profiles[0];
+        profile.thumbnail_opacity = 42;
+        let draft = CharacterSettings {
+            alias: Some("Draft alias".into()),
+            notes: Some("Draft notes".into()),
+            exempt_from_minimize: false,
+            ..CharacterSettings::new(10, 20, 300, 400)
+        };
+        profile
+            .character_thumbnails
+            .insert("Shared".into(), draft.clone());
+        profile.custom_source_thumbnails.insert(
+            "Shared".into(),
+            CharacterSettings {
+                x: 50,
+                ..draft.clone()
+            },
+        );
+        profile
+            .character_thumbnails
+            .insert("New EVE".into(), draft.clone());
+        profile
+            .custom_source_thumbnails
+            .insert("New Custom".into(), draft);
+        state.settings_changed = true;
+        let memory = serde_json::to_value(&state.config).unwrap();
+        state.save_thumbnail_positions().unwrap();
+
+        let expected_profile = &mut config.profiles[0];
+        let existing = expected_profile
+            .character_thumbnails
+            .get_mut("Shared")
+            .unwrap();
+        existing.x = 10;
+        existing.y = 20;
+        existing.dimensions = Dimensions::new(300, 400);
+        let existing = expected_profile
+            .custom_source_thumbnails
+            .get_mut("Shared")
+            .unwrap();
+        existing.x = 50;
+        existing.y = 20;
+        existing.dimensions = Dimensions::new(300, 400);
+        expected_profile
+            .character_thumbnails
+            .insert("New EVE".into(), CharacterSettings::new(10, 20, 300, 400));
+        expected_profile.custom_source_thumbnails.insert(
+            "New Custom".into(),
+            CharacterSettings::new(10, 20, 300, 400),
+        );
+        assert_eq!(
+            serde_json::to_value(Config::read_from(&path).unwrap()).unwrap(),
+            serde_json::to_value(config).unwrap()
+        );
+        assert_eq!(serde_json::to_value(&state.config).unwrap(), memory);
+        assert!(state.settings_changed);
+    }
+
+    #[test]
+    fn automatic_position_saves_only_clear_eligible_profiles() {
+        use crate::common::types::CharacterSettings;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config {
+            profiles: ["First", "Second", "Third"]
+                .into_iter()
+                .map(|name| {
+                    let mut profile = Profile::default_with_name(name.into(), String::new());
+                    profile.thumbnail_auto_save_position = name != "Second";
+                    profile
+                })
+                .collect(),
+            ..Config::default()
+        };
+        config.global.selected_profile = "First".into();
+        config.save_to(&path).unwrap();
+        let mut state = SharedState::at_path(config, &path);
+        state.config.global.selected_profile = "Second".into();
+        state.selected_profile_idx = 1;
+        for profile in &mut state.config.profiles {
+            profile
+                .character_thumbnails
+                .insert("Character".into(), CharacterSettings::new(10, 20, 30, 40));
+        }
+        state
+            .spatial_dirty_profiles
+            .extend(["First".into(), "Second".into()]);
+        state.pending_position_save = true;
+        state.persist_config(SaveMode::AutoPositions).unwrap();
+        let disk = Config::read_from(&path).unwrap();
+        assert_eq!(disk.global.selected_profile, "First");
+        assert_eq!(state.selected_profile_idx, 1);
+        assert_eq!(disk.profiles[0].character_thumbnails["Character"].x, 10);
+        assert!(disk.profiles[1].character_thumbnails.is_empty());
+        assert!(disk.profiles[2].character_thumbnails.is_empty());
+        assert_eq!(state.spatial_dirty_profiles, ["Second".into()].into());
+        assert!(!state.pending_position_save);
+        assert!(state.has_unsaved_changes());
+        state.save_thumbnail_positions().unwrap();
+        let disk = Config::read_from(&path).unwrap();
+        assert!(
+            disk.profiles
+                .iter()
+                .all(|p| p.character_thumbnails["Character"].x == 10)
+        );
+        assert_eq!(disk.global.selected_profile, "First");
+        assert!(!state.has_unsaved_changes());
+    }
+
+    #[test]
+    fn missing_position_targets_abort_the_entire_save() {
+        use crate::common::types::CharacterSettings;
+        for mode in [SaveMode::AutoPositions, SaveMode::Positions] {
+            for missing_profile in [true, false] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("config.json");
+                let mut config = Config::default();
+                config.profiles[0].thumbnail_auto_save_position = true;
+                config.save_to(&path).unwrap();
+                let original = std::fs::read(&path).unwrap();
+                let mut state = SharedState::at_path(config, &path);
+                if missing_profile {
+                    let mut profile = Profile::default_with_name("Unsaved".into(), String::new());
+                    profile.thumbnail_auto_save_position = true;
+                    state.config.profiles.push(profile);
+                } else {
+                    state.config.profiles[0].custom_windows.push(
+                        serde_json::from_value(serde_json::json!({"alias": "Unsaved"})).unwrap(),
+                    );
+                    state.config.profiles[0]
+                        .custom_source_thumbnails
+                        .insert("Unsaved".into(), CharacterSettings::new(1, 2, 3, 4));
+                }
+                for profile in &mut state.config.profiles {
+                    profile
+                        .character_thumbnails
+                        .insert("Valid".into(), CharacterSettings::new(10, 20, 30, 40));
+                    state
+                        .spatial_dirty_profiles
+                        .insert(profile.profile_name.clone());
+                }
+                state.settings_changed = true;
+                state.pending_position_save = true;
+                let dirty = state.spatial_dirty_profiles.clone();
+                assert!(state.persist_config(mode).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+                assert_eq!(state.spatial_dirty_profiles, dirty);
+                assert!(state.settings_changed && state.pending_position_save);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn position_write_failure_retains_work_for_retry() {
+        use crate::common::types::CharacterSettings;
+        use std::os::fd::AsRawFd;
+        for mode in [SaveMode::AutoPositions, SaveMode::Positions] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let mut config = Config::default();
+            config.profiles[0].thumbnail_auto_save_position = true;
+            config.save_to(&path).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            // procfs permits reading this descriptor but cannot host an atomic-write tempfile.
+            let readonly_path =
+                std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+            let mut state = SharedState::at_path(config, &readonly_path);
+            state.config.profiles[0]
+                .character_thumbnails
+                .insert("Character".into(), CharacterSettings::new(10, 20, 30, 40));
+            state
+                .spatial_dirty_profiles
+                .insert(state.config.global.selected_profile.clone());
+            state.pending_position_save = true;
+            state.settings_changed = true;
+            assert!(state.persist_config(mode).is_err());
+            assert!(state.config_load_error.is_none());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert!(state.settings_changed && state.pending_position_save);
+            assert!(!state.spatial_dirty_profiles.is_empty());
+            state.config_path = path.clone();
+            state.persist_config(mode).unwrap();
+            assert_eq!(
+                Config::read_from(&path).unwrap().profiles[0].character_thumbnails["Character"].x,
+                10
+            );
+            assert!(state.settings_changed);
+            assert!(!state.pending_position_save);
+            assert!(state.spatial_dirty_profiles.is_empty());
+        }
     }
 }

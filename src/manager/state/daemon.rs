@@ -202,16 +202,21 @@ impl SharedState {
     }
 
     fn flush_pending_position_save(&mut self) {
+        self.pending_position_save = self.has_automatic_position_changes();
         if !self.position_save_due() {
             return;
         }
 
         self.last_save_attempt = Instant::now();
-        if let Err(error) = self.persist_config(SaveMode::Explicit) {
+        if let Err(error) = self.persist_config(SaveMode::AutoPositions) {
             error!(error = %error, "Failed to auto-save thumbnail positions");
             self.pending_position_save = true;
-            self.settings_changed = true;
+            self.config_status_message = Some(super::StatusMessage {
+                text: format!("Position save failed: {error}"),
+                color: crate::common::constants::manager_ui::COLOR_ERROR,
+            });
         } else {
+            self.config_status_message = None;
             debug!("Deferred thumbnail position auto-save completed");
         }
     }
@@ -315,7 +320,8 @@ impl SharedState {
                         .unwrap_or(false);
 
                     debug!("Position changed: auto_save={}", auto_save);
-                    self.settings_changed = true;
+                    self.spatial_dirty_profiles
+                        .insert(self.config.global.selected_profile.clone());
                     self.config_status_message = None;
 
                     if auto_save {
@@ -607,7 +613,8 @@ mod tests {
 
         deliver_positions(&mut state, vec![sample_spatial_update()]);
 
-        assert!(state.settings_changed);
+        assert!(!state.settings_changed);
+        assert!(state.has_unsaved_changes());
         assert!(!state.pending_position_save);
     }
 
@@ -623,7 +630,8 @@ mod tests {
 
         deliver_positions(&mut state, vec![sample_spatial_update()]);
 
-        assert!(state.settings_changed);
+        assert!(!state.settings_changed);
+        assert!(state.has_unsaved_changes());
         assert!(state.pending_position_save);
         assert!(!state.position_save_due());
     }
@@ -634,6 +642,10 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, b"{broken").unwrap();
         let mut state = SharedState::at_path(Config::default(), &path);
+        state.config.profiles[0].thumbnail_auto_save_position = true;
+        state
+            .spatial_dirty_profiles
+            .insert(state.config.global.selected_profile.clone());
         state.pending_position_save = true;
         state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
 
@@ -649,5 +661,121 @@ mod tests {
         state.flush_pending_position_save();
         assert_eq!(std::fs::read(&path).unwrap(), repaired);
         assert!(state.pending_position_save);
+    }
+
+    fn position_test_state(auto_save: bool) -> (tempfile::TempDir, SharedState) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config.profiles[0].thumbnail_auto_save_position = auto_save;
+        config.profiles[0].thumbnail_opacity = 75;
+        config.save_to(&path).unwrap();
+        (dir, SharedState::at_path(config, &path))
+    }
+
+    fn flush_positions(state: &mut SharedState) {
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+        state.poll_daemon();
+    }
+
+    #[test]
+    fn position_saves_preserve_unapplied_edits() {
+        for automatic in [true, false] {
+            let (_dir, mut state) = position_test_state(automatic);
+            state.config.profiles[0].thumbnail_opacity = 42;
+            state.settings_changed = true;
+            deliver_positions(&mut state, vec![sample_spatial_update()]);
+            if automatic {
+                flush_positions(&mut state);
+            } else {
+                state.save_thumbnail_positions().unwrap();
+            }
+            let disk = Config::read_from(&state.config_path).unwrap();
+            assert_eq!(disk.profiles[0].thumbnail_opacity, 75);
+            assert_eq!(disk.profiles[0].character_thumbnails["Character"].x, 10);
+            assert_eq!(state.config.profiles[0].thumbnail_opacity, 42);
+            assert!(state.settings_changed && state.has_unsaved_changes());
+            assert!(state.spatial_dirty_profiles.is_empty());
+            assert!(!state.pending_position_save);
+            state.discard_changes().unwrap();
+            assert_eq!(state.config.profiles[0].thumbnail_opacity, 75);
+            assert_eq!(
+                state.config.profiles[0].character_thumbnails["Character"].x,
+                10
+            );
+            assert!(!state.has_unsaved_changes());
+
+            state.config.profiles[0].thumbnail_opacity = 42;
+            state.settings_changed = true;
+            state.save_config(SaveMode::Explicit).unwrap();
+            assert_eq!(
+                Config::read_from(&state.config_path).unwrap().profiles[0].thumbnail_opacity,
+                42
+            );
+            assert!(!state.has_unsaved_changes());
+        }
+    }
+
+    #[test]
+    fn deferred_position_batches_save_latest_geometry_without_daemon_restart() {
+        let (_dir, mut state) = position_test_state(true);
+        let (tx, rx) = ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        state.ipc_config_tx = Some(tx);
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+        let updates = vec![
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::eve("Character"),
+                Position::new(50, 60),
+                Dimensions::new(400, 300),
+            ),
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::eve("Other"),
+                Position::new(70, 80),
+                Dimensions::new(200, 100),
+            ),
+        ];
+        deliver_positions(&mut state, updates.clone());
+        assert!(
+            Config::read_from(&state.config_path).unwrap().profiles[0]
+                .character_thumbnails
+                .is_empty()
+        );
+        assert!(state.has_unsaved_changes());
+        flush_positions(&mut state);
+        let disk = Config::read_from(&state.config_path).unwrap();
+        assert_eq!(disk.profiles[0].character_thumbnails["Character"].x, 50);
+        assert_eq!(disk.profiles[0].character_thumbnails["Other"].y, 80);
+        assert!(!state.has_unsaved_changes());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ConfigMessage::ThumbnailMoves { .. }
+        ));
+        assert!(
+            matches!(rx.try_recv().unwrap(), ConfigMessage::ThumbnailMoves { updates: batch } if batch == updates)
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(state.ipc_config_tx.is_some());
+    }
+
+    #[test]
+    fn disabling_auto_save_keeps_geometry_for_manual_save() {
+        let (_dir, mut state) = position_test_state(true);
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+        state.config.profiles[0].thumbnail_auto_save_position = false;
+        state.settings_changed = true;
+        flush_positions(&mut state);
+        assert!(!state.pending_position_save);
+        assert!(state.has_unsaved_changes());
+        assert!(
+            Config::read_from(&state.config_path).unwrap().profiles[0]
+                .character_thumbnails
+                .is_empty()
+        );
+        state.save_thumbnail_positions().unwrap();
+        let disk = Config::read_from(&state.config_path).unwrap();
+        assert!(disk.profiles[0].thumbnail_auto_save_position);
+        assert_eq!(disk.profiles[0].character_thumbnails["Character"].x, 10);
+        assert!(state.settings_changed);
+        assert!(state.spatial_dirty_profiles.is_empty());
     }
 }

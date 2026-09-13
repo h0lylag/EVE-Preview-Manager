@@ -142,7 +142,8 @@ pub fn render(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(message) = &state.config_status_message {
                 ui.colored_label(message.color, &message.text);
-            } else if state.settings_changed {
+            }
+            if state.has_unsaved_changes() {
                 ui.colored_label(COLOR_WARNING, "Unsaved changes");
             }
         });
@@ -164,4 +165,56 @@ pub fn render(
     }
 
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::profile::Config;
+
+    #[test]
+    fn position_save_feedback_does_not_hide_unsaved_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let config = Config::default();
+        config.save_to(&path).unwrap();
+        let mut state = SharedState::at_path(config, &path);
+        let ctx = egui::Context::default();
+        let mut tab = ManagerTab::Behavior;
+        let mut selector = ProfileSelector::new();
+        #[cfg(target_os = "linux")]
+        let signal = Arc::new(Notify::new());
+        for edited in [false, true] {
+            state.settings_changed = edited;
+            state.save_thumbnail_positions().unwrap();
+            // Allow egui's first sizing pass to finish before examining painted text.
+            let mut output = None;
+            for _ in 0..2 {
+                let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    render(
+                        &ctx,
+                        ui,
+                        &mut state,
+                        &mut tab,
+                        &mut selector,
+                        #[cfg(target_os = "linux")]
+                        &signal,
+                    );
+                });
+                frame.textures_delta.clear();
+                output = Some(frame);
+            }
+            let output = output.unwrap();
+            let labels: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => Some(text.galley.text()),
+                    _ => None,
+                })
+                .collect();
+            assert!(labels.contains(&"Thumbnail positions saved"));
+            assert_eq!(labels.contains(&"Unsaved changes"), edited);
+        }
+    }
 }
