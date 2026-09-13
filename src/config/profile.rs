@@ -467,6 +467,26 @@ impl Profile {
         profile
     }
 
+    /// Restore saved geometry for matching identities, retaining current settings and map keys.
+    /// New identities without saved geometry keep their current position and dimensions.
+    pub(crate) fn restore_saved_thumbnail_spatial(&mut self, saved: &Self) {
+        for (current, saved) in [
+            (&mut self.character_thumbnails, &saved.character_thumbnails),
+            (
+                &mut self.custom_source_thumbnails,
+                &saved.custom_source_thumbnails,
+            ),
+        ] {
+            for (name, settings) in current {
+                if let Some(saved) = saved.get(name) {
+                    settings.x = saved.x;
+                    settings.y = saved.y;
+                    settings.dimensions = saved.dimensions;
+                }
+            }
+        }
+    }
+
     /// Update thumbnail position/dimensions if changed.
     /// Returns true if the configuration was modified, false otherwise.
     pub fn update_thumbnail_spatial(

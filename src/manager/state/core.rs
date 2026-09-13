@@ -135,18 +135,14 @@ impl SharedState {
             .ipc_config_tx
             .as_ref()
             .context("Daemon IPC command channel is unavailable")?;
-        let selected_profile = self
+        let mut selected_profile = self
             .config
             .get_active_profile()
             .cloned()
             .unwrap_or_default();
 
-        let mut character_thumbnails = selected_profile.character_thumbnails.clone();
-        let mut custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
-
-        // If "Auto Save" is disabled, the startup snapshot must use the LAST SAVED state,
-        // not the current transient in-memory state. This ensures that actions like "Refresh"
-        // or "Profile Switch" revert to the saved positions as expected.
+        // Restore saved geometry when auto-save is disabled, keeping current customizations
+        // and identities. Refresh and profile switching must not revive stale settings.
         if !selected_profile.thumbnail_auto_save_position
             && let Ok(disk_config) = Config::read_from(&self.config_path)
             && let Some(disk_profile) = disk_config
@@ -155,9 +151,11 @@ impl SharedState {
                 .find(|p| p.profile_name == selected_profile.profile_name)
         {
             info!("Auto-save disabled: using explicit disk positions for daemon startup");
-            character_thumbnails = disk_profile.character_thumbnails.clone();
-            custom_source_thumbnails = disk_profile.custom_source_thumbnails.clone();
+            selected_profile.restore_saved_thumbnail_spatial(disk_profile);
         }
+
+        let character_thumbnails = selected_profile.character_thumbnails.clone();
+        let custom_source_thumbnails = selected_profile.custom_source_thumbnails.clone();
 
         // Build hotkeys for profile switching (requires looking at all profiles)
         let mut profile_hotkeys = std::collections::HashMap::new();
@@ -294,9 +292,7 @@ impl SharedState {
                         .iter()
                         .find(|p| p.profile_name == profile.profile_name)
                 {
-                    profile.character_thumbnails = disk_profile.character_thumbnails.clone();
-                    profile.custom_source_thumbnails =
-                        disk_profile.custom_source_thumbnails.clone();
+                    profile.restore_saved_thumbnail_spatial(disk_profile);
                 }
             }
         }
@@ -876,10 +872,15 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn position_write_failure_retains_work_for_retry() {
+    fn write_failure_retains_work_for_retry() {
         use crate::common::types::CharacterSettings;
         use std::os::fd::AsRawFd;
-        for mode in [SaveMode::AutoPositions, SaveMode::Positions] {
+        for mode in [
+            SaveMode::AutoPositions,
+            SaveMode::Positions,
+            SaveMode::Implicit,
+            SaveMode::Explicit,
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.json");
             let mut config = Config::default();
@@ -899,8 +900,15 @@ mod tests {
                 .insert(state.config.global.selected_profile.clone());
             state.pending_position_save = true;
             state.settings_changed = true;
+            state.config.profiles[0]
+                .character_thumbnails
+                .get_mut("Character")
+                .unwrap()
+                .alias = Some("Main".into());
+            let memory = serde_json::to_value(&state.config).unwrap();
             assert!(state.persist_config(mode).is_err());
             assert!(state.config_load_error.is_none());
+            assert_eq!(serde_json::to_value(&state.config).unwrap(), memory);
             assert_eq!(std::fs::read(&path).unwrap(), original);
             assert!(state.settings_changed && state.pending_position_save);
             assert!(!state.spatial_dirty_profiles.is_empty());
@@ -910,9 +918,205 @@ mod tests {
                 Config::read_from(&path).unwrap().profiles[0].character_thumbnails["Character"].x,
                 10
             );
-            assert!(state.settings_changed);
+            assert_eq!(
+                state.settings_changed,
+                matches!(mode, SaveMode::AutoPositions | SaveMode::Positions)
+            );
             assert!(!state.pending_position_save);
             assert!(state.spatial_dirty_profiles.is_empty());
         }
+    }
+
+    // Return disk, edited, and expected implicit-save configurations. The expected value
+    // is built directly so the regression does not share the production merge helper.
+    fn customization_configs() -> (Config, Config, Config) {
+        use crate::common::types::{CharacterSettings, Dimensions, PreviewMode};
+        use crate::config::profile::{CycleGroup, CycleSlot};
+        let mut saved = Config::default();
+        let profile = &mut saved.profiles[0];
+        profile.thumbnail_auto_save_position = false;
+        profile
+            .character_thumbnails
+            .insert("Alice".into(), CharacterSettings::new(10, 20, 300, 200));
+        profile
+            .custom_source_thumbnails
+            .insert("Alice".into(), CharacterSettings::new(30, 40, 500, 400));
+        profile
+            .character_thumbnails
+            .insert("Deleted".into(), CharacterSettings::new(1, 2, 3, 4));
+        profile
+            .custom_source_thumbnails
+            .insert("Deleted".into(), CharacterSettings::new(1, 2, 3, 4));
+        profile
+            .custom_source_thumbnails
+            .insert("Old".into(), CharacterSettings::new(5, 6, 7, 8));
+        profile.custom_windows = ["Alice", "Old"]
+            .into_iter()
+            .map(|alias| serde_json::from_value(serde_json::json!({"alias": alias})).unwrap())
+            .collect();
+        profile.cycle_groups = vec![CycleGroup {
+            cycle_list: vec![
+                CycleSlot::Source("Old".into()),
+                CycleSlot::Eve("Alice".into()),
+            ],
+            ..CycleGroup::default_group()
+        }];
+        let mut enabled = profile.clone();
+        enabled.profile_name = "Enabled".into();
+        enabled.thumbnail_auto_save_position = true;
+        saved.profiles.push(enabled);
+
+        let draft_settings = CharacterSettings {
+            x: 101,
+            y: 202,
+            dimensions: Dimensions::new(600, 450),
+            alias: Some("Main".into()),
+            notes: Some("Keep these notes".into()),
+            override_active_border_color: Some("#112233".into()),
+            override_inactive_border_color: Some("#445566".into()),
+            override_active_border_size: Some(7),
+            override_inactive_border_size: Some(3),
+            override_text_color: Some("#778899".into()),
+            preview_mode: PreviewMode::Static {
+                color: "#ABCDEF".into(),
+            },
+            exempt_from_minimize: true,
+            override_render_preview: Some(false),
+        };
+        let mut edited = saved.clone();
+        for profile in &mut edited.profiles {
+            profile
+                .character_thumbnails
+                .insert("Alice".into(), draft_settings.clone());
+            profile
+                .custom_source_thumbnails
+                .insert("Alice".into(), draft_settings.clone());
+            profile.character_thumbnails.remove("Deleted");
+            profile.custom_source_thumbnails.remove("Deleted");
+            // Exact keys: this new identity must not match the saved "Alice".
+            profile
+                .character_thumbnails
+                .insert("alice".into(), draft_settings.clone());
+            profile
+                .custom_source_thumbnails
+                .insert("Old".into(), draft_settings.clone());
+            profile.rename_custom_source_alias(1, "Renamed").unwrap();
+        }
+        let mut new_profile = edited.profiles[0].clone();
+        new_profile.profile_name = "New Profile".into();
+        edited.profiles.push(new_profile);
+        edited.profiles.swap(0, 1);
+        let mut expected = edited.clone();
+        let profile = &mut expected.profiles[1];
+        let character = profile.character_thumbnails.get_mut("Alice").unwrap();
+        character.x = 10;
+        character.y = 20;
+        character.dimensions = Dimensions::new(300, 200);
+        let custom = profile.custom_source_thumbnails.get_mut("Alice").unwrap();
+        custom.x = 30;
+        custom.y = 40;
+        custom.dimensions = Dimensions::new(500, 400);
+        (saved, edited, expected)
+    }
+
+    #[test]
+    fn implicit_save_preserves_customizations_and_current_identities() {
+        for mode in [SaveMode::Implicit, SaveMode::Explicit] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let (saved, edited, expected) = customization_configs();
+            saved.save_to(&path).unwrap();
+            let mut state = SharedState::at_path(edited.clone(), &path);
+            state.settings_changed = true;
+            state
+                .spatial_dirty_profiles
+                .insert(edited.global.selected_profile.clone());
+            state.pending_position_save = true;
+            state.save_config(mode).unwrap();
+            let disk = Config::read_from(&path).unwrap();
+            assert_eq!(
+                disk.get_active_profile().unwrap().character_thumbnails["Alice"]
+                    .alias
+                    .as_deref(),
+                Some("Main")
+            );
+            let expected = if mode == SaveMode::Implicit {
+                expected
+            } else {
+                edited.clone()
+            };
+            assert_eq!(
+                serde_json::to_value(&disk).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&state.config).unwrap(),
+                serde_json::to_value(&edited).unwrap()
+            );
+            assert!(!state.has_unsaved_changes());
+            assert!(!state.pending_position_save);
+            state.discard_changes().unwrap();
+            assert_eq!(
+                serde_json::to_value(&state.config).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn startup_snapshot_preserves_customizations_with_consistent_saved_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let (saved, edited, expected) = customization_configs();
+        saved.save_to(&path).unwrap();
+        let disk_bytes = std::fs::read(&path).unwrap();
+        let mut state = SharedState::at_path(edited, &path);
+        let (tx, rx) = ipc_channel::ipc::channel().unwrap();
+        state.ipc_config_tx = Some(tx);
+        for profile in &expected.profiles {
+            state.config.global.selected_profile = profile.profile_name.clone();
+            let memory = serde_json::to_value(&state.config).unwrap();
+            state.send_initial_config_to_daemon().unwrap();
+            let ConfigMessage::InitialConfig(snapshot) = rx.recv().unwrap() else {
+                panic!("expected initial configuration");
+            };
+            assert_eq!(
+                serde_json::to_value(&snapshot.profile).unwrap(),
+                serde_json::to_value(profile).unwrap()
+            );
+            assert_eq!(snapshot.character_thumbnails, profile.character_thumbnails);
+            assert_eq!(
+                snapshot.custom_source_thumbnails,
+                profile.custom_source_thumbnails
+            );
+            assert_eq!(serde_json::to_value(&state.config).unwrap(), memory);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), disk_bytes);
+    }
+
+    #[test]
+    fn startup_snapshot_keeps_current_settings_when_disk_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let (_, edited, _) = customization_configs();
+        std::fs::write(&path, b"{broken").unwrap();
+        let mut state = SharedState::at_path(edited.clone(), &path);
+        let (tx, rx) = ipc_channel::ipc::channel().unwrap();
+        state.ipc_config_tx = Some(tx);
+        state.send_initial_config_to_daemon().unwrap();
+        let ConfigMessage::InitialConfig(snapshot) = rx.recv().unwrap() else {
+            panic!("expected initial configuration");
+        };
+        let profile = edited.get_active_profile().unwrap();
+        assert_eq!(
+            serde_json::to_value(&snapshot.profile).unwrap(),
+            serde_json::to_value(profile).unwrap()
+        );
+        assert_eq!(snapshot.character_thumbnails, profile.character_thumbnails);
+        assert_eq!(
+            snapshot.custom_source_thumbnails,
+            profile.custom_source_thumbnails
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
     }
 }
