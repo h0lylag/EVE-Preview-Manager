@@ -201,25 +201,7 @@ impl<'a> ThumbnailRenderer<'a> {
                 character_name
             ))?;
 
-        // Map window to make it visible
-        ctx.conn
-            .map_window(window)
-            .inspect_err(|e| {
-                error!(
-                    window = window,
-                    error = ?e,
-                    "Failed to map thumbnail window"
-                )
-            })
-            .context(format!(
-                "Failed to map thumbnail window for '{}'",
-                character_name
-            ))?;
-        debug!(
-            window = window,
-            character = %character_name,
-            "Mapped thumbnail window"
-        );
+        // Thumbnail applies visibility policy before the first map.
 
         Ok(())
     }
@@ -450,13 +432,13 @@ impl<'a> ThumbnailRenderer<'a> {
 
     /// Maps the thumbnail window, making it visible on screen.
     pub fn map(&self) -> Result<()> {
-        self.conn.map_window(self.window)?;
+        self.conn.map_window(self.window)?.check()?;
         Ok(())
     }
 
     /// Unmaps the thumbnail window, hiding it from screen.
     pub fn unmap(&self) -> Result<()> {
-        self.conn.unmap_window(self.window)?;
+        self.conn.unmap_window(self.window)?.check()?;
         Ok(())
     }
 

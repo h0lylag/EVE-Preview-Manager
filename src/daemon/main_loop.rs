@@ -783,13 +783,18 @@ async fn run_event_loop(
             () = &mut hide_timer, if resources.session.focus_loss_deadline.is_some() => {
                 debug!("Executing delayed thumbnail hide");
                 restore_interrupted_group_drag(conn, &mut resources, "focus-loss hide");
-                for thumbnail in resources.eve_clients.values_mut() {
-                    if let Err(e) = thumbnail.visibility(false) {
-                        error!(error = %e, character = %thumbnail.character_name, "Failed to hide thumbnail on focus timeout");
-                    }
-                }
-                // Clear deadline - this will disable the branch until next FocusOut
-                resources.session.focus_loss_deadline = None;
+                let ctx = AppContext { conn, screen, atoms, formats };
+                crate::daemon::handlers::state::hide_after_focus_loss(&mut EventContext {
+                    app_ctx: &ctx,
+                    daemon_config: &mut resources.config,
+                    eve_clients: &mut resources.eve_clients,
+                    session_state: &mut resources.session,
+                    cycle_state: &mut resources.cycle,
+                    group_drag_state: &mut resources.group_drag,
+                    status_tx: &status_tx,
+                    font_renderer: &font_renderer,
+                    display_config: &display_config,
+                });
             }
 
             // 4. Send Heartbeat (Lower priority - can wait)
@@ -1033,10 +1038,10 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     .await
 }
 
-fn handle_cycle_command(
+fn handle_cycle_command<'a>(
     command: &CycleCommand,
-    resources: &mut DaemonResources<'_>,
-    ctx: &AppContext<'_>,
+    resources: &mut DaemonResources<'a>,
+    ctx: &AppContext<'a>,
     font_renderer: &crate::daemon::font::FontRenderer,
     status_tx: &IpcSender<DaemonMessage>,
     hotkey_groups: &HashMap<crate::config::HotkeyBinding, Vec<SourceIdentity>>,
@@ -1194,33 +1199,18 @@ fn handle_cycle_command(
         }
         CycleCommand::TogglePreviews => {
             restore_interrupted_group_drag(ctx.conn, resources, "preview visibility toggle");
-            resources.config.runtime_hidden = !resources.config.runtime_hidden;
-            info!(
-                hidden = resources.config.runtime_hidden,
-                "Toggled previews visibility"
-            );
-
-            // Force visibility update for all known thumbnails
             let display_config = resources.config.build_display_config();
-            for thumbnail in resources.eve_clients.values_mut() {
-                // When revealing, respect per-source overrides: force-hidden thumbnails stay hidden.
-                let should_render = display_config
-                    .settings_for(
-                        thumbnail.source_kind(),
-                        thumbnail.effective_character_name(),
-                    )
-                    .and_then(|s| s.override_render_preview)
-                    .unwrap_or(display_config.enabled);
-
-                let target_visible = !resources.config.runtime_hidden && should_render;
-
-                if let Err(e) = thumbnail.visibility(target_visible) {
-                    warn!(source = %thumbnail.character_name, error = %e, "Failed to update visibility after toggle");
-                } else if target_visible {
-                    // Force update to ensure content is drawn if revealed
-                    let _ = thumbnail.update(&display_config, font_renderer);
-                }
-            }
+            crate::daemon::handlers::state::toggle_previews(&mut EventContext {
+                app_ctx: ctx,
+                daemon_config: &mut resources.config,
+                eve_clients: &mut resources.eve_clients,
+                session_state: &mut resources.session,
+                cycle_state: &mut resources.cycle,
+                group_drag_state: &mut resources.group_drag,
+                status_tx,
+                font_renderer,
+                display_config: &display_config,
+            });
             None
         }
     }

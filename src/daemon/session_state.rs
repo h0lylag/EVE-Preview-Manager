@@ -1,7 +1,8 @@
-//! Session-only state for window position tracking
+//! Session-only window tracking and focus visibility state
 //!
 //! Tracks window positions within the current X11 session. Used for preserving
-//! thumbnail positions when characters log out and for position inheritance.
+//! thumbnail positions when characters log out and for position inheritance,
+//! plus delayed hiding when tracked sources lose focus.
 
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -9,8 +10,7 @@ use x11rb::protocol::xproto::Window;
 
 use crate::common::types::{CharacterSettings, Position};
 
-/// Runtime state for position tracking
-/// Window positions are session-only (not persisted to disk)
+/// Runtime window and focus state, never persisted to disk.
 #[derive(Default)]
 pub struct SessionState {
     /// Window ID → position (session-only, not persisted)
@@ -23,8 +23,10 @@ pub struct SessionState {
     /// Used for including logged-out windows in cycle (if enabled in profile)
     pub window_last_character: HashMap<Window, String>,
 
-    /// Deadline for hiding thumbnails after focus loss (hysteresis)
-    /// Prevents flickering when cycling through clients
+    /// Focus-loss hiding remains active until source focus is confirmed, even with no previews.
+    pub focus_hidden: bool,
+
+    /// Deadline for hiding thumbnails after focus loss (hysteresis).
     pub focus_loss_deadline: Option<std::time::Instant>,
 }
 
@@ -132,6 +134,7 @@ mod tests {
             window_positions: HashMap::from([(456, Position::new(300, 400))]),
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
+            focus_hidden: false,
         };
         let char_positions = HashMap::new();
 
@@ -146,6 +149,7 @@ mod tests {
             window_positions: HashMap::from([(789, Position::new(500, 600))]),
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
+            focus_hidden: false,
         };
         let char_positions = HashMap::new();
 
@@ -160,6 +164,7 @@ mod tests {
             window_positions: HashMap::new(),
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
+            focus_hidden: false,
         };
         let char_positions = HashMap::new();
 
@@ -174,6 +179,7 @@ mod tests {
             window_positions: HashMap::from([(111, Position::new(700, 800))]),
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
+            focus_hidden: false,
         };
         let char_positions = HashMap::new();
 

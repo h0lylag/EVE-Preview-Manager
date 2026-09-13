@@ -535,6 +535,7 @@ pub fn check_and_create_window<'a>(
         position,
         dimensions,
         preview_mode,
+        daemon_config.runtime_hidden || (display_config.hide_when_no_focus && state.focus_hidden),
     )
     .context(format!(
         "Failed to create thumbnail for '{}' (window {})",
@@ -812,7 +813,7 @@ mod tests {
             "alias": "YouTube", "title_pattern": "YouTube", "limit": false
         }))
         .unwrap();
-        let mut config = DaemonConfig {
+        let config = DaemonConfig {
             profile: Profile {
                 custom_windows: vec![rule],
                 ..Profile::default()
@@ -822,6 +823,14 @@ mod tests {
             profile_hotkeys: HashMap::new(),
             runtime_hidden: false,
         };
+        with_config(ctx, config, test);
+    }
+
+    fn with_config<'a>(
+        ctx: &AppContext<'a>,
+        mut config: DaemonConfig,
+        test: impl FnOnce(&mut EventContext<'a, '_>, &IpcReceiver<DaemonMessage>),
+    ) {
         let display = config.build_display_config();
         let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
         let mut previews = HashMap::new();
@@ -1076,6 +1085,371 @@ mod tests {
                         "source discovery replaced preview input subscriptions"
                     );
                 }
+            })
+        });
+    }
+
+    fn visibility_config() -> DaemonConfig {
+        use crate::common::types::CharacterSettings;
+        let mut profile = Profile {
+            thumbnail_hide_not_focused: true,
+            ..Profile::default()
+        };
+        profile.character_thumbnails.insert(
+            "Alice".into(),
+            CharacterSettings {
+                override_render_preview: Some(false),
+                ..CharacterSettings::new(10, 20, 160, 100)
+            },
+        );
+        profile.character_thumbnails.insert(
+            "Bob".into(),
+            CharacterSettings {
+                override_render_preview: Some(true),
+                ..CharacterSettings::new(30, 40, 160, 100)
+            },
+        );
+        profile.custom_windows.push(
+            serde_json::from_value(serde_json::json!({
+                "alias": "Alice", "title_pattern": "Custom Alice", "override_render_preview": true
+            }))
+            .unwrap(),
+        );
+        DaemonConfig {
+            character_thumbnails: profile.character_thumbnails.clone(),
+            custom_source_thumbnails: profile.custom_source_thumbnails.clone(),
+            profile,
+            profile_hotkeys: HashMap::new(),
+            runtime_hidden: false,
+        }
+    }
+
+    fn assert_visible(
+        ctx: &AppContext<'_>,
+        events: &EventContext<'_, '_>,
+        src: Window,
+        expected: bool,
+    ) {
+        let thumbnail = &events.eve_clients[&src];
+        assert_eq!(thumbnail.is_visible(), expected);
+        let map_state = ctx
+            .conn
+            .get_window_attributes(thumbnail.window())
+            .unwrap()
+            .reply()
+            .unwrap()
+            .map_state;
+        assert_eq!(
+            map_state,
+            if expected {
+                MapState::VIEWABLE
+            } else {
+                MapState::UNMAPPED
+            }
+        );
+    }
+
+    fn swap_character(
+        ctx: &AppContext<'_>,
+        events: &mut EventContext<'_, '_>,
+        src: Window,
+        name: &str,
+    ) {
+        set_title(ctx, src, &format!("EVE - {name}"));
+        handle_event(events, property_event(src, ctx.atoms.wm_name)).unwrap();
+    }
+
+    fn focus_in(events: &mut EventContext<'_, '_>, src: Window) {
+        handle_event(
+            events,
+            Event::FocusIn(FocusInEvent {
+                response_type: FOCUS_IN_EVENT,
+                event: src,
+                mode: NotifyMode::NORMAL,
+                detail: NotifyDetail::NONLINEAR,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_character_swaps_respect_all_hiding_reasons() {
+        use crate::daemon::handlers::state::{hide_after_focus_loss, toggle_previews};
+        with_x11(|ctx| {
+            for focus_hidden in [false, true] {
+                for runtime_hidden in [false, true] {
+                    let mut config = visibility_config();
+                    config.runtime_hidden = runtime_hidden;
+                    with_config(ctx, config, |events, _| {
+                        if focus_hidden {
+                            hide_after_focus_loss(events);
+                        }
+                        let src = window(ctx, "EVE - Alice", "eve");
+                        handle_event(events, create_event(ctx, src)).unwrap();
+                        assert_visible(ctx, events, src, false);
+                        swap_character(ctx, events, src, "Bob");
+                        assert_visible(ctx, events, src, !focus_hidden && !runtime_hidden);
+                        // Logout retains Bob's remembered identity and render override.
+                        set_title(ctx, src, "EVE");
+                        handle_event(events, property_event(src, ctx.atoms.wm_name)).unwrap();
+                        assert_eq!(events.eve_clients[&src].effective_character_name(), "Bob");
+                        assert_visible(ctx, events, src, !focus_hidden && !runtime_hidden);
+                        swap_character(ctx, events, src, "Alice");
+                        assert_visible(ctx, events, src, false);
+                        if runtime_hidden {
+                            toggle_previews(events);
+                        }
+                        focus_in(events, src);
+                        assert_visible(ctx, events, src, false);
+                        swap_character(ctx, events, src, "Bob");
+                        assert_visible(ctx, events, src, true);
+                    });
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_focus_return_does_not_undo_toggle() {
+        use crate::daemon::handlers::state::{hide_after_focus_loss, toggle_previews};
+        with_x11(|ctx| {
+            with_config(ctx, visibility_config(), |events, _| {
+                let src = window(ctx, "EVE - Bob", "eve");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                focus_in(events, src);
+                toggle_previews(events);
+                assert_visible(ctx, events, src, false);
+                handle_event(
+                    events,
+                    Event::FocusOut(FocusOutEvent {
+                        response_type: FOCUS_OUT_EVENT,
+                        event: src,
+                        mode: NotifyMode::NORMAL,
+                        detail: NotifyDetail::NONLINEAR,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+                assert!(events.session_state.focus_loss_deadline.is_some());
+                focus_in(events, src);
+                assert!(events.session_state.focus_loss_deadline.is_none());
+                assert!(events.daemon_config.runtime_hidden);
+                assert_visible(ctx, events, src, false);
+                hide_after_focus_loss(events);
+                toggle_previews(events);
+                assert!(!events.daemon_config.runtime_hidden);
+                assert_visible(ctx, events, src, false);
+                events
+                    .eve_clients
+                    .get_mut(&src)
+                    .unwrap()
+                    .minimized(events.display_config, events.font_renderer)
+                    .unwrap();
+                let other = window(ctx, "Custom Alice", "browser");
+                handle_event(events, create_event(ctx, other)).unwrap();
+                focus_in(events, other);
+                assert_visible(ctx, events, src, true);
+                assert!(events.eve_clients[&src].state.is_minimized());
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_new_and_recreated_previews_never_map_while_blocked() {
+        use crate::daemon::handlers::state::hide_after_focus_loss;
+        with_x11(|ctx| {
+            ctx.conn
+                .change_window_attributes(
+                    ctx.screen.root,
+                    &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            for focus_hidden in [false, true] {
+                let mut config = visibility_config();
+                config.runtime_hidden = !focus_hidden;
+                with_config(ctx, config, |events, _| {
+                    if focus_hidden {
+                        hide_after_focus_loss(events);
+                    }
+                    for (title, class) in [("EVE - Bob", "eve"), ("Custom Alice", "browser")] {
+                        let src = window(ctx, title, class);
+                        for creation in 0..3 {
+                            if creation == 2 {
+                                ctx.conn
+                                    .change_property32(
+                                        PropMode::REPLACE,
+                                        ctx.screen.root,
+                                        ctx.atoms.net_client_list,
+                                        AtomEnum::WINDOW,
+                                        &[src],
+                                    )
+                                    .unwrap()
+                                    .check()
+                                    .unwrap();
+                                *events.eve_clients = super::scan_eve_windows(
+                                    ctx,
+                                    events.display_config,
+                                    events.font_renderer,
+                                    events.daemon_config,
+                                    events.session_state,
+                                    events.cycle_state,
+                                    events.status_tx,
+                                )
+                                .unwrap();
+                            } else {
+                                handle_event(events, create_event(ctx, src)).unwrap();
+                            }
+                            assert_visible(ctx, events, src, false);
+                            let preview = events.eve_clients[&src].window();
+                            // The attribute round-trip above ensures all earlier map events are queued.
+                            let mut drained = false;
+                            for _ in 0..512 {
+                                let Some(event) = ctx.conn.poll_for_event().unwrap() else {
+                                    drained = true;
+                                    break;
+                                };
+                                assert!(
+                                    !matches!(event, Event::MapNotify(event) if event.window == preview),
+                                    "blocked preview mapped during creation"
+                                );
+                            }
+                            assert!(drained, "event drain exceeded its bound");
+                            events.eve_clients.remove(&src);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_source_overrides_with_focus_hiding_disabled() {
+        with_x11(|ctx| {
+            let mut config = visibility_config();
+            config.profile.thumbnail_hide_not_focused = false;
+            config.profile.thumbnail_enabled = false;
+            with_config(ctx, config, |events, _| {
+                let src = window(ctx, "EVE - Bob", "eve");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                assert_visible(ctx, events, src, true);
+                swap_character(ctx, events, src, "Alice");
+                assert_visible(ctx, events, src, false);
+                let custom = window(ctx, "Custom Alice", "browser");
+                handle_event(events, create_event(ctx, custom)).unwrap();
+                assert_visible(ctx, events, custom, true);
+                swap_character(ctx, events, src, "Bob");
+                assert_visible(ctx, events, src, true);
+                swap_character(ctx, events, src, "Charlie");
+                assert_visible(ctx, events, src, false);
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_failed_map_requests_preserve_cached_state() {
+        with_x11(|ctx| {
+            for blocked in [false, true] {
+                let mut config = visibility_config();
+                config.runtime_hidden = blocked;
+                with_config(ctx, config, |events, _| {
+                    let src = window(ctx, "EVE - Bob", "eve");
+                    handle_event(events, create_event(ctx, src)).unwrap();
+                    let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                    ctx.conn
+                        .destroy_window(thumbnail.window())
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                    assert!(
+                        thumbnail
+                            .set_visibility_blocked(
+                                !blocked,
+                                events.display_config,
+                                events.font_renderer
+                            )
+                            .is_err()
+                    );
+                    assert_eq!(thumbnail.is_visible(), !blocked);
+                });
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_detection_recovers_focus_without_focus_in() {
+        use crate::daemon::handlers::state::hide_after_focus_loss;
+        with_x11(|ctx| {
+            for already_tracked in [false, true] {
+                for runtime_hidden in [false, true] {
+                    let mut config = visibility_config();
+                    config.runtime_hidden = runtime_hidden;
+                    with_config(ctx, config, |events, _| {
+                        let src = window(ctx, "EVE - Bob", "eve");
+                        if already_tracked {
+                            handle_event(events, create_event(ctx, src)).unwrap();
+                        }
+                        hide_after_focus_loss(events);
+                        events.session_state.focus_loss_deadline = Some(std::time::Instant::now());
+                        // Activation can precede event subscription; no FocusIn is delivered.
+                        ctx.conn
+                            .change_property32(
+                                PropMode::REPLACE,
+                                ctx.screen.root,
+                                ctx.atoms.net_active_window,
+                                AtomEnum::WINDOW,
+                                &[src],
+                            )
+                            .unwrap()
+                            .check()
+                            .unwrap();
+                        handle_event(events, create_event(ctx, src)).unwrap();
+                        assert!(!events.session_state.focus_hidden);
+                        assert!(events.session_state.focus_loss_deadline.is_none());
+                        assert_visible(ctx, events, src, !runtime_hidden);
+                        ctx.conn
+                            .delete_property(ctx.screen.root, ctx.atoms.net_active_window)
+                            .unwrap()
+                            .check()
+                            .unwrap();
+                    });
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_unchanged_block_does_not_repaint() {
+        with_x11(|ctx| {
+            with_config(ctx, visibility_config(), |events, _| {
+                let src = window(ctx, "EVE - Bob", "eve");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                assert_visible(ctx, events, src, true);
+                let before = ctx.conn.get_input_focus().unwrap();
+                let sequence = before.sequence_number();
+                before.reply().unwrap();
+                events
+                    .eve_clients
+                    .get_mut(&src)
+                    .unwrap()
+                    .set_visibility_blocked(false, events.display_config, events.font_renderer)
+                    .unwrap();
+                let after = ctx.conn.get_input_focus().unwrap();
+                assert_eq!(
+                    after.sequence_number(),
+                    sequence + 1,
+                    "unchanged visibility issued rendering requests"
+                );
+                after.reply().unwrap();
             })
         });
     }

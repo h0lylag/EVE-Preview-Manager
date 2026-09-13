@@ -297,6 +297,7 @@ pub fn process_detected_window(
             .unwrap_or(false);
 
             if is_actually_focused {
+                super::state::restore_focus_visibility(ctx);
                 sync_focused_borders(
                     ctx.eve_clients,
                     ctx.cycle_state,
@@ -531,6 +532,7 @@ fn refresh_tracked_window(
     }
 
     if is_actually_focused {
+        super::state::restore_focus_visibility(ctx);
         sync_focused_borders(
             ctx.eve_clients,
             ctx.cycle_state,

@@ -43,6 +43,10 @@ fn display_character_name_from<'a>(
     }
 }
 
+fn preview_visible(enabled: bool, render_override: Option<bool>, blocked: bool) -> bool {
+    render_override.unwrap_or(enabled) && !blocked
+}
+
 #[derive(Debug, Default)]
 pub struct InputState {
     pub dragging: bool,
@@ -61,16 +65,17 @@ pub struct InputState {
 ///
 /// It delegates actual X11 operations (rendering, window management) to `ThumbnailRenderer`.
 pub struct Thumbnail<'a> {
-    // === Application State (public, frequently accessed) ===
+    // === Application state ===
     source_kind: SourceKind,
     pub character_name: String,
     remembered_character_name: Option<String>,
     pub state: ThumbnailState,
-    pub hidden: bool, // Tracks if hidden by "hide_when_no_focus"
+    hidden: bool,            // Cached X11 mapping state.
+    externally_hidden: bool, // Combined preview-toggle and focus block.
     pub input_state: InputState,
     pub preview_mode: crate::common::types::PreviewMode,
 
-    // === Geometry (public, immutable after creation) ===
+    // === Current geometry ===
     pub dimensions: Dimensions,
 
     pub current_position: Position, // Cached position for hit testing
@@ -92,6 +97,7 @@ impl<'a> Thumbnail<'a> {
     /// * `font_renderer` - Renderer for shared font resources.
     /// * `position` - Optional initial position (if loaded from config).
     /// * `dimensions` - Initial size.
+    /// * `externally_hidden` - Combined preview-toggle and focus block at creation.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
@@ -104,6 +110,7 @@ impl<'a> Thumbnail<'a> {
         position: Option<Position>,
         dimensions: Dimensions,
         preview_mode: crate::common::types::PreviewMode,
+        externally_hidden: bool,
     ) -> Result<Self> {
         // Validate dimensions are non-zero
         if dimensions.width == 0 || dimensions.height == 0 {
@@ -166,18 +173,21 @@ impl<'a> Thumbnail<'a> {
             dimensions,
         )?;
 
-        Ok(Self {
+        let mut thumbnail = Self {
             source_kind,
             character_name,
             remembered_character_name,
             state: ThumbnailState::default(),
-            hidden: false,
+            hidden: true,
+            externally_hidden,
             input_state: InputState::default(),
             preview_mode,
             dimensions,
             current_position: Position::new(x, y),
             renderer,
-        })
+        };
+        thumbnail.reconcile_visibility(display_config)?;
+        Ok(thumbnail)
     }
 
     // Accessors
@@ -260,26 +270,25 @@ impl<'a> Thumbnail<'a> {
 
     /// Sets the visibility of the thumbnail.
     ///
-    /// Manages X11 mapping/unmapping and upgrades internal `hidden` state.
+    /// Manages X11 mapping/unmapping and updates cached state after a successful request.
     /// Does NOT modify the logical `state` (Normal/Minimized).
-    pub fn visibility(&mut self, visible: bool) -> Result<()> {
+    fn visibility(&mut self, visible: bool) -> Result<()> {
         if self.is_visible() == visible {
             return Ok(());
         }
 
         if visible {
-            self.hidden = false;
             self.renderer.map().context(format!(
                 "Failed to map window for '{}'",
                 self.character_name
             ))?;
         } else {
-            self.hidden = true;
             self.renderer.unmap().context(format!(
                 "Failed to unmap window for '{}'",
                 self.character_name
             ))?;
         }
+        self.hidden = !visible;
         Ok(())
     }
 
@@ -376,25 +385,41 @@ impl<'a> Thumbnail<'a> {
         Ok(())
     }
 
-    /// Triggers a repaint of the thumbnail content and overlay.
+    /// Update global/focus blocking independently of the current source's render override.
+    pub fn set_visibility_blocked(
+        &mut self,
+        blocked: bool,
+        display_config: &DisplayConfig,
+        font_renderer: &FontRenderer,
+    ) -> Result<()> {
+        let was_visible = self.is_visible();
+        self.externally_hidden = blocked;
+        self.reconcile_visibility(display_config)?;
+        // Focus events often leave visibility unchanged; only revelation needs a full repaint.
+        if !was_visible && self.is_visible() {
+            self.update(display_config, font_renderer)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_visibility(&mut self, display_config: &DisplayConfig) -> Result<()> {
+        let render_override = display_config
+            .settings_for(self.source_kind, self.effective_character_name())
+            .and_then(|settings| settings.override_render_preview);
+        self.visibility(preview_visible(
+            display_config.enabled,
+            render_override,
+            self.externally_hidden,
+        ))
+    }
+
+    /// Reconciles visibility and repaints permitted thumbnail content and overlay.
     pub fn update(
         &mut self,
         display_config: &DisplayConfig,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
-        // Resolve per-source preview visibility override against the global setting.
-        // override_render_preview: None = use global, Some(true) = force on, Some(false) = force off
-        let should_render = display_config
-            .settings_for(self.source_kind, self.effective_character_name())
-            .and_then(|s| s.override_render_preview)
-            .unwrap_or(display_config.enabled);
-
-        if !should_render {
-            // Unmap the entire thumbnail window so it fully disappears
-            self.visibility(false)?;
-            return Ok(());
-        }
-
+        self.reconcile_visibility(display_config)?;
         if !self.is_visible() {
             return Ok(());
         }
@@ -503,7 +528,7 @@ impl<'a> Thumbnail<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_character_name_from, effective_character_name_from};
+    use super::{display_character_name_from, effective_character_name_from, preview_visible};
 
     #[test]
     fn effective_name_prefers_live_character() {
@@ -548,5 +573,18 @@ mod tests {
             display_character_name_from("", Some("Remembered"), true),
             "Remembered"
         );
+    }
+
+    #[test]
+    fn source_override_cannot_bypass_external_hiding() {
+        for enabled in [false, true] {
+            for render_override in [None, Some(false), Some(true)] {
+                assert!(!preview_visible(enabled, render_override, true));
+                assert_eq!(
+                    preview_visible(enabled, render_override, false),
+                    render_override.unwrap_or(enabled)
+                );
+            }
+        }
     }
 }

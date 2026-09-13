@@ -54,41 +54,7 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
         debug!(window = event.event, "Synced cycle state to focused window");
     }
 
-    // Cancel any pending hide operation since we regained focus
-    if ctx.session_state.focus_loss_deadline.is_some() {
-        ctx.session_state.focus_loss_deadline = None;
-        debug!("Cancelled pending focus loss hide");
-    }
-
-    if ctx.display_config.hide_when_no_focus && ctx.eve_clients.values().any(|x| !x.is_visible()) {
-        for thumbnail in ctx.eve_clients.values_mut() {
-            // Respect per-source override: don't reveal force-hidden thumbnails.
-            let should_render = ctx
-                .display_config
-                .settings_for(
-                    thumbnail.source_kind(),
-                    thumbnail.effective_character_name(),
-                )
-                .and_then(|s| s.override_render_preview)
-                .unwrap_or(ctx.display_config.enabled);
-
-            if !should_render {
-                continue;
-            }
-
-            debug!(source = %thumbnail.character_name, "Revealing thumbnail due to focus change");
-            thumbnail.visibility(true).context(format!(
-                "Failed to show thumbnail '{}' on focus",
-                thumbnail.character_name
-            ))?;
-            thumbnail
-                .update(ctx.display_config, ctx.font_renderer)
-                .context(format!(
-                    "Failed to update thumbnail '{}' on focus reveal",
-                    thumbnail.character_name
-                ))?;
-        }
-    }
+    restore_focus_visibility(ctx);
 
     sync_focused_borders(
         ctx.eve_clients,
@@ -159,4 +125,42 @@ pub fn handle_net_wm_state(ctx: &mut EventContext, window: Window, atom: Atom) -
             ))?;
     }
     Ok(())
+}
+
+/// Accept confirmed source focus, whether observed through FocusIn or late detection.
+/// The preview-toggle block remains authoritative.
+pub(super) fn restore_focus_visibility(ctx: &mut EventContext) {
+    if ctx.session_state.focus_loss_deadline.take().is_some() {
+        debug!("Cancelled pending focus loss hide");
+    }
+    ctx.session_state.focus_hidden = false;
+    reconcile_previews(ctx);
+}
+
+/// Apply every active hiding reason, including when a previous reason has just cleared.
+fn reconcile_previews(ctx: &mut EventContext) {
+    let blocked = ctx.daemon_config.runtime_hidden
+        || (ctx.display_config.hide_when_no_focus && ctx.session_state.focus_hidden);
+    for thumbnail in ctx.eve_clients.values_mut() {
+        if let Err(error) =
+            thumbnail.set_visibility_blocked(blocked, ctx.display_config, ctx.font_renderer)
+        {
+            tracing::warn!(source = %thumbnail.character_name, error = %error, "Failed to reconcile preview visibility");
+        }
+    }
+}
+
+pub fn toggle_previews(ctx: &mut EventContext) {
+    ctx.daemon_config.runtime_hidden = !ctx.daemon_config.runtime_hidden;
+    tracing::info!(
+        hidden = ctx.daemon_config.runtime_hidden,
+        "Toggled previews visibility"
+    );
+    reconcile_previews(ctx);
+}
+
+pub fn hide_after_focus_loss(ctx: &mut EventContext) {
+    ctx.session_state.focus_hidden = true;
+    ctx.session_state.focus_loss_deadline = None;
+    reconcile_previews(ctx);
 }
