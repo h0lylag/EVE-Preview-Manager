@@ -39,7 +39,7 @@ impl HexColor {
         self.0
     }
 
-    /// Convert to X11 Color (16-bit per channel, 0-65535 range)
+    /// Convert straight-alpha ARGB to premultiplied XRender channels (0-65535).
     pub fn to_x11_color(self) -> Color {
         let a = (self.0 >> 24) & 0xFF;
         let r = (self.0 >> 16) & 0xFF;
@@ -48,11 +48,12 @@ impl HexColor {
 
         // Scale from 8-bit (0-255) to 16-bit (0-65535)
         let scale = |v: u32| (v << 8 | v) as u16;
+        let premultiply = |v: u32| ((v * 257 * a + 127) / 255) as u16;
 
         Color {
-            red: scale(r),
-            green: scale(g),
-            blue: scale(b),
+            red: premultiply(r),
+            green: premultiply(g),
+            blue: premultiply(b),
             alpha: scale(a),
         }
     }
@@ -179,6 +180,18 @@ mod tests {
         // Invalid
         assert_eq!(HexColor::parse("invalid"), None);
         assert_eq!(HexColor::parse(""), None);
+    }
+
+    #[test]
+    fn xrender_colors_premultiply_rgb_without_changing_alpha() {
+        for (argb, expected) in [
+            (0x00FF8040, [0, 0, 0, 0]),
+            (0x80FF8040, [32896, 16513, 8256, 32896]),
+            (0xFFFF8040, [65535, 32896, 16448, 65535]),
+        ] {
+            let color = HexColor::from_argb32(argb).to_x11_color();
+            assert_eq!([color.red, color.green, color.blue, color.alpha], expected);
+        }
     }
 
     #[test]

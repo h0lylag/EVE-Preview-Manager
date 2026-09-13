@@ -554,7 +554,7 @@ impl<'a> ThumbnailRenderer<'a> {
     /// Draws the border and updates the name overlay.
     ///
     /// # Arguments
-    /// * `focused` - If true, draws the border. If false, clears the border area.
+    /// * `focused` - Selects the configured active or inactive border style.
     /// * `skipped` - If true, draws the skipped indicator (diagonal red lines).
     pub fn border(
         &self,

@@ -467,8 +467,8 @@ pub fn check_and_create_window<'a>(
         source_window_position(ctx, window),
     );
 
-    // NOTE: override_render_preview for custom sources is stored in the rule and resolved
-    // by build_display_config(); the raw daemon maps only hold position/size.
+    // Custom-source render overrides come from the rule when build_display_config()
+    // merges it with saved per-source settings.
     let force_enable = display_config
         .settings_for(identity.kind, effective_character_name)
         .and_then(|s| s.override_render_preview)
@@ -1087,6 +1087,115 @@ mod tests {
                 }
             })
         });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn border_alpha_composites_global_and_source_colors_correctly() {
+        use crate::common::types::{CharacterSettings, PreviewMode};
+        for custom in [false, true] {
+            for per_source in [false, true] {
+                for (color, expected) in [
+                    ("#00FF0000", 0x0000FF),
+                    ("#80FF0000", 0x80007F),
+                    ("#FFFF0000", 0xFF0000),
+                ] {
+                    with_x11(|ctx| {
+                        let global_color = if per_source { "#FF00FF00" } else { color };
+                        let mut profile = Profile {
+                            thumbnail_active_border: true,
+                            thumbnail_active_border_size: 5,
+                            thumbnail_active_border_color: global_color.into(),
+                            thumbnail_inactive_border: true,
+                            thumbnail_inactive_border_size: 5,
+                            thumbnail_inactive_border_color: global_color.into(),
+                            thumbnail_text_color: "#00000000".into(),
+                            ..Profile::default()
+                        };
+                        let mut settings = CharacterSettings::new(20, 20, 160, 100);
+                        settings.preview_mode = PreviewMode::Static {
+                            color: "#0000FF".into(),
+                        };
+                        let (title, class) = if custom {
+                            profile.custom_windows.push(serde_json::from_value(serde_json::json!({
+                                "alias": "Review", "title_pattern": "Review source", "default_width": 160, "default_height": 100,
+                                "active_border_color": per_source.then_some(color),
+                                "inactive_border_color": per_source.then_some(color)
+                            })).unwrap());
+                            profile
+                                .custom_source_thumbnails
+                                .insert("Review".into(), settings);
+                            ("Review source", "browser")
+                        } else {
+                            settings.override_active_border_color =
+                                per_source.then(|| color.into());
+                            settings.override_inactive_border_color =
+                                per_source.then(|| color.into());
+                            profile
+                                .character_thumbnails
+                                .insert("Review".into(), settings);
+                            ("EVE - Review", "eve")
+                        };
+                        let config = DaemonConfig {
+                            character_thumbnails: profile.character_thumbnails.clone(),
+                            custom_source_thumbnails: profile.custom_source_thumbnails.clone(),
+                            profile,
+                            profile_hotkeys: HashMap::new(),
+                            runtime_hidden: false,
+                        };
+                        with_config(ctx, config, |events, _| {
+                            let src = window(ctx, title, class);
+                            handle_event(events, create_event(ctx, src)).unwrap();
+                            let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                            for focused in [false, true] {
+                                thumbnail
+                                    .border(
+                                        events.display_config,
+                                        focused,
+                                        false,
+                                        events.font_renderer,
+                                    )
+                                    .unwrap();
+                                thumbnail
+                                    .update(events.display_config, events.font_renderer)
+                                    .unwrap();
+                                let read_pixel = |x, y| {
+                                    let reply = ctx
+                                        .conn
+                                        .get_image(
+                                            ImageFormat::Z_PIXMAP,
+                                            thumbnail.window(),
+                                            x,
+                                            y,
+                                            1,
+                                            1,
+                                            u32::MAX,
+                                        )
+                                        .unwrap()
+                                        .reply()
+                                        .unwrap();
+                                    let bytes = reply.data[..4].try_into().unwrap();
+                                    let pixel = if ctx.conn.setup().image_byte_order
+                                        == ImageOrder::LSB_FIRST
+                                    {
+                                        u32::from_le_bytes(bytes)
+                                    } else {
+                                        u32::from_be_bytes(bytes)
+                                    };
+                                    pixel & 0x00FF_FFFF
+                                };
+                                assert_eq!(read_pixel(80, 70), 0x0000FF);
+                                assert_eq!(
+                                    read_pixel(1, 1),
+                                    expected,
+                                    "custom={custom}, per_source={per_source}, focused={focused}, color={color}"
+                                );
+                            }
+                        });
+                    });
+                }
+            }
+        }
     }
 
     #[test]
