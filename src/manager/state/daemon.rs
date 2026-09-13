@@ -627,4 +627,27 @@ mod tests {
         assert!(state.pending_position_save);
         assert!(!state.position_save_due());
     }
+
+    #[test]
+    fn position_auto_save_preserves_unreadable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"{broken").unwrap();
+        let mut state = SharedState::at_path(Config::default(), &path);
+        state.pending_position_save = true;
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+
+        state.flush_pending_position_save();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+        assert!(state.config_load_error.is_some());
+        assert!(state.pending_position_save);
+        Config::default().save_to(&path).unwrap();
+        let repaired = std::fs::read(&path).unwrap();
+        state.config.global.window_width = 999;
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+        state.flush_pending_position_save();
+        assert_eq!(std::fs::read(&path).unwrap(), repaired);
+        assert!(state.pending_position_save);
+    }
 }

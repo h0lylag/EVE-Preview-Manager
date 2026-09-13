@@ -28,6 +28,8 @@ pub enum SaveMode {
 // Core application state shared between Manager and Tray
 pub struct SharedState {
     pub config: Config,
+    pub config_load_error: Option<String>,
+    pub(super) config_path: std::path::PathBuf,
     pub debug_mode: bool,
     pub daemon: Option<Child>,
     pub daemon_status: DaemonStatus,
@@ -53,6 +55,13 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    #[cfg(test)]
+    pub(crate) fn at_path(config: Config, path: &std::path::Path) -> Self {
+        let mut state = Self::new(config, false);
+        state.config_path = path.to_path_buf();
+        state
+    }
+
     pub fn validate_config(&self) -> Result<()> {
         self.config
             .validate_profile_names()
@@ -83,6 +92,8 @@ impl SharedState {
 
         Self {
             config,
+            config_load_error: None,
+            config_path: Config::path(),
             debug_mode,
             daemon: None,
             daemon_status: DaemonStatus::Stopped,
@@ -129,7 +140,7 @@ impl SharedState {
         // not the current transient in-memory state. This ensures that actions like "Refresh"
         // or "Profile Switch" revert to the saved positions as expected.
         if !selected_profile.thumbnail_auto_save_position
-            && let Ok(disk_config) = crate::config::profile::Config::load()
+            && let Ok(disk_config) = Config::read_from(&self.config_path)
             && let Some(disk_profile) = disk_config
                 .profiles
                 .iter()
@@ -182,7 +193,11 @@ impl SharedState {
     /// Persist Manager-owned configuration without sending a daemon command.
     /// Runtime application is handled by explicit daemon restart or narrow IPC deltas.
     pub(super) fn persist_config(&mut self, mode: SaveMode) -> Result<()> {
+        if let Some(error) = &self.config_load_error {
+            anyhow::bail!("{error}");
+        }
         self.validate_config()?;
+        let disk_config = self.read_config_for_reload()?;
 
         // Prepare config for saving
         // If mode is IMPLICIT (e.g. on exit or settings change),
@@ -192,27 +207,23 @@ impl SharedState {
 
         if mode == SaveMode::Implicit {
             // Restore last explicitly saved positions from disk to prevent persistence of transient moves.
-            if let Ok(disk_config) = crate::config::profile::Config::load() {
-                for profile in config_to_save.profiles.iter_mut() {
-                    if !profile.thumbnail_auto_save_position
-                        && let Some(disk_profile) = disk_config
-                            .profiles
-                            .iter()
-                            .find(|p| p.profile_name == profile.profile_name)
-                    {
-                        profile.character_thumbnails = disk_profile.character_thumbnails.clone();
-                        profile.custom_source_thumbnails =
-                            disk_profile.custom_source_thumbnails.clone();
-                    }
+            for profile in config_to_save.profiles.iter_mut() {
+                if !profile.thumbnail_auto_save_position
+                    && let Some(disk_profile) = disk_config
+                        .profiles
+                        .iter()
+                        .find(|p| p.profile_name == profile.profile_name)
+                {
+                    profile.character_thumbnails = disk_profile.character_thumbnails.clone();
+                    profile.custom_source_thumbnails =
+                        disk_profile.custom_source_thumbnails.clone();
                 }
-            } else {
-                warn!("Failed to load disk config for position revert - saving current state");
             }
         }
 
         // Write current state to disk. The Manager applies structural changes by restarting
         // the daemon; live position acknowledgements use ConfigMessage::ThumbnailMoves.
-        config_to_save.save()?;
+        config_to_save.save_to(&self.config_path)?;
 
         // Re-sync selected_profile_idx with the potentially reloaded profile list
         self.selected_profile_idx = self
@@ -295,8 +306,21 @@ impl SharedState {
         }
     }
 
-    pub fn discard_changes(&mut self) {
-        self.config = Config::load().unwrap_or_default();
+    fn read_config_for_reload(&mut self) -> Result<Config> {
+        Config::read_from(&self.config_path).map_err(|error| {
+            let message = format!(
+                "Saving is blocked: {error:#}. Repair or restore the configuration, then use Discard Changes to reload it. Your in-memory edits have been kept."
+            );
+            self.config_load_error = Some(message.clone());
+            error!(error = %message, "Failed to read configuration");
+            error.context(message)
+        })
+    }
+
+    pub fn discard_changes(&mut self) -> Result<()> {
+        let config = self.read_config_for_reload()?;
+        self.config = config;
+        self.config_load_error = None;
 
         // Re-find selected profile index after reload
         self.selected_profile_idx = self
@@ -313,6 +337,7 @@ impl SharedState {
             color: COLOR_ERROR,
         });
         info!("Configuration changes discarded");
+        Ok(())
     }
 
     pub fn save_thumbnail_positions(&mut self) -> Result<()> {
@@ -442,8 +467,11 @@ mod tests {
 
     #[test]
     fn save_config_is_disk_only_even_with_a_disconnected_daemon_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
         let config = Config::default();
-        let mut state = SharedState::new(config, false);
+        config.save_to(&path).unwrap();
+        let mut state = SharedState::at_path(config, &path);
         let (sender, receiver) = ipc_channel::ipc::channel().unwrap();
         state.ipc_config_tx = Some(sender);
 
@@ -452,6 +480,81 @@ mod tests {
 
         drop(receiver);
         state.save_config(SaveMode::Explicit).unwrap();
+    }
+
+    #[test]
+    fn failed_discard_preserves_edits_and_blocks_saves_until_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config
+            .profiles
+            .push(Profile::default_with_name("Second".into(), String::new()));
+        config.global.selected_profile = "Second".into();
+        config.save_to(&path).unwrap();
+        let mut state = SharedState::at_path(config.clone(), &path);
+        state.config.global.window_width = 999;
+        state.settings_changed = true;
+        state.pending_position_save = true;
+        let edited = serde_json::to_value(&state.config).unwrap();
+        std::fs::write(&path, b"{broken").unwrap();
+
+        assert!(state.discard_changes().is_err());
+        assert_eq!(serde_json::to_value(&state.config).unwrap(), edited);
+        assert_eq!(state.selected_profile_idx, 1);
+        assert!(state.settings_changed && state.pending_position_save);
+        assert!(
+            state
+                .config_load_error
+                .as_ref()
+                .unwrap()
+                .contains("Saving is blocked")
+        );
+        for mode in [SaveMode::Explicit, SaveMode::Implicit] {
+            assert!(state.save_config(mode).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+        }
+
+        config.save_to(&path).unwrap();
+        let repaired = std::fs::read(&path).unwrap();
+        for mode in [SaveMode::Explicit, SaveMode::Implicit] {
+            assert!(state.save_config(mode).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), repaired);
+        }
+        state.discard_changes().unwrap();
+        assert!(state.config_load_error.is_none());
+        assert!(!state.settings_changed && !state.pending_position_save);
+        assert_eq!(
+            serde_json::to_value(&state.config).unwrap(),
+            serde_json::to_value(config).unwrap()
+        );
+        state.config.global.window_width = 777;
+        state.save_config(SaveMode::Explicit).unwrap();
+        assert_eq!(Config::read_from(&path).unwrap().global.window_width, 777);
+    }
+
+    #[test]
+    fn saves_detect_unreadable_or_missing_config_before_writing() {
+        for mode in [SaveMode::Explicit, SaveMode::Implicit] {
+            for missing in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("config.json");
+                if !missing {
+                    std::fs::write(&path, b"{broken").unwrap();
+                }
+                let mut state = SharedState::at_path(Config::default(), &path);
+                state.settings_changed = true;
+                state.pending_position_save = true;
+                assert!(state.save_config(mode).is_err());
+                assert!(state.config_load_error.is_some());
+                assert!(state.settings_changed && state.pending_position_save);
+                if missing {
+                    assert!(!path.exists());
+                } else {
+                    assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+                }
+            }
+        }
     }
 
     #[test]

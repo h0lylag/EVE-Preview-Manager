@@ -258,7 +258,7 @@ impl DaemonConfig {
         // NOTE: Refresh overrides from disk to respect external Manager changes (e.g. static mode).
         // Memory holds the authoritative window position, but disk holds the authoritative user config.
         if !new_name.is_empty()
-            && let Ok(disk_config) = crate::config::profile::Config::load()
+            && let Ok(disk_config) = crate::config::profile::Config::read()
         {
             let pd_name = &self.profile.profile_name;
             if let Some(disk_profile) = disk_config

@@ -718,16 +718,30 @@ impl Config {
 
     /// Load configuration from a specific path
     pub fn load_from(config_path: &std::path::Path) -> Result<Self> {
-        if !config_path.exists() {
-            info!(
-                "Config file not found, creating default config at {:?}",
-                config_path
-            );
-            let config = Config::default();
-            config.save_to(config_path)?;
-            return Ok(config);
+        match fs::symlink_metadata(config_path) {
+            Ok(_) => Self::read_from(config_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                info!(
+                    "Config file not found, creating default config at {:?}",
+                    config_path
+                );
+                let config = Self::default();
+                config.save_to(config_path)?;
+                Ok(config)
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("Failed to inspect config at {:?}", config_path))
+            }
         }
+    }
 
+    /// Read existing configuration without creating or replacing any files.
+    pub fn read() -> Result<Self> {
+        Self::read_from(&Self::path())
+    }
+
+    /// Read existing configuration at a specific path, including on reload.
+    pub fn read_from(config_path: &std::path::Path) -> Result<Self> {
         let contents = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
 
@@ -750,15 +764,8 @@ impl Config {
             .find(|p| p.profile_name == self.global.selected_profile)
     }
 
-    /// Save configuration to JSON file.
-    ///
-    /// Atomically replaces config.json with the current in-memory state.
+    /// Atomically save configuration to a specific path.
     /// Structural changes take effect when the Manager restarts the daemon.
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&Self::path())
-    }
-
-    /// Save configuration to a specific path
     pub fn save_to(&self, config_path: &std::path::Path) -> Result<()> {
         self.validate_profile_names()
             .map_err(|err| anyhow::anyhow!(err))
@@ -785,6 +792,53 @@ impl Default for Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn load_errors_preserve_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        for bytes in [b"{broken".as_slice(), &[0xff, 0xfe]] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(super::Config::load_from(&path).is_err());
+            assert!(super::Config::read_from(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let marker = path.join("marker");
+        std::fs::write(&marker, b"keep").unwrap();
+        assert!(super::Config::load_from(&path).is_err());
+        assert_eq!(std::fs::read(marker).unwrap(), b"keep");
+        // A non-directory parent is an inspection error, not first-run absence.
+        let parent = dir.path().join("file");
+        std::fs::write(&parent, b"keep").unwrap();
+        assert!(super::Config::load_from(&parent.join("config.json")).is_err());
+        assert_eq!(std::fs::read(parent).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn read_missing_config_does_not_initialize_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/config.json");
+        assert!(super::Config::read_from(&path).is_err());
+        assert!(!path.parent().unwrap().exists());
+        super::Config::load_from(&path).unwrap();
+        assert!(super::Config::read_from(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_does_not_replace_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::os::unix::fs::symlink("missing.json", &path).unwrap();
+        assert!(super::Config::load_from(&path).is_err());
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            std::path::Path::new("missing.json")
+        );
+        assert!(!dir.path().join("missing.json").exists());
+    }
+
     use super::*;
     use crate::common::types::CharacterSettings;
 

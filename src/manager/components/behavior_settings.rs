@@ -407,7 +407,7 @@ fn backup_restore_settings(
                             match BackupManager::restore_backup(&selected, None) {
                                 Ok(_) => {
                                     state.status_message = Some(
-                                        "Restored successfully. Configuration reloaded."
+                                        "Backup restored on disk. Reloading configuration."
                                             .to_string(),
                                     );
                                     state.status_type = Some(COLOR_SUCCESS);

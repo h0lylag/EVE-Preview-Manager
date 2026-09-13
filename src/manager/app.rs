@@ -45,6 +45,115 @@ struct ManagerApp {
     window_lifecycle: WindowLifecycle,
 }
 
+/// Recovery owns no Manager resources, so closing it cannot save configuration.
+enum Application {
+    Recovery {
+        path: std::path::PathBuf,
+        error: String,
+        debug_mode: bool,
+    },
+    Running(Box<ManagerApp>),
+}
+
+impl Application {
+    fn recovery_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let Self::Recovery { path, error, .. } = self else {
+            return false;
+        };
+        let mut retry = false;
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.heading("Unable to load configuration");
+            ui.label("Repair or restore the configuration file, then click Retry. No settings will be saved while this window is open.");
+            ui.add_space(10.0);
+            ui.add(egui::Label::new(path.display().to_string()).selectable(true).wrap());
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                ui.add(egui::Label::new(error.as_str()).selectable(true).wrap());
+            });
+            ui.horizontal(|ui| {
+                retry = ui.button("Retry").clicked();
+                if ui.button("Quit").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
+        retry
+    }
+
+    fn start_with(
+        ctx: &egui::Context,
+        config: Result<Config>,
+        path: std::path::PathBuf,
+        debug_mode: bool,
+        create_manager: impl FnOnce(&egui::Context, Config, bool) -> ManagerApp,
+    ) -> Self {
+        match config {
+            Ok(config) => Self::Running(Box::new(create_manager(ctx, config, debug_mode))),
+            Err(error) => Self::Recovery {
+                path,
+                error: format!("{error:#}"),
+                debug_mode,
+            },
+        }
+    }
+
+    fn retry_with(
+        &mut self,
+        ctx: &egui::Context,
+        create_manager: impl FnOnce(&egui::Context, Config, bool) -> ManagerApp,
+    ) {
+        let Self::Recovery {
+            path,
+            error,
+            debug_mode,
+        } = self
+        else {
+            return;
+        };
+        match Config::read_from(path) {
+            Ok(config) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                    config.global.window_width as f32,
+                    config.global.window_height as f32,
+                )));
+                let manager = create_manager(ctx, config, *debug_mode);
+                // A user who just recovered their settings should see the Manager.
+                manager.window_lifecycle.show_signal().request();
+                *self = Self::Running(Box::new(manager));
+                ctx.request_repaint();
+            }
+            Err(err) => {
+                *error = format!("{err:#}");
+                error!(error = %error, "Configuration retry failed");
+            }
+        }
+    }
+}
+
+impl eframe::App for Application {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Self::Running(manager) = self {
+            manager.logic(ctx, frame);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        match self {
+            Self::Running(manager) => manager.ui(ui, frame),
+            Self::Recovery { .. } => {
+                if self.recovery_ui(ui) {
+                    self.retry_with(ui.ctx(), ManagerApp::new);
+                }
+            }
+        }
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let Self::Running(manager) = self {
+            manager.on_exit(gl);
+        }
+    }
+}
+
 fn window_startup_mode(config: &Config) -> StartupMode {
     if config.global.minimize_to_tray && config.global.start_minimized_to_tray {
         StartupMode::HideWhenTrayReady
@@ -54,7 +163,7 @@ fn window_startup_mode(config: &Config) -> StartupMode {
 }
 
 impl ManagerApp {
-    fn new(cc: &eframe::CreationContext<'_>, config: Config, debug_mode: bool) -> Self {
+    fn new(ctx: &egui::Context, config: Config, debug_mode: bool) -> Self {
         debug!("Initializing Manager (debug_mode={})", debug_mode);
 
         let startup_mode = window_startup_mode(&config);
@@ -112,7 +221,7 @@ impl ManagerApp {
         #[cfg(target_os = "linux")]
         let tray_ready_clone = tray_ready.clone();
         #[cfg(target_os = "linux")]
-        let ctx = cc.egui_ctx.clone();
+        let ctx = ctx.clone();
 
         #[cfg(target_os = "linux")]
         std::thread::spawn(move || {
@@ -214,6 +323,28 @@ impl ManagerApp {
 }
 
 impl ManagerApp {
+    fn reload_restored_config(
+        state: &mut SharedState,
+        behavior: &mut components::behavior_settings::BehaviorSettingsState,
+    ) {
+        let (text, color) = match state.discard_changes() {
+            Ok(()) => {
+                state.reload_daemon_config();
+                (
+                    "Configuration restored and reloaded".to_string(),
+                    COLOR_SUCCESS,
+                )
+            }
+            Err(error) => (
+                format!("Backup restored on disk, but reload failed: {error:#}"),
+                COLOR_ERROR,
+            ),
+        };
+        behavior.status_message = Some(text.clone());
+        behavior.status_type = Some(color);
+        state.config_status_message = Some(StatusMessage { text, color });
+    }
+
     // Eframe still calls `logic` for repaint requests while the UI is hidden, so
     // daemon polling and viewport transitions remain here.
     fn update_logic(&mut self, ctx: &egui::Context) {
@@ -364,14 +495,10 @@ impl eframe::App for ManagerApp {
                             }
                             BehaviorSettingsAction::RestoreTriggered => {
                                 // Reload config from disk (disk was just updated by restore)
-                                state.discard_changes();
-                                // Restart the daemon with the restored configuration.
-                                state.reload_daemon_config();
-                                // Override the "Changes discarded" message from discard_changes
-                                state.config_status_message = Some(StatusMessage {
-                                    text: "Configuration restored and reloaded".to_string(),
-                                    color: COLOR_SUCCESS,
-                                });
+                                Self::reload_restored_config(
+                                    state,
+                                    &mut self.behavior_settings_state,
+                                );
                             }
                             BehaviorSettingsAction::None => {}
                         }
@@ -448,10 +575,17 @@ impl eframe::App for ManagerApp {
 }
 
 pub fn run_manager(debug_mode: bool) -> Result<()> {
-    // Load config to get window dimensions
-    let config = Config::load().unwrap_or_default();
-    let window_width = config.global.window_width as f32;
-    let window_height = config.global.window_height as f32;
+    let config = Config::load();
+    let (window_width, window_height) = match &config {
+        Ok(config) => (
+            config.global.window_width as f32,
+            config.global.window_height as f32,
+        ),
+        Err(error) => {
+            error!(error = %format!("{error:#}"), "Unable to load configuration");
+            (640.0, 400.0)
+        }
+    };
 
     #[cfg(target_os = "linux")]
     let icon = match load_window_icon() {
@@ -489,7 +623,16 @@ pub fn run_manager(debug_mode: bool) -> Result<()> {
     eframe::run_native(
         &format!("EVE Preview Manager - v{}", env!("CARGO_PKG_VERSION")),
         options,
-        Box::new(move |cc| Ok(Box::new(ManagerApp::new(cc, config, debug_mode)))),
+        Box::new(move |cc| {
+            let app = Application::start_with(
+                &cc.egui_ctx,
+                config,
+                Config::path(),
+                debug_mode,
+                ManagerApp::new,
+            );
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|err| anyhow!("Failed to launch Manager: {err}"))
 }
@@ -497,6 +640,147 @@ pub fn run_manager(debug_mode: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::App as _;
+
+    #[test]
+    fn startup_recovery_retry_and_exit_preserve_files_without_starting_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let backup = dir.path().join("backups/keep.tar.gz");
+        std::fs::create_dir(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, b"backup").unwrap();
+        let ctx = egui::Context::default();
+
+        for bytes in [b"{broken".as_slice(), &[0xff, 0xfe]] {
+            std::fs::write(&path, bytes).unwrap();
+            let mut app = Application::start_with(
+                &ctx,
+                Config::load_from(&path),
+                path.clone(),
+                false,
+                |_, _, _| panic!("failed load must not initialize Manager resources"),
+            );
+            assert!(matches!(app, Application::Recovery { .. }));
+            for _ in 0..2 {
+                app.retry_with(&ctx, |_, _, _| {
+                    panic!("failed retry must not initialize Manager")
+                });
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    assert!(!app.recovery_ui(ui));
+                });
+                output.textures_delta.clear();
+                assert!(!output.shapes.is_empty());
+            }
+            app.on_exit(None);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(std::fs::read(&backup).unwrap(), b"backup");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let mut app = Application::start_with(
+            &ctx,
+            Config::load_from(&path),
+            path.clone(),
+            false,
+            |_, _, _| panic!("read failure must enter recovery"),
+        );
+        assert!(matches!(app, Application::Recovery { .. }));
+        std::fs::remove_dir(&path).unwrap();
+        app.retry_with(&ctx, |_, _, _| {
+            panic!("missing file during retry must not create defaults")
+        });
+        app.on_exit(None);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"backup");
+    }
+
+    #[test]
+    fn repaired_config_starts_manager_once_and_keeps_it_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"{broken").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Application::start_with(
+            &ctx,
+            Config::load_from(&path),
+            path.clone(),
+            true,
+            |_, _, _| panic!("failed load must enter recovery"),
+        );
+        let mut config = tray_config(StartupMode::HideWhenTrayReady);
+        config.global.window_width = 812;
+        config.global.window_height = 613;
+        config.save_to(&path).unwrap();
+        let repaired = std::fs::read(&path).unwrap();
+        let starts = std::cell::Cell::new(0);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.retry_with(ui.ctx(), |_, config, debug| {
+                assert!(debug);
+                starts.set(starts.get() + 1);
+                test_app(config)
+            });
+        });
+        output.textures_delta.clear();
+        assert_eq!(starts.get(), 1);
+        assert!(
+            root_commands(&output)
+                .contains(&egui::ViewportCommand::InnerSize(egui::vec2(812.0, 613.0)))
+        );
+        app.retry_with(&ctx, |_, _, _| {
+            panic!("already running Manager must not be initialized again")
+        });
+        let Application::Running(manager) = &mut app else {
+            panic!("expected running Manager");
+        };
+        assert_eq!(
+            manager.state.lock().unwrap().config.global.window_width,
+            812
+        );
+        #[cfg(target_os = "linux")]
+        mark_tray_ready(manager);
+        let output = run_logic(manager, false);
+        assert!(!root_commands(&output).contains(&egui::ViewportCommand::Visible(false)));
+        assert_eq!(std::fs::read(&path).unwrap(), repaired);
+    }
+
+    #[test]
+    fn failed_restore_reload_keeps_runtime_and_exit_does_not_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"{broken").unwrap();
+        let mut app = test_app(Config::default());
+        let mut state = SharedState::at_path(Config::default(), &path);
+        state.daemon_status = crate::manager::state::DaemonStatus::Running;
+        state.settings_changed = true;
+        let config_before = serde_json::to_value(&state.config).unwrap();
+        let (sender, receiver) = ipc_channel::ipc::channel().unwrap();
+        state.ipc_config_tx = Some(sender);
+
+        ManagerApp::reload_restored_config(&mut state, &mut app.behavior_settings_state);
+
+        assert_eq!(
+            state.daemon_status,
+            crate::manager::state::DaemonStatus::Running
+        );
+        assert!(state.ipc_config_tx.is_some());
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(serde_json::to_value(&state.config).unwrap(), config_before);
+        assert!(state.settings_changed);
+        assert!(state.config_load_error.is_some());
+        assert!(
+            app.behavior_settings_state
+                .status_message
+                .as_ref()
+                .unwrap()
+                .contains("reload failed")
+        );
+        assert_eq!(app.behavior_settings_state.status_type, Some(COLOR_ERROR));
+        app.state = Arc::new(Mutex::new(state));
+        app.on_exit(None);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    }
 
     fn test_app(config: Config) -> ManagerApp {
         let startup_mode = window_startup_mode(&config);

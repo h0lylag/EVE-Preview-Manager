@@ -105,8 +105,10 @@ pub fn render(
         // 2. Right: Save & Discard Buttons
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Discard button
-            if ui.button("✖ Discard Changes").clicked() {
-                state.discard_changes();
+            if ui.button("✖ Discard Changes").clicked()
+                && let Err(err) = state.discard_changes()
+            {
+                error!(error = %err, "Failed to discard changes");
             }
 
             // Save button
@@ -147,6 +149,11 @@ pub fn render(
     });
 
     ui.add_space(5.0);
+
+    // Keep load failures visible even when other actions update status messages.
+    if let Some(error) = &state.config_load_error {
+        ui.colored_label(COLOR_ERROR, error);
+    }
 
     // Handle Dialogs (Context level)
     let dialog_action =
