@@ -189,7 +189,7 @@ impl CycleState {
             })
     }
 
-    fn identity_for_window(
+    pub(super) fn identity_for_window(
         &self,
         window: Window,
         logged_out_map: Option<&HashMap<Window, String>>,
@@ -704,6 +704,35 @@ impl CycleState {
 mod tests {
     use super::*;
     use crate::config::profile::{CycleGroup, CycleSlot};
+
+    #[test]
+    fn window_identity_prefers_live_source_and_requires_tracking() {
+        let mut state = CycleState::new(Vec::new());
+        let remembered = HashMap::from([
+            (1, "Old Eve".to_string()),
+            (2, "Alice".to_string()),
+            (3, "Stale".to_string()),
+        ]);
+        state.add_window(Some(SourceIdentity::custom("Alice")), 1);
+        state.add_window(None, 2);
+        state.add_window(None, 4);
+        assert_eq!(
+            state.identity_for_window(1, Some(&remembered)),
+            Some(SourceIdentity::custom("Alice"))
+        );
+        assert_eq!(
+            state.identity_for_window(2, Some(&remembered)),
+            Some(SourceIdentity::eve("Alice"))
+        );
+        assert_eq!(state.identity_for_window(2, None), None);
+        assert_eq!(state.identity_for_window(3, Some(&remembered)), None);
+        assert_eq!(state.identity_for_window(4, Some(&remembered)), None);
+        state.add_window(Some(SourceIdentity::eve("Bob")), 2);
+        assert_eq!(
+            state.identity_for_window(2, Some(&remembered)),
+            Some(SourceIdentity::eve("Bob"))
+        );
+    }
 
     fn test_group(name: &str, characters: &[&str]) -> crate::config::profile::CycleGroup {
         CycleGroup {

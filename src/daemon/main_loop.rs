@@ -137,12 +137,13 @@ fn tracked_source_window_for_window(
 fn active_tracked_source_window(
     ctx: &AppContext<'_>,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
+    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
 ) -> Option<Window> {
     let active_window = crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms)
         .ok()
         .flatten()?;
 
-    tracked_source_window_for_window(ctx, thumbnails, None, active_window)
+    tracked_source_window_for_window(ctx, thumbnails, active_windows, active_window)
 }
 
 enum DaemonControlMessage {
@@ -985,7 +986,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         atoms: &atoms,
         formats: &formats,
     };
-    let active_source_window = active_tracked_source_window(&init_ctx, &eve_clients);
+    let active_source_window = active_tracked_source_window(&init_ctx, &eve_clients, None);
 
     for (window, thumbnail) in eve_clients.iter_mut() {
         // Check if this window currently has focus
@@ -1169,31 +1170,34 @@ fn handle_cycle_command<'a>(
             None
         }
         CycleCommand::ToggleSkip => {
-            // Identify focused window to determine which source to skip.
-            let active_window = active_tracked_source_window(ctx, &resources.eve_clients);
-
-            if let Some(window) = active_window {
-                if let Some(thumbnail) = resources.eve_clients.get_mut(&window) {
-                    let Some(identity) = thumbnail.effective_source_identity() else {
-                        warn!("Cannot toggle skip: Focused window has no source identity");
-                        return None;
-                    };
-                    let is_skipped = resources.cycle.toggle_skip(&identity);
-                    info!(identity = ?identity, skipped = is_skipped, "Toggled skip status");
-
-                    // Force redraw of border to show/hide indicator
-                    let focused = thumbnail.state.is_focused();
-                    let display_config = resources.config.build_display_config();
-                    if let Err(e) =
-                        thumbnail.border(&display_config, focused, is_skipped, font_renderer)
-                    {
-                        warn!(identity = ?identity, error = %e, "Failed to update border after toggle skip");
-                    }
-                } else {
-                    warn!("Focused window not found in client list");
-                }
-            } else {
+            let Some(window) = active_tracked_source_window(
+                ctx,
+                &resources.eve_clients,
+                Some(resources.cycle.get_active_windows()),
+            ) else {
                 warn!("Cannot toggle skip: No tracked window focused");
+                return None;
+            };
+            // Remembered identity remains usable even when logged-out cycling is disabled.
+            let Some(identity) = resources
+                .cycle
+                .identity_for_window(window, Some(&resources.session.window_last_character))
+                .filter(|identity| !identity.name.is_empty())
+            else {
+                warn!("Cannot toggle skip: Focused window has no source identity");
+                return None;
+            };
+            let is_skipped = resources.cycle.toggle_skip(&identity);
+            info!(identity = ?identity, skipped = is_skipped, "Toggled skip status");
+
+            if let Some(thumbnail) = resources.eve_clients.get_mut(&window) {
+                let focused = thumbnail.state.is_focused();
+                let display_config = resources.config.build_display_config();
+                if let Err(e) =
+                    thumbnail.border(&display_config, focused, is_skipped, font_renderer)
+                {
+                    warn!(identity = ?identity, error = %e, "Failed to update border after toggle skip");
+                }
             }
             None
         }
@@ -1213,5 +1217,333 @@ fn handle_cycle_command<'a>(
             });
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Run serially on isolated Xvfb with EPM_X11_TESTS=1 and an outer timeout.
+    use super::*;
+    use crate::common::types::{Dimensions, PreviewMode};
+    use crate::config::profile::{CycleSlot, Profile};
+    use crate::daemon::font::FontRenderer;
+    use crate::x11::CachedFormats;
+    use x11rb::wrapper::ConnectionExt as _;
+
+    fn with_x11(test: impl FnOnce(&AppContext<'_>)) {
+        assert_eq!(
+            std::env::var("EPM_X11_TESTS").as_deref(),
+            Ok("1"),
+            "run display tests with EPM_X11_TESTS=1 under an isolated Xvfb server"
+        );
+        let (conn, screen_number) = x11rb::connect(None).unwrap();
+        let screen = &conn.setup().roots[screen_number];
+        let atoms = CachedAtoms::new(&conn).unwrap();
+        let formats = CachedFormats::new(&conn, screen).unwrap();
+        // Fixture windows belong to this connection and disappear when it closes.
+        test(&AppContext {
+            conn: &conn,
+            screen,
+            atoms: &atoms,
+            formats: &formats,
+        });
+    }
+
+    fn with_daemon<'a>(
+        ctx: &AppContext<'a>,
+        test: impl FnOnce(&mut DaemonResources<'a>, &FontRenderer, &IpcSender<DaemonMessage>),
+    ) {
+        let mut profile = Profile {
+            thumbnail_enabled: false,
+            ..Profile::default()
+        };
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Eve("Alice".into()),
+            CycleSlot::Source("Alice".into()),
+        ];
+        let cycle = CycleState::new(profile.cycle_groups.clone());
+        let config = DaemonConfig {
+            profile,
+            character_thumbnails: HashMap::new(),
+            custom_source_thumbnails: HashMap::new(),
+            profile_hotkeys: HashMap::new(),
+            runtime_hidden: false,
+        };
+        let mut resources = DaemonResources {
+            config,
+            cycle,
+            session: SessionState::new(),
+            eve_clients: HashMap::new(),
+            group_drag: GroupDragState::default(),
+        };
+        let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
+        let (tx, _rx) = ipc::channel().unwrap();
+        test(&mut resources, &font, &tx);
+    }
+
+    fn window(ctx: &AppContext<'_>, parent: Window) -> Window {
+        let id = ctx.conn.generate_id().unwrap();
+        ctx.conn
+            .create_window(
+                ctx.screen.root_depth,
+                id,
+                parent,
+                0,
+                0,
+                400,
+                300,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                ctx.screen.root_visual,
+                &CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        ctx.conn.map_window(id).unwrap().check().unwrap();
+        id
+    }
+
+    fn focus(ctx: &AppContext<'_>, window: Option<Window>) {
+        ctx.conn
+            .change_property32(
+                PropMode::REPLACE,
+                ctx.screen.root,
+                ctx.atoms.net_active_window,
+                AtomEnum::WINDOW,
+                &window.into_iter().collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    fn toggle<'a>(
+        ctx: &AppContext<'a>,
+        resources: &mut DaemonResources<'a>,
+        font: &FontRenderer,
+        tx: &IpcSender<DaemonMessage>,
+    ) {
+        assert_eq!(
+            handle_cycle_command(
+                &CycleCommand::ToggleSkip,
+                resources,
+                ctx,
+                font,
+                tx,
+                &HashMap::new()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn toggle_skip_without_thumbnails() {
+        with_x11(|ctx| {
+            with_daemon(ctx, |resources, font, tx| {
+                let alice = SourceIdentity::eve("Alice");
+                let custom_alice = SourceIdentity::custom("Alice");
+                let eve = window(ctx, ctx.screen.root);
+                let custom = window(ctx, ctx.screen.root);
+                let child = window(ctx, eve);
+                resources.cycle.add_window(Some(alice.clone()), eve);
+                resources
+                    .cycle
+                    .add_window(Some(custom_alice.clone()), custom);
+                assert!(!resources.config.profile.thumbnail_enabled);
+                assert!(resources.eve_clients.is_empty());
+                focus(ctx, Some(eve));
+                toggle(ctx, resources, font, tx);
+                assert!(resources.cycle.is_skipped(Some(&alice)));
+                assert!(!resources.cycle.is_skipped(Some(&custom_alice)));
+                let group = resources.config.profile.cycle_groups[0].name.clone();
+                for _ in 0..3 {
+                    assert_eq!(
+                        resources.cycle.cycle_forward(&group, None, false),
+                        Some((custom, Some(custom_alice.clone())))
+                    );
+                }
+                focus(ctx, Some(child));
+                toggle(ctx, resources, font, tx);
+                assert!(!resources.cycle.is_skipped(Some(&alice)));
+                focus(ctx, Some(custom));
+                toggle(ctx, resources, font, tx);
+                assert!(resources.cycle.is_skipped(Some(&custom_alice)));
+                assert_eq!(
+                    resources.cycle.cycle_forward(&group, None, false),
+                    Some((eve, Some(alice.clone())))
+                );
+                toggle(ctx, resources, font, tx);
+                assert!(!resources.cycle.is_skipped(Some(&custom_alice)));
+
+                // Remembered identity works independently of the logged-out cycling option.
+                resources.config.profile.hotkey_logged_out_cycle = false;
+                resources.cycle.add_window(None, eve);
+                resources
+                    .session
+                    .window_last_character
+                    .insert(eve, "Alice".into());
+                focus(ctx, Some(eve));
+                toggle(ctx, resources, font, tx);
+                assert!(resources.cycle.is_skipped(Some(&alice)));
+                toggle(ctx, resources, font, tx);
+                let bob = SourceIdentity::eve("Bob");
+                resources.cycle.add_window(Some(bob.clone()), eve);
+                toggle(ctx, resources, font, tx);
+                assert!(resources.cycle.is_skipped(Some(&bob)));
+                assert!(!resources.cycle.is_skipped(Some(&alice)));
+                toggle(ctx, resources, font, tx);
+
+                let unknown = window(ctx, ctx.screen.root);
+                resources.cycle.add_window(None, unknown);
+                let untracked = window(ctx, ctx.screen.root);
+                // Stale session data must not identify an untracked window.
+                resources
+                    .session
+                    .window_last_character
+                    .insert(untracked, "Alice".into());
+                for active in [Some(unknown), Some(untracked), None, Some(0)] {
+                    focus(ctx, active);
+                    toggle(ctx, resources, font, tx);
+                    assert!(!resources.cycle.is_skipped(Some(&alice)));
+                    assert!(!resources.cycle.is_skipped(Some(&bob)));
+                    assert!(!resources.cycle.is_skipped(Some(&custom_alice)));
+                }
+                resources
+                    .session
+                    .window_last_character
+                    .insert(unknown, String::new());
+                focus(ctx, Some(unknown));
+                toggle(ctx, resources, font, tx);
+                assert!(
+                    !resources
+                        .cycle
+                        .is_skipped(Some(&SourceIdentity::eve(String::new())))
+                );
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn toggle_skip_preserves_thumbnail_visibility_and_focus_matching() {
+        with_x11(|ctx| {
+            with_daemon(ctx, |resources, font, tx| {
+                resources.config.profile.thumbnail_enabled = true;
+                for identity in [
+                    SourceIdentity::eve("Alice"),
+                    SourceIdentity::custom("Alice"),
+                ] {
+                    let frame = window(ctx, ctx.screen.root);
+                    let src = window(ctx, frame);
+                    resources.cycle.add_window(Some(identity.clone()), src);
+                    let display = resources.config.build_display_config();
+                    let thumbnail = Thumbnail::new(
+                        ctx,
+                        identity.kind,
+                        identity.name.clone(),
+                        None,
+                        src,
+                        &display,
+                        font,
+                        None,
+                        Dimensions::new(160, 100),
+                        PreviewMode::default(),
+                        false,
+                    )
+                    .unwrap();
+                    let preview = thumbnail.window();
+                    assert_eq!(thumbnail.parent(), Some(frame));
+                    resources.eve_clients.insert(src, thumbnail);
+                    for blocked in [false, true] {
+                        resources.config.runtime_hidden = blocked;
+                        resources
+                            .eve_clients
+                            .get_mut(&src)
+                            .unwrap()
+                            .set_visibility_blocked(blocked, &display, font)
+                            .unwrap();
+                        for active in [src, preview, frame] {
+                            focus(ctx, Some(active));
+                            for expected_skip in [true, false] {
+                                toggle(ctx, resources, font, tx);
+                                assert_eq!(
+                                    resources.cycle.is_skipped(Some(&identity)),
+                                    expected_skip
+                                );
+                                assert_eq!(resources.eve_clients[&src].is_visible(), !blocked);
+                                assert_eq!(
+                                    ctx.conn
+                                        .get_window_attributes(preview)
+                                        .unwrap()
+                                        .reply()
+                                        .unwrap()
+                                        .map_state,
+                                    if blocked {
+                                        MapState::UNMAPPED
+                                    } else {
+                                        MapState::VIEWABLE
+                                    }
+                                );
+                                assert_eq!(
+                                    crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms)
+                                        .unwrap(),
+                                    Some(active)
+                                );
+                                assert_eq!(resources.config.runtime_hidden, blocked);
+                            }
+                        }
+                    }
+                    resources.eve_clients.remove(&src);
+                }
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn toggle_skip_survives_border_failure() {
+        with_x11(|ctx| {
+            with_x11(|render_ctx| {
+                with_daemon(render_ctx, |resources, font, tx| {
+                    let identity = SourceIdentity::eve("Alice");
+                    let src = window(ctx, ctx.screen.root);
+                    resources.cycle.add_window(Some(identity.clone()), src);
+                    let display = resources.config.build_display_config();
+                    let thumbnail = Thumbnail::new(
+                        render_ctx,
+                        identity.kind,
+                        identity.name.clone(),
+                        None,
+                        src,
+                        &display,
+                        font,
+                        None,
+                        Dimensions::new(160, 100),
+                        PreviewMode::default(),
+                        false,
+                    )
+                    .unwrap();
+                    // Disconnect only the fixture's rendering client; focus lookup uses the live connection.
+                    ctx.conn
+                        .kill_client(thumbnail.window())
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                    assert!(render_ctx.conn.get_input_focus().unwrap().reply().is_err());
+                    // X11 void requests can buffer after disconnect. Exhaust that buffer
+                    // with bounded writes so the handler sees a synchronous render error.
+                    assert!((0..8192).any(|_| render_ctx.conn.no_operation().is_err()));
+                    assert!(thumbnail.border(&display, false, true, font).is_err());
+                    resources.eve_clients.insert(src, thumbnail);
+                    focus(ctx, Some(src));
+                    toggle(ctx, resources, font, tx);
+                    assert!(resources.cycle.is_skipped(Some(&identity)));
+                    toggle(ctx, resources, font, tx);
+                    assert!(!resources.cycle.is_skipped(Some(&identity)));
+                })
+            })
+        });
     }
 }
