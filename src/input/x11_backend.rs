@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
 use x11rb::connection::Connection;
@@ -86,7 +87,6 @@ impl HotkeyBackend for X11Backend {
 }
 
 /// Main X11 listener loop
-#[allow(unsafe_code)] // Required for libc::poll() system call
 fn run_x11_listener(
     sender: Sender<TimestampedCommand>,
     config: HotkeyConfiguration,
@@ -202,184 +202,184 @@ fn run_x11_listener(
         "X11 hotkeys registered, entering event loop"
     );
 
+    listen_for_hotkeys(
+        &conn,
+        root,
+        sender,
+        hotkey_map,
+        require_eve_focus,
+        allowed_windows,
+    )
+}
+
+fn listen_for_hotkeys(
+    conn: &RustConnection,
+    root: Window,
+    sender: Sender<TimestampedCommand>,
+    hotkey_map: HashMap<(Keycode, ModMask), CycleCommand>,
+    require_eve_focus: bool,
+    allowed_windows: AllowedWindows,
+) -> Result<()> {
     // Track whether hotkeys are currently grabbed
     let mut hotkeys_grabbed = true;
     let mut last_focused_window: Option<Window> = None;
 
-    // Get the raw file descriptor for poll()-based blocking
-    let x11_fd = conn.stream().as_raw_fd();
-
-    // Event loop - block on X11 fd with timeout for focus checking
     loop {
-        // Use poll() to block with 250ms timeout
-        // This gives us:
-        // - Zero CPU usage when idle (thread sleeps in kernel)
-        // - Instant event response (wakes immediately when event arrives)
-        // - Periodic focus checking (every 250ms on timeout)
-        let mut poll_fds = [libc::pollfd {
-            fd: x11_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-
-        // SAFETY: `poll_fds` is a valid pointer to a stack-allocated array of `pollfd`.
-        // The array length is 1, which matches the second argument.
-        // The timeout is 250ms, which is a safe integer value.
-        let poll_result = unsafe { libc::poll(poll_fds.as_mut_ptr(), 1, 250) };
-
-        if poll_result < 0 {
-            return Err(anyhow::anyhow!("poll() failed"));
+        if sender.is_closed() {
+            return Ok(());
         }
+        // Bound event processing so continuous input cannot starve Manager focus checks.
+        let focus_deadline = Instant::now() + Duration::from_millis(250);
+        while let Some(event) = next_event_until(conn, focus_deadline)? {
+            match event {
+                Event::KeyPress(key_event) => {
+                    // If hotkeys are not grabbed, this event shouldn't reach us
+                    // But handle it anyway for robustness
+                    if !hotkeys_grabbed {
+                        conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                        conn.flush()?;
+                        continue;
+                    }
 
-        // Check if X11 events are available
-        if poll_result > 0 && (poll_fds[0].revents & libc::POLLIN) != 0 {
-            // Process all available events (may be multiple)
-            while let Some(event) = conn.poll_for_event()? {
-                match event {
-                    Event::KeyPress(key_event) => {
-                        // If hotkeys are not grabbed, this event shouldn't reach us
-                        // But handle it anyway for robustness
-                        if !hotkeys_grabbed {
-                            conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
-                            conn.flush()?;
-                            continue;
-                        }
+                    // Hotkeys are grabbed, process normally
+                    // Check if we need EVE focus OR Custom Source focus
+                    if require_eve_focus {
+                        let focus_cookie = conn.get_input_focus()?;
+                        match focus_cookie.reply() {
+                            Ok(focus_reply) => {
+                                let mut current = focus_reply.focus;
+                                let mut is_allowed = false;
 
-                        // Hotkeys are grabbed, process normally
-                        // Check if we need EVE focus OR Custom Source focus
-                        if require_eve_focus {
-                            let focus_cookie = conn.get_input_focus()?;
-                            match focus_cookie.reply() {
-                                Ok(focus_reply) => {
-                                    let mut current = focus_reply.focus;
-                                    let mut is_allowed = false;
+                                // Release the allowed-window lock before querying X11 ancestors.
+                                let allowed_set = {
+                                    if let Ok(guard) = allowed_windows.read() {
+                                        guard.clone()
+                                    } else {
+                                        // Lock poisoned?
+                                        std::collections::HashSet::new()
+                                    }
+                                };
 
-                                    // Scope the lock to release it before potentially long X11 ops (though we do X11 ops inside logic)
-                                    // Actually we need to hold the lock while checking, or copy the set.
-                                    // Copying a hashset of u32s is cheap.
-                                    let allowed_set = {
-                                        if let Ok(guard) = allowed_windows.read() {
-                                            guard.clone()
-                                        } else {
-                                            // Lock poisoned?
-                                            std::collections::HashSet::new()
-                                        }
-                                    };
-
-                                    // Walk up the tree up to 5 levels to find if any ancestor is allowed
-                                    // (e.g. FocusProxy -> ... -> RuneLite -> Root)
-                                    // 5 levels is arbitrary but should cover most cases (Proxy -> Window -> Frame -> WM -> Root)
-                                    for _ in 0..5 {
-                                        if allowed_set.contains(&current) {
-                                            is_allowed = true;
-                                            break;
-                                        }
-
-                                        // Stop if we hit root or invalid
-                                        if current == root || current == 0 {
-                                            break;
-                                        }
-
-                                        // Get parent
-                                        if let Ok(tree_cookie) = conn.query_tree(current) {
-                                            if let Ok(tree_reply) = tree_cookie.reply() {
-                                                current = tree_reply.parent;
-                                            } else {
-                                                break;
-                                            }
-                                        } else {
-                                            break;
-                                        }
+                                // Walk up the tree up to 5 levels to find if any ancestor is allowed
+                                // (e.g. FocusProxy -> ... -> RuneLite -> Root)
+                                // 5 levels is arbitrary but should cover most cases (Proxy -> Window -> Frame -> WM -> Root)
+                                for _ in 0..5 {
+                                    if allowed_set.contains(&current) {
+                                        is_allowed = true;
+                                        break;
                                     }
 
-                                    if !is_allowed {
-                                        // Try to get window class/title for debugging
-                                        let window_class =
-                                            get_window_class_sync(&conn, focus_reply.focus)
-                                                .unwrap_or_else(|_| "Unknown".to_string());
-                                        debug!(
-                                            window = focus_reply.focus,
-                                            class = %window_class,
-                                            "Focus required but window (and ancestors) not in allowed set, replaying"
-                                        );
-                                        conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
-                                        conn.flush()?;
-                                        continue;
+                                    // Stop if we hit root or invalid
+                                    if current == root || current == 0 {
+                                        break;
+                                    }
+
+                                    // Get parent
+                                    if let Ok(tree_cookie) = conn.query_tree(current) {
+                                        if let Ok(tree_reply) = tree_cookie.reply() {
+                                            current = tree_reply.parent;
+                                        } else {
+                                            break;
+                                        }
+                                    } else {
+                                        break;
                                     }
                                 }
-                                Err(e) => {
-                                    error!(error = %e, "Failed to get input focus during hotkey check");
-                                    // If we fail to check focus, safe default is to Replay to avoid eating keys
+
+                                if !is_allowed {
+                                    // Try to get window class/title for debugging
+                                    let window_class =
+                                        get_window_class_sync(conn, focus_reply.focus)
+                                            .unwrap_or_else(|_| "Unknown".to_string());
+                                    debug!(
+                                        window = focus_reply.focus,
+                                        class = %window_class,
+                                        "Focus required but window (and ancestors) not in allowed set, replaying"
+                                    );
                                     conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
                                     conn.flush()?;
                                     continue;
                                 }
                             }
-                        }
-
-                        // If we got here, we consume the event.
-                        debug!(keycode = key_event.detail, "Consuming hotkey event");
-                        conn.allow_events(Allow::ASYNC_KEYBOARD, key_event.time)?;
-                        conn.flush()?;
-
-                        // Normalize modifiers (remove NumLock, CapsLock, etc.)
-                        let modmask = normalize_modmask(key_event.state);
-
-                        // Look up the hotkey
-                        if let Some(command) = hotkey_map.get(&(key_event.detail, modmask)) {
-                            debug!(
-                                keycode = key_event.detail,
-                                modmask = ?modmask,
-                                command = ?command,
-                                "Hotkey pressed, sending command"
-                            );
-
-                            let timestamped_command = TimestampedCommand {
-                                command: command.clone(),
-                                timestamp: key_event.time,
-                            };
-
-                            if let Err(e) = sender.blocking_send(timestamped_command) {
-                                error!(error = %e, "Failed to send hotkey command");
+                            Err(e) => {
+                                error!(error = %e, "Failed to get input focus during hotkey check");
+                                // If we fail to check focus, safe default is to Replay to avoid eating keys
+                                conn.allow_events(Allow::REPLAY_KEYBOARD, key_event.time)?;
+                                conn.flush()?;
+                                continue;
                             }
-                        } else {
-                            debug!(
-                                keycode = key_event.detail,
-                                modmask = ?modmask,
-                                "KeyPress event didn't match any registered hotkey"
-                            );
                         }
                     }
-                    Event::MappingNotify(_) => {
-                        // Keyboard mapping changed, we should re-register hotkeys
-                        // For now, just log it - full implementation would rebuild the map
-                        warn!(
-                            "Keyboard mapping changed - hotkeys may not work correctly until restart"
+
+                    // If we got here, we consume the event.
+                    debug!(keycode = key_event.detail, "Consuming hotkey event");
+                    conn.allow_events(Allow::ASYNC_KEYBOARD, key_event.time)?;
+                    conn.flush()?;
+
+                    // Normalize modifiers (remove NumLock, CapsLock, etc.)
+                    let modmask = normalize_modmask(key_event.state);
+
+                    // Look up the hotkey
+                    if let Some(command) = hotkey_map.get(&(key_event.detail, modmask)) {
+                        debug!(
+                            keycode = key_event.detail,
+                            modmask = ?modmask,
+                            command = ?command,
+                            "Hotkey pressed, sending command"
+                        );
+
+                        let timestamped_command = TimestampedCommand {
+                            command: command.clone(),
+                            timestamp: key_event.time,
+                        };
+
+                        // Input is already released. Never block handling the next grab
+                        // while the daemon catches up; retain commands already queued.
+                        match sender.try_send(timestamped_command) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                warn!("Hotkey command queue full; dropping new command");
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        debug!(
+                            keycode = key_event.detail,
+                            modmask = ?modmask,
+                            "KeyPress event didn't match any registered hotkey"
                         );
                     }
-                    _ => {
-                        // Ignore other events
-                    }
+                }
+                Event::MappingNotify(_) => {
+                    // Keyboard mapping changed, we should re-register hotkeys
+                    // For now, just log it - full implementation would rebuild the map
+                    warn!(
+                        "Keyboard mapping changed - hotkeys may not work correctly until restart"
+                    );
+                }
+                _ => {
+                    // Ignore other events
                 }
             }
         }
 
-        // Timeout expired or poll returned - check focus
-        // This runs every 100ms (the poll timeout) when no events are arriving
+        // Recheck Manager focus after each bounded event-processing interval.
         let focus_cookie = conn.get_input_focus()?;
         let focused_window = focus_cookie.reply()?.focus;
 
         // Only check class if focus changed (optimization)
         if last_focused_window != Some(focused_window) {
             last_focused_window = Some(focused_window);
-            let focused_class = get_window_class_sync(&conn, focused_window).unwrap_or_default();
+            let focused_class = get_window_class_sync(conn, focused_window).unwrap_or_default();
             let is_epm_focused = focused_class.eq_ignore_ascii_case("eve-preview-manager");
 
             // If Manager gained focus, ungrab hotkeys
             if is_epm_focused && hotkeys_grabbed {
                 debug!("Manager gained focus, ungrabbing hotkeys to allow normal input");
                 for (keycode, modmask) in hotkey_map.keys() {
-                    ungrab_hotkey(&conn, root, *keycode, *modmask)?;
+                    ungrab_hotkey(conn, root, *keycode, *modmask)?;
                 }
                 hotkeys_grabbed = false;
                 conn.flush()?;
@@ -388,11 +388,43 @@ fn run_x11_listener(
             else if !is_epm_focused && !hotkeys_grabbed {
                 debug!("Manager lost focus, re-grabbing hotkeys");
                 for (keycode, modmask) in hotkey_map.keys() {
-                    register_hotkey(&conn, root, *keycode, *modmask)?;
+                    register_hotkey(conn, root, *keycode, *modmask)?;
                 }
                 hotkeys_grabbed = true;
                 conn.flush()?;
             }
+        }
+    }
+}
+
+/// Drain x11rb's queue before waiting on its socket, up to the next focus check.
+#[allow(unsafe_code)] // Required for libc::poll().
+fn next_event_until(conn: &RustConnection, deadline: Instant) -> Result<Option<Event>> {
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        if let Some(event) = conn.poll_for_event()? {
+            return Ok(Some(event));
+        }
+        let mut fds = [libc::pollfd {
+            fd: conn.stream().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let timeout_ms = (deadline - now).as_millis().clamp(1, i32::MAX as u128) as i32;
+        // SAFETY: fds contains one valid pollfd, matching the supplied count.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, timeout_ms) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("Failed to wait for X11 hotkey input");
+        }
+        if fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            anyhow::bail!("X11 hotkey connection closed while waiting for input");
         }
     }
 }
@@ -451,10 +483,9 @@ fn register_hotkey(
     keycode: Keycode,
     modmask: ModMask,
 ) -> Result<()> {
-    // We must grab the key for every possible combination of "ignored" modifiers
-    // (NumLock, CapsLock, ScrollLock).
+    // Grab each combination of the ignored NumLock (Mod2) and CapsLock modifiers.
     // X11 treats "Ctrl+C" and "Ctrl+C+NumLock" as completely different hotkeys.
-    // By grabbing all permutations, we ensure the hotkey works regardless of Lock key state.
+    // These permutations cover both NumLock and CapsLock states.
     let ignore_masks = [
         ModMask::from(0u16),         // No lock keys
         ModMask::M2,                 // NumLock (Mod2)
@@ -706,6 +737,118 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for X11 input");
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn listener_processes_buffered_hotkeys_and_exits_when_receiver_closes() {
+        for allowed in [false, true] {
+            let test = GrabTest::new();
+            while test.grabber.poll_for_event().unwrap().is_some() {}
+            test.input(KEY_PRESS_EVENT, HOTKEY, 0, 0);
+            // The reply reads the preceding KeyPress into x11rb's queue, emptying the socket.
+            let focus = test
+                .grabber
+                .get_input_focus()
+                .unwrap()
+                .reply()
+                .unwrap()
+                .focus;
+            let allowed_windows = AllowedWindows::default();
+            if allowed {
+                allowed_windows.write().unwrap().insert(focus);
+            }
+            thread::scope(|scope| {
+                // Drop the receiver before joining, including if an input assertion panics.
+                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                let listener = scope.spawn(|| {
+                    listen_for_hotkeys(
+                        &test.grabber,
+                        test.root,
+                        tx,
+                        HashMap::from([((HOTKEY, ModMask::from(0u16)), CycleCommand::ToggleSkip)]),
+                        true,
+                        allowed_windows,
+                    )
+                });
+                if allowed {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let command = loop {
+                        if let Ok(command) = rx.try_recv() {
+                            break command;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "buffered hotkey was not dispatched"
+                        );
+                        thread::sleep(Duration::from_millis(1));
+                    };
+                    assert_eq!(command.command, CycleCommand::ToggleSkip);
+                    assert_ne!(command.timestamp, x11rb::CURRENT_TIME);
+                } else {
+                    assert!(
+                        matches!(next_input(&test.recipient), Event::KeyPress(event) if event.detail == HOTKEY)
+                    );
+                    assert!(rx.try_recv().is_err());
+                }
+                test.input(KEY_RELEASE_EVENT, HOTKEY, 0, 0);
+                if !allowed {
+                    assert!(
+                        matches!(next_input(&test.recipient), Event::KeyRelease(event) if event.detail == HOTKEY)
+                    );
+                }
+                test.input(KEY_PRESS_EVENT, OTHER_KEY, 0, 0);
+                assert!(
+                    matches!(next_input(&test.recipient), Event::KeyPress(event) if event.detail == OTHER_KEY)
+                );
+                test.input(KEY_RELEASE_EVENT, OTHER_KEY, 0, 0);
+                drop(rx);
+                listener.join().unwrap().unwrap();
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn listener_full_command_queue_does_not_freeze_later_grabs() {
+        let test = GrabTest::new();
+        thread::scope(|scope| {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tx.try_send(TimestampedCommand {
+                command: CycleCommand::TogglePreviews,
+                timestamp: 123,
+            })
+            .unwrap();
+            let listener = scope.spawn(|| {
+                listen_for_hotkeys(
+                    &test.grabber,
+                    test.root,
+                    tx,
+                    HashMap::from([((HOTKEY, ModMask::from(0u16)), CycleCommand::ToggleSkip)]),
+                    false,
+                    AllowedWindows::default(),
+                )
+            });
+            // The first dispatch encounters a full queue. The second grab must still be released.
+            for _ in 0..2 {
+                test.input(KEY_PRESS_EVENT, HOTKEY, 0, 0);
+                test.input(KEY_RELEASE_EVENT, HOTKEY, 0, 0);
+            }
+            test.input(KEY_PRESS_EVENT, OTHER_KEY, 0, 0);
+            assert!(
+                matches!(next_input(&test.recipient), Event::KeyPress(event) if event.detail == OTHER_KEY)
+            );
+            test.input(KEY_RELEASE_EVENT, OTHER_KEY, 0, 0);
+            let queued = rx.try_recv().unwrap();
+            assert_eq!(queued.command, CycleCommand::TogglePreviews);
+            assert_eq!(queued.timestamp, 123);
+            assert!(
+                rx.try_recv().is_err(),
+                "new commands must not displace queued work"
+            );
+            drop(rx);
+            listener.join().unwrap().unwrap();
+        });
     }
 
     #[test]
