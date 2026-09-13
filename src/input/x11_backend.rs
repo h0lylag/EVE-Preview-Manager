@@ -470,8 +470,8 @@ fn register_hotkey(
             root,
             effective_modmask,
             keycode,
-            GrabMode::SYNC,  // SYNC to allow ReplayKeyboard decision
-            GrabMode::ASYNC, // Keep mouse processing normal
+            GrabMode::ASYNC, // pointer_mode: keep pointer processing normal
+            GrabMode::SYNC,  // keyboard_mode: allow the ReplayKeyboard decision
         )
         .with_context(|| {
             format!(
@@ -542,7 +542,215 @@ fn evdev_keycode_to_x11(evdev_code: u16) -> Option<Keycode> {
 
 #[cfg(test)]
 mod tests {
+    //! Run display regressions from `nix develop` on an isolated Xvfb server:
+    //!
+    //! ```sh
+    //! cargo test --locked --all-features --no-run
+    //! xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp -noreset" \
+    //!   env EPM_X11_TESTS=1 timeout 60s \
+    //!   cargo test --locked --all-features input::x11_backend::tests -- --ignored --test-threads=1
+    //! ```
+
     use super::*;
+    use std::time::{Duration, Instant};
+    use x11rb::protocol::xtest::ConnectionExt as _;
+
+    const HOTKEY: Keycode = 67; // F1 on Xvfb's evdev mapping
+    const OTHER_KEY: Keycode = 68;
+
+    struct GrabTest {
+        grabber: RustConnection,
+        recipient: RustConnection,
+        root: Window,
+    }
+
+    impl GrabTest {
+        fn new() -> Self {
+            assert_eq!(
+                std::env::var("EPM_X11_TESTS").as_deref(),
+                Ok("1"),
+                "run display tests with EPM_X11_TESTS=1 under an isolated Xvfb server"
+            );
+            let (grabber, screen) = x11rb::connect(None).unwrap();
+            let root = grabber.setup().roots[screen].root;
+            let (recipient, _) = x11rb::connect(None).unwrap();
+            let test = Self {
+                grabber,
+                recipient,
+                root,
+            };
+            let window = test.recipient.generate_id().unwrap();
+            test.recipient
+                .create_window(
+                    x11rb::COPY_DEPTH_FROM_PARENT,
+                    window,
+                    root,
+                    0,
+                    0,
+                    200,
+                    200,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    0,
+                    &CreateWindowAux::new().event_mask(
+                        EventMask::KEY_PRESS
+                            | EventMask::KEY_RELEASE
+                            | EventMask::POINTER_MOTION
+                            | EventMask::BUTTON_PRESS
+                            | EventMask::BUTTON_RELEASE,
+                    ),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            test.recipient.map_window(window).unwrap().check().unwrap();
+            test.recipient
+                .set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+            register_hotkey(&test.grabber, root, HOTKEY, ModMask::from(0u16)).unwrap();
+            // Round trip ensures registration finishes before input from another connection.
+            test.grabber.get_input_focus().unwrap().reply().unwrap();
+            test
+        }
+
+        fn input(&self, event_type: u8, detail: u8, x: i16, y: i16) {
+            self.recipient
+                .xtest_fake_input(event_type, detail, x11rb::CURRENT_TIME, self.root, x, y, 0)
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+
+        fn press_hotkey(&self) -> Timestamp {
+            self.input(KEY_PRESS_EVENT, HOTKEY, 0, 0);
+            let event = next_input(&self.grabber);
+            match event {
+                Event::KeyPress(event) if event.detail == HOTKEY => event.time,
+                event => panic!("expected grabbed hotkey press, got {event:?}"),
+            }
+        }
+
+        fn allow(&self, mode: Allow, timestamp: Timestamp) {
+            self.grabber.allow_events(mode, timestamp).unwrap();
+            self.grabber.flush().unwrap();
+            self.grabber.get_input_focus().unwrap().reply().unwrap();
+        }
+
+        fn assert_pointer_works(&self, coordinate: i16) {
+            self.input(MOTION_NOTIFY_EVENT, 0, coordinate, coordinate);
+            assert!(matches!(
+                next_input(&self.recipient),
+                Event::MotionNotify(event)
+                    if event.root_x == coordinate && event.root_y == coordinate
+            ));
+            self.input(BUTTON_PRESS_EVENT, 1, 0, 0);
+            assert!(matches!(
+                next_input(&self.recipient),
+                Event::ButtonPress(event) if event.detail == 1
+            ));
+            self.input(BUTTON_RELEASE_EVENT, 1, 0, 0);
+            assert!(matches!(
+                next_input(&self.recipient),
+                Event::ButtonRelease(event) if event.detail == 1
+            ));
+        }
+    }
+
+    impl Drop for GrabTest {
+        fn drop(&mut self) {
+            // Release the grab and injected input even when an assertion panics.
+            // Connection teardown also destroys the window and passive grabs.
+            let _ = self.grabber.ungrab_keyboard(x11rb::CURRENT_TIME);
+            let _ = self.grabber.flush();
+            if let Ok(cookie) = self.grabber.get_input_focus() {
+                let _ = cookie.reply();
+            }
+            for (event_type, detail) in [
+                (KEY_RELEASE_EVENT, HOTKEY),
+                (KEY_RELEASE_EVENT, OTHER_KEY),
+                (BUTTON_RELEASE_EVENT, 1),
+            ] {
+                let _ = self.recipient.xtest_fake_input(
+                    event_type,
+                    detail,
+                    x11rb::CURRENT_TIME,
+                    self.root,
+                    0,
+                    0,
+                    0,
+                );
+            }
+            let _ = self.recipient.flush();
+            if let Ok(cookie) = self.recipient.get_input_focus() {
+                let _ = cookie.reply();
+            }
+        }
+    }
+
+    fn next_input(conn: &RustConnection) -> Event {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(event) = conn.poll_for_event().unwrap() {
+                match event {
+                    Event::KeyPress(_)
+                    | Event::KeyRelease(_)
+                    | Event::MotionNotify(_)
+                    | Event::ButtonPress(_)
+                    | Event::ButtonRelease(_) => return event,
+                    Event::Error(error) => panic!("X11 error: {error:?}"),
+                    _ => {}
+                }
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for X11 input");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn rejected_hotkey_is_replayed_to_focused_window() {
+        let test = GrabTest::new();
+        let timestamp = test.press_hotkey();
+        test.allow(Allow::REPLAY_KEYBOARD, timestamp);
+        assert!(matches!(
+            next_input(&test.recipient),
+            Event::KeyPress(event) if event.detail == HOTKEY && event.time == timestamp
+        ));
+        test.input(KEY_RELEASE_EVENT, HOTKEY, 0, 0);
+        assert!(matches!(
+            next_input(&test.recipient),
+            Event::KeyRelease(event) if event.detail == HOTKEY
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn held_hotkey_keeps_pointer_responsive_and_resumes_keyboard() {
+        let test = GrabTest::new();
+        let timestamp = test.press_hotkey();
+        test.assert_pointer_works(30);
+        test.allow(Allow::ASYNC_KEYBOARD, timestamp);
+        test.assert_pointer_works(60);
+
+        test.input(KEY_RELEASE_EVENT, HOTKEY, 0, 0);
+        assert!(matches!(
+            next_input(&test.grabber),
+            Event::KeyRelease(event) if event.detail == HOTKEY
+        ));
+        test.input(KEY_PRESS_EVENT, OTHER_KEY, 0, 0);
+        // The recipient must see only the new key, never the consumed hotkey.
+        assert!(matches!(
+            next_input(&test.recipient),
+            Event::KeyPress(event) if event.detail == OTHER_KEY
+        ));
+        test.input(KEY_RELEASE_EVENT, OTHER_KEY, 0, 0);
+        assert!(matches!(
+            next_input(&test.recipient),
+            Event::KeyRelease(event) if event.detail == OTHER_KEY
+        ));
+    }
 
     #[test]
     fn test_evdev_to_x11_keycode() {

@@ -33,3 +33,6 @@ chrono = "0.4.45"
 flate2 = "1.1.10"
 tar = "0.4.46"
 tempfile = "3.27.0"
+
+[dev-dependencies]
+x11rb = { version = "0.14.0", features = ["xtest"] }
