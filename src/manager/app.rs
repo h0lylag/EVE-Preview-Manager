@@ -452,8 +452,6 @@ impl eframe::App for ManagerApp {
         match action {
             ProfileAction::SwitchProfile(new_idx) => {
                 if state.switch_profile(new_idx) {
-                    let current_profile = &state.config.profiles[state.selected_profile_idx];
-                    self.characters_state.load_from_profile(current_profile);
                     #[cfg(target_os = "linux")]
                     self.update_signal.notify_one();
                 }
@@ -461,6 +459,9 @@ impl eframe::App for ManagerApp {
             ProfileAction::ProfileCreated
             | ProfileAction::ProfileDeleted
             | ProfileAction::ProfileUpdated => {
+                if action == ProfileAction::ProfileDeleted {
+                    state.characters_reload_pending = true;
+                }
                 if let Err(err) = state.save_config(SaveMode::Implicit) {
                     error!(error = ?err, "Failed to save config after profile action");
                     state.status_message = Some(StatusMessage {
@@ -531,6 +532,7 @@ impl eframe::App for ManagerApp {
                             current_profile,
                             &mut self.characters_state,
                             &mut self.hotkey_settings_state,
+                            std::mem::take(&mut state.characters_reload_pending),
                         ) {
                             state.settings_changed = true;
                             state.config_status_message = None;

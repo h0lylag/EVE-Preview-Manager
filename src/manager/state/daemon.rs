@@ -56,11 +56,12 @@ impl SharedState {
             warn!(error = ?err, "Daemon start blocked by invalid configuration");
             self.daemon_status = DaemonStatus::Stopped;
             self.status_message = Some(super::types::StatusMessage {
-                text: format!("Daemon not started: {err}"),
+                text: format!("Daemon not started: {err:#}"),
                 color: STATUS_STOPPED,
             });
             self.config_status_message = Some(super::types::StatusMessage {
-                text: "Fix profile or custom source names before applying".to_string(),
+                text: "Fix profile, cycle-group, or custom source names before applying"
+                    .to_string(),
                 color: COLOR_ERROR,
             });
             return Ok(());
@@ -165,11 +166,20 @@ impl SharedState {
     }
 
     pub fn restart_daemon(&mut self) {
+        if let Err(err) = self.validate_config() {
+            self.status_message = Some(super::types::StatusMessage {
+                text: format!(
+                    "Restart blocked: {err:#}. Repair configuration names before retrying."
+                ),
+                color: COLOR_ERROR,
+            });
+            return;
+        }
         info!("Restart requested");
         if let Err(err) = self.stop_daemon().and_then(|_| self.start_daemon()) {
             error!(error = ?err, "Failed to restart daemon");
             self.status_message = Some(super::types::StatusMessage {
-                text: format!("Restart failed: {err}"),
+                text: format!("Restart failed: {err:#}"),
                 color: STATUS_STOPPED,
             });
         }
@@ -212,7 +222,7 @@ impl SharedState {
             error!(error = %error, "Failed to auto-save thumbnail positions");
             self.pending_position_save = true;
             self.config_status_message = Some(super::StatusMessage {
-                text: format!("Position save failed: {error}"),
+                text: format!("Position save failed: {error:#}"),
                 color: crate::common::constants::manager_ui::COLOR_ERROR,
             });
         } else {
@@ -262,12 +272,12 @@ impl SharedState {
                     let text = if let Some(cleanup_error) = cleanup_error {
                         error!(error = ?cleanup_error, "Failed to clean up daemon after bootstrap failure");
                         self.daemon_status = DaemonStatus::Crashed(None);
-                        format!("Initial config failed: {err}; cleanup failed: {cleanup_error}")
+                        format!("Initial config failed: {err:#}; cleanup failed: {cleanup_error}")
                     } else {
                         if self.daemon_status == DaemonStatus::Starting {
                             self.daemon_status = DaemonStatus::Stopped;
                         }
-                        format!("Initial config failed: {err}")
+                        format!("Initial config failed: {err:#}")
                     };
                     self.status_message = Some(super::types::StatusMessage {
                         text,
@@ -424,6 +434,45 @@ mod tests {
     use crate::common::types::{Dimensions, Position, SourceIdentity};
     use crate::config::profile::Config;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn invalid_cycle_groups_leave_running_daemon_and_ipc_intact() {
+        let mut state = SharedState::new(Config::default(), false);
+        state.config.profiles[0]
+            .cycle_groups
+            .push(crate::config::profile::CycleGroup::default_group());
+        let child = spawn_shell("exec sleep 30");
+        let pid = child.id();
+        state.daemon = Some(child);
+        state.daemon_status = DaemonStatus::Running;
+        state.ipc_healthy = true;
+        let (tx, rx) = ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        state.ipc_config_tx = Some(tx);
+        state.reload_daemon_config();
+        let retained_pid = state.daemon.as_ref().map(Child::id);
+        let still_running = state
+            .daemon
+            .as_mut()
+            .is_some_and(|child| child.try_wait().unwrap().is_none());
+        // Reap the fixture even if the preservation assertions fail.
+        if let Some(mut child) = state.daemon.take() {
+            let _ = child.kill();
+            child.wait().unwrap();
+        }
+        assert_eq!(retained_pid, Some(pid));
+        assert!(still_running);
+        assert_eq!(state.daemon_status, DaemonStatus::Running);
+        assert!(state.ipc_healthy && state.ipc_config_tx.is_some());
+        assert!(rx.try_recv().is_err());
+        assert!(
+            state
+                .status_message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("Default")
+        );
+    }
 
     fn spawn_shell(script: &str) -> Child {
         Command::new("sh")

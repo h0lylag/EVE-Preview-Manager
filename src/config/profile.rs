@@ -526,6 +526,83 @@ impl Profile {
         }
     }
 
+    /// Validate saved names without normalizing or repairing the configuration.
+    pub fn validate_cycle_group_names(&self) -> std::result::Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for group in &self.cycle_groups {
+            let name = group.name.trim();
+            let reason = if name.is_empty() {
+                Some("cannot be empty")
+            } else if name != group.name {
+                Some("has leading or trailing whitespace")
+            } else if !seen.insert(name.to_lowercase()) {
+                Some("duplicates another cycle group name")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(format!(
+                    "Profile '{}': cycle group name '{}' {}",
+                    self.profile_name, group.name, reason
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Commit a trimmed, nonblank name only when no other group uses it.
+    pub fn rename_cycle_group(
+        &mut self,
+        index: usize,
+        candidate: &str,
+    ) -> std::result::Result<bool, String> {
+        let Some(group) = self.cycle_groups.get(index) else {
+            return Err("Cycle group no longer exists".to_string());
+        };
+        let name = candidate.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "Profile '{}': cycle group name cannot be empty",
+                self.profile_name
+            ));
+        }
+        let normalized = name.to_lowercase();
+        if self
+            .cycle_groups
+            .iter()
+            .enumerate()
+            .any(|(other, group)| other != index && group.name.trim().to_lowercase() == normalized)
+        {
+            return Err(format!(
+                "Profile '{}': another cycle group already uses '{}'",
+                self.profile_name, name
+            ));
+        }
+        if group.name == name {
+            return Ok(false);
+        }
+        self.cycle_groups[index].name = name.to_string();
+        Ok(true)
+    }
+
+    /// Generate a display name using the same collision policy as renaming.
+    pub fn unused_cycle_group_name(&self, base: &str) -> String {
+        let base = base.trim();
+        let base = if base.is_empty() { "New Group" } else { base };
+        let used: std::collections::HashSet<_> = self
+            .cycle_groups
+            .iter()
+            .map(|group| group.name.trim().to_lowercase())
+            .collect();
+        let mut name = base.to_string();
+        let mut suffix = 2;
+        while used.contains(&name.to_lowercase()) {
+            name = format!("{base} {suffix}");
+            suffix += 1;
+        }
+        name
+    }
+
     pub fn validate_custom_source_aliases(&self) -> std::result::Result<(), String> {
         let mut seen: HashMap<String, String> = HashMap::new();
 
@@ -713,6 +790,13 @@ impl Config {
         Ok(())
     }
 
+    pub fn validate_cycle_group_names(&self) -> std::result::Result<(), String> {
+        for profile in &self.profiles {
+            profile.validate_cycle_group_names()?;
+        }
+        Ok(())
+    }
+
     pub fn path() -> PathBuf {
         // Allow overriding config directory via env var (for testing isolation)
         if let Ok(dir) = std::env::var("EVE_PREVIEW_MANAGER_CONFIG_DIR") {
@@ -791,6 +875,9 @@ impl Config {
             .map_err(|err| anyhow::anyhow!(err))
             .context("Configuration has invalid profile names")?;
 
+        self.validate_cycle_group_names()
+            .map_err(|err| anyhow::anyhow!(err))?;
+
         let json = serde_json::to_vec_pretty(self).context("Failed to serialize config to JSON")?;
 
         crate::config::write_atomically(config_path, &json)
@@ -812,6 +899,88 @@ impl Default for Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cycle_group_names_validate_and_rename_without_losing_contents() {
+        use super::{CycleGroup, CycleSlot, Profile};
+        let mut profile = Profile::default_with_name("Mining".into(), String::new());
+        profile.cycle_groups[0].name = "Fleet".into();
+        profile.cycle_groups[0].cycle_list = vec![CycleSlot::Eve("Alice".into())];
+        profile.cycle_groups.push(CycleGroup {
+            name: "Other".into(),
+            ..CycleGroup::default_group()
+        });
+        for bad in ["", "  ", "Other", " other ", "OTHER"] {
+            assert!(profile.rename_cycle_group(0, bad).is_err());
+            assert_eq!(profile.cycle_groups[0].name, "Fleet");
+        }
+        assert!(!profile.rename_cycle_group(0, " Fleet ").unwrap());
+        assert!(profile.rename_cycle_group(0, "  Main  Fleet  ").unwrap());
+        assert_eq!(profile.cycle_groups[0].name, "Main  Fleet");
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("Alice".into())]
+        );
+        assert!(profile.rename_cycle_group(99, "Lost").is_err());
+        for bad in ["Main  Fleet", "MAIN  FLEET", "", " ", " Padded", "Padded "] {
+            profile.cycle_groups[1].name = bad.into();
+            let error = profile.validate_cycle_group_names().unwrap_err();
+            assert!(error.contains("Mining"));
+            assert!(error.contains(bad));
+        }
+    }
+
+    #[test]
+    fn cycle_group_names_protect_existing_files_and_allow_reuse_across_profiles() {
+        use super::{Config, CycleGroup, Profile};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config
+            .profiles
+            .push(Profile::default_with_name("Other".into(), String::new()));
+        config.save_to(&path).unwrap(); // Both profiles may contain Default.
+        config.profiles[1]
+            .cycle_groups
+            .push(CycleGroup::default_group());
+        let bytes = serde_json::to_vec_pretty(&config).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(loaded.validate_cycle_group_names().is_err());
+        assert!(loaded.save_to(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(Config::read_from(&path).is_ok());
+    }
+
+    #[test]
+    fn cycle_group_unused_names_respect_normalized_collisions() {
+        use super::{CycleGroup, Profile};
+        let profile = Profile {
+            cycle_groups: [
+                "new group",
+                " New Group 2 ",
+                "Fleet (Copy)",
+                "FLEET (COPY) 2",
+                "Fleet (Copy) 4",
+            ]
+            .into_iter()
+            .map(|name| CycleGroup {
+                name: name.into(),
+                ..CycleGroup::default_group()
+            })
+            .collect(),
+            ..Profile::default()
+        };
+        assert_eq!(
+            profile.unused_cycle_group_name(" New Group "),
+            "New Group 3"
+        );
+        assert_eq!(
+            profile.unused_cycle_group_name("Fleet (Copy)"),
+            "Fleet (Copy) 3"
+        );
+        assert_eq!(profile.unused_cycle_group_name("Other"), "Other");
+    }
+
     #[test]
     fn load_errors_preserve_existing_files() {
         let dir = tempfile::tempdir().unwrap();

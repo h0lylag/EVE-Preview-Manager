@@ -32,16 +32,26 @@ pub fn render_cycle_group_column(
             // Renaming Logic
             if let Some(idx) = state.renaming_group_idx {
                 if idx < profile.cycle_groups.len() {
-                    let text_edit =
-                        egui::TextEdit::singleline(&mut state.rename_buffer).desired_width(120.0);
+                    let text_edit = egui::TextEdit::singleline(&mut state.rename_buffer)
+                        .id_salt("cycle_group_rename")
+                        .desired_width(120.0);
                     let response = ui.add(text_edit);
 
-                    if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        profile.cycle_groups[idx].name = state.rename_buffer.clone();
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         state.renaming_group_idx = None;
-                        *changed = true;
-                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        state.renaming_group_idx = None;
+                        state.rename_buffer.clear();
+                        state.rename_error = None;
+                    } else if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        match profile.rename_cycle_group(idx, &state.rename_buffer) {
+                            Ok(renamed) => {
+                                *changed |= renamed;
+                                state.renaming_group_idx = None;
+                                state.rename_buffer.clear();
+                                state.rename_error = None;
+                            }
+                            Err(error) => state.rename_error = Some(error),
+                        }
                     }
 
                     if !response.has_focus() && state.renaming_group_idx.is_some() {
@@ -49,6 +59,8 @@ pub fn render_cycle_group_column(
                     }
                 } else {
                     state.renaming_group_idx = None;
+                    state.rename_buffer.clear();
+                    state.rename_error = None;
                 }
             } else {
                 // ComboBox Selector
@@ -67,6 +79,7 @@ pub fn render_cycle_group_column(
 
                 // Rename Button
                 if ui.small_button("✏").on_hover_text("Rename Group").clicked() {
+                    state.rename_error = None;
                     state.renaming_group_idx = Some(state.selected_cycle_group_index);
                     state.rename_buffer = profile.cycle_groups[state.selected_cycle_group_index]
                         .name
@@ -82,13 +95,7 @@ pub fn render_cycle_group_column(
                     .clicked()
                 {
                     let mut new_group = crate::config::profile::CycleGroup::default_group();
-                    let mut counter = 1;
-                    let mut name = "New Group".to_string();
-                    while profile.cycle_groups.iter().any(|g| g.name == name) {
-                        counter += 1;
-                        name = format!("New Group {}", counter);
-                    }
-                    new_group.name = name;
+                    new_group.name = profile.unused_cycle_group_name("New Group");
                     profile.cycle_groups.push(new_group);
                     state.selected_cycle_group_index = profile.cycle_groups.len() - 1;
                     *changed = true;
@@ -102,7 +109,8 @@ pub fn render_cycle_group_column(
                 {
                     let mut new_group =
                         profile.cycle_groups[state.selected_cycle_group_index].clone();
-                    new_group.name = format!("{} (Copy)", new_group.name);
+                    new_group.name = profile
+                        .unused_cycle_group_name(&format!("{} (Copy)", new_group.name.trim()));
                     profile.cycle_groups.push(new_group);
                     state.selected_cycle_group_index = profile.cycle_groups.len() - 1;
                     *changed = true;
@@ -128,6 +136,11 @@ pub fn render_cycle_group_column(
             }
         });
 
+        if let Some(error) = &state.rename_error {
+            ui.colored_label(COLOR_ERROR, error);
+        } else if let Err(error) = profile.validate_cycle_group_names() {
+            ui.colored_label(COLOR_ERROR, error);
+        }
         ui.add_space(ITEM_SPACING);
         ui.separator();
         ui.add_space(ITEM_SPACING);
@@ -331,4 +344,190 @@ pub fn render_cycle_group_column(
                 }
             });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::profile::{CycleGroup, CycleSlot};
+
+    fn frame(
+        ctx: &egui::Context,
+        profile: &mut Profile,
+        state: &mut CharactersState,
+        events: Vec<egui::Event>,
+    ) -> (bool, egui::FullOutput) {
+        let mut changed = false;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                render_cycle_group_column(
+                    ui,
+                    profile,
+                    state,
+                    &mut HotkeySettingsState::new(),
+                    &mut changed,
+                );
+            },
+        );
+        output.textures_delta.clear();
+        (changed, output)
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn click(
+        ctx: &egui::Context,
+        profile: &mut Profile,
+        state: &mut CharactersState,
+        label: &str,
+    ) -> bool {
+        frame(ctx, profile, state, vec![]);
+        let (_, output) = frame(ctx, profile, state, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.rect.center().to_vec2())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing button {label}"));
+        frame(
+            ctx,
+            profile,
+            state,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        )
+        .0
+    }
+
+    #[test]
+    fn repeated_cycle_group_copies_keep_contents_and_use_unused_names() {
+        let ctx = egui::Context::default();
+        let mut profile = Profile::default();
+        profile.cycle_groups[0].name = "Fleet".into();
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Eve("Alice".into()),
+            CycleSlot::Source("Browser".into()),
+        ];
+        profile.cycle_groups[0].hotkey_forward = Some(crate::config::HotkeyBinding::new(
+            59, true, false, false, false,
+        ));
+        let original = profile.cycle_groups[0].clone();
+        let mut state = CharactersState::new();
+        for name in ["Fleet (Copy)", "Fleet (Copy) 2", "Fleet (Copy) 3"] {
+            state.selected_cycle_group_index = 0;
+            assert!(click(&ctx, &mut profile, &mut state, "📄 Copy"));
+            let copied = &profile.cycle_groups[state.selected_cycle_group_index];
+            assert_eq!(copied.name, name);
+            let mut expected = original.clone();
+            expected.name = name.into();
+            assert_eq!(
+                serde_json::to_value(copied).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        profile.cycle_groups.push(CycleGroup {
+            name: "new group".into(),
+            ..CycleGroup::default_group()
+        });
+        assert!(click(&ctx, &mut profile, &mut state, "➕ New"));
+        assert_eq!(profile.cycle_groups.last().unwrap().name, "New Group 2");
+    }
+
+    #[test]
+    fn cycle_group_rename_preserves_rejected_drafts_and_cancels_before_submit() {
+        let ctx = egui::Context::default();
+        let mut profile = Profile::default();
+        profile.cycle_groups[0].name = "Fleet".into();
+        profile.cycle_groups.push(CycleGroup {
+            name: "Other".into(),
+            ..CycleGroup::default_group()
+        });
+        let mut state = CharactersState::new();
+        for draft in [" other ", "  "] {
+            state.renaming_group_idx = Some(0);
+            state.rename_buffer = draft.into();
+            frame(&ctx, &mut profile, &mut state, vec![]);
+            let (changed, output) =
+                frame(&ctx, &mut profile, &mut state, vec![key(egui::Key::Enter)]);
+            assert!(!changed);
+            assert_eq!(profile.cycle_groups[0].name, "Fleet");
+            assert_eq!(state.rename_buffer, draft);
+            assert_eq!(state.renaming_group_idx, Some(0));
+            let error = state.rename_error.as_ref().unwrap();
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::epaint::Shape::Text(text) if text.galley.text() == error)));
+        }
+        state.rename_buffer = "New Name".into();
+        assert!(
+            !frame(
+                &ctx,
+                &mut profile,
+                &mut state,
+                vec![key(egui::Key::Enter), key(egui::Key::Escape)]
+            )
+            .0
+        );
+        assert_eq!(profile.cycle_groups[0].name, "Fleet");
+        assert!(state.renaming_group_idx.is_none() && state.rename_error.is_none());
+        assert!(state.rename_buffer.is_empty());
+
+        for (draft, expected, changed) in [
+            (" Fleet ", "Fleet", false),
+            (" Main  Fleet ", "Main  Fleet", true),
+        ] {
+            state.renaming_group_idx = Some(0);
+            state.rename_buffer = draft.into();
+            frame(&ctx, &mut profile, &mut state, vec![]);
+            assert_eq!(
+                frame(&ctx, &mut profile, &mut state, vec![key(egui::Key::Enter)]).0,
+                changed
+            );
+            assert_eq!(profile.cycle_groups[0].name, expected);
+            assert!(state.renaming_group_idx.is_none());
+        }
+        frame(&ctx, &mut profile, &mut state, vec![]);
+        state.renaming_group_idx = Some(0);
+        state.rename_buffer = "Focus Loss".into();
+        frame(&ctx, &mut profile, &mut state, vec![]);
+        frame(&ctx, &mut profile, &mut state, vec![]);
+        let focused = ctx.memory(|memory| memory.focused()).unwrap();
+        ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        assert!(frame(&ctx, &mut profile, &mut state, vec![]).0);
+        assert_eq!(profile.cycle_groups[0].name, "Focus Loss");
+        state.renaming_group_idx = Some(1);
+        state.rename_buffer = "Stale".into();
+        state.rename_error = Some("Old error".into());
+        state.load_from_profile(&Profile::default());
+        assert!(state.renaming_group_idx.is_none() && state.rename_error.is_none());
+        assert!(state.rename_buffer.is_empty());
+    }
 }

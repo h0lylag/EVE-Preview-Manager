@@ -15,6 +15,7 @@ pub struct CharactersState {
     pub(crate) selected_cycle_group_index: usize,
     pub(crate) renaming_group_idx: Option<usize>,
     pub(crate) rename_buffer: String,
+    pub(crate) rename_error: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -36,11 +37,15 @@ impl CharactersState {
             selected_cycle_group_index: 0,
             renaming_group_idx: None,
             rename_buffer: String::new(),
+            rename_error: None,
         }
     }
 
     pub fn load_from_profile(&mut self, _profile: &Profile) {
         self.cached_overrides.clear();
+        self.renaming_group_idx = None;
+        self.rename_buffer.clear();
+        self.rename_error = None;
     }
 }
 
@@ -55,7 +60,11 @@ pub fn ui(
     profile: &mut Profile,
     state: &mut CharactersState,
     hotkey_state: &mut crate::manager::components::hotkey_settings::HotkeySettingsState,
+    profile_reloaded: bool,
 ) -> bool {
+    if profile_reloaded {
+        state.load_from_profile(profile);
+    }
     let mut changed = false;
 
     if state.selected_cycle_group_index >= profile.cycle_groups.len() {
@@ -107,4 +116,61 @@ fn render_two_column_layout(
             },
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::profile::Config;
+    use crate::manager::components::profile_selector::ProfileSelector;
+    use crate::manager::state::SharedState;
+
+    #[test]
+    fn config_reload_cancels_stale_group_rename_only_after_success() {
+        for readable in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let mut saved = Config::default();
+            saved.profiles[0].cycle_groups[0].name = "Restored group".into();
+            saved.save_to(&path).unwrap();
+            if !readable {
+                std::fs::write(&path, b"{broken").unwrap();
+            }
+            let mut shared = SharedState::at_path(Config::default(), &path);
+            let mut editor = CharactersState::new();
+            editor.renaming_group_idx = Some(0);
+            editor.rename_buffer = "Stale draft".into();
+            editor.rename_error = Some("Old error".into());
+            assert_eq!(
+                ProfileSelector::new().reload_config(&mut shared).is_ok(),
+                readable
+            );
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                super::ui(
+                    ui,
+                    &mut shared.config.profiles[0],
+                    &mut editor,
+                    &mut crate::manager::components::hotkey_settings::HotkeySettingsState::new(),
+                    std::mem::take(&mut shared.characters_reload_pending),
+                );
+            });
+            output.textures_delta.clear();
+            if readable {
+                assert!(
+                    editor.renaming_group_idx.is_none(),
+                    "successful reload must cancel the old rename target"
+                );
+                assert!(editor.rename_buffer.is_empty() && editor.rename_error.is_none());
+                assert_eq!(
+                    shared.config.profiles[0].cycle_groups[0].name,
+                    "Restored group"
+                );
+            } else {
+                assert_eq!(editor.renaming_group_idx, Some(0));
+                assert_eq!(editor.rename_buffer, "Stale draft");
+                assert_eq!(editor.rename_error.as_deref(), Some("Old error"));
+            }
+        }
+    }
 }

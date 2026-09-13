@@ -206,6 +206,10 @@ fn initialize_state(
     SessionState,
     CycleState,
 )> {
+    daemon_config
+        .profile
+        .validate_cycle_group_names()
+        .map_err(|err| anyhow::anyhow!(err))?;
     let config = daemon_config.build_display_config();
     debug!("Loaded display configuration");
 
@@ -1229,6 +1233,45 @@ mod tests {
     use crate::daemon::font::FontRenderer;
     use crate::x11::CachedFormats;
     use x11rb::wrapper::ConnectionExt as _;
+
+    #[test]
+    fn cycle_group_startup_rejects_duplicates_and_preserves_distinct_orders() {
+        use crate::config::profile::CycleGroup;
+        let profile = Profile {
+            cycle_groups: [("Fleet", "Alice"), ("Other", "Bob")]
+                .into_iter()
+                .map(|(name, character)| CycleGroup {
+                    name: name.into(),
+                    cycle_list: vec![CycleSlot::Eve(character.into())],
+                    hotkey_forward: None,
+                    hotkey_backward: None,
+                })
+                .collect(),
+            ..Profile::default()
+        };
+        let mut config = DaemonConfig {
+            profile,
+            character_thumbnails: HashMap::new(),
+            custom_source_thumbnails: HashMap::new(),
+            profile_hotkeys: HashMap::new(),
+            runtime_hidden: false,
+        };
+        let (_, _, _, mut cycle) = initialize_state(&Screen::default(), config.clone()).unwrap();
+        cycle.add_window(Some(SourceIdentity::eve("Alice")), 1);
+        cycle.add_window(Some(SourceIdentity::eve("Bob")), 2);
+        assert_eq!(
+            cycle.cycle_forward("Fleet", None, false),
+            Some((1, Some(SourceIdentity::eve("Alice"))))
+        );
+        assert_eq!(
+            cycle.cycle_forward("Other", None, false),
+            Some((2, Some(SourceIdentity::eve("Bob"))))
+        );
+        for invalid in ["Fleet", "fleet", "", " Fleet "] {
+            config.profile.cycle_groups[1].name = invalid.into();
+            assert!(initialize_state(&Screen::default(), config.clone()).is_err());
+        }
+    }
 
     fn with_x11(test: impl FnOnce(&AppContext<'_>)) {
         assert_eq!(

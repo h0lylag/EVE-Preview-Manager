@@ -44,6 +44,8 @@ pub struct SharedState {
     pub config_status_message: Option<StatusMessage>,
     pub settings_changed: bool,
     pub selected_profile_idx: usize,
+    /// Consumed when the Characters editor next renders after a profile replacement.
+    pub characters_reload_pending: bool,
     pub should_quit: bool,
     pub last_save_attempt: Instant,
     pub(super) pending_position_save: bool,
@@ -74,6 +76,10 @@ impl SharedState {
             .validate_profile_names()
             .map_err(|err| anyhow::anyhow!(err))
             .context("Configuration has invalid profile names")?;
+
+        self.config
+            .validate_cycle_group_names()
+            .map_err(|err| anyhow::anyhow!(err))?;
 
         if let Some(profile) = self.config.get_active_profile() {
             profile
@@ -109,6 +115,7 @@ impl SharedState {
             config_status_message: None,
             settings_changed: false,
             selected_profile_idx,
+            characters_reload_pending: false,
             should_quit: false,
             last_save_attempt: Instant::now(),
             pending_position_save: false,
@@ -320,7 +327,7 @@ impl SharedState {
         if let Err(err) = self.validate_config() {
             warn!(error = ?err, "Profile switch blocked by invalid configuration");
             self.status_message = Some(StatusMessage {
-                text: format!("Profile switch blocked: {err}"),
+                text: format!("Profile switch blocked: {err:#}"),
                 color: STATUS_STOPPED,
             });
             return false;
@@ -341,7 +348,7 @@ impl SharedState {
         {
             warn!(error = ?err, "Profile switch blocked by invalid target profile");
             self.status_message = Some(StatusMessage {
-                text: format!("Profile switch blocked: {err}"),
+                text: format!("Profile switch blocked: {err:#}"),
                 color: STATUS_STOPPED,
             });
             return false;
@@ -368,15 +375,16 @@ impl SharedState {
             self.status_message = Some(StatusMessage {
                 text: if let Some(rollback_error) = rollback_error {
                     format!(
-                        "Profile switch failed: {err}; failed to restore previous selection: {rollback_error}"
+                        "Profile switch failed: {err:#}; failed to restore previous selection: {rollback_error}"
                     )
                 } else {
-                    format!("Profile switch failed: {err}")
+                    format!("Profile switch failed: {err:#}")
                 },
                 color: STATUS_STOPPED,
             });
             false
         } else {
+            self.characters_reload_pending = true;
             // Reload daemon with new profile
             self.reload_daemon_config();
             true
@@ -397,6 +405,7 @@ impl SharedState {
     pub fn discard_changes(&mut self) -> Result<()> {
         let config = self.read_config_for_reload()?;
         self.config = config;
+        self.characters_reload_pending = true;
         self.config_load_error = None;
 
         // Re-find selected profile index after reload
@@ -435,6 +444,74 @@ mod tests {
     use super::{SaveMode, SharedState};
     use crate::common::ipc::ConfigMessage;
     use crate::config::profile::{Config, Profile};
+
+    #[test]
+    fn invalid_cycle_group_names_block_saves_and_startup_without_losing_edits() {
+        use crate::config::profile::CycleGroup;
+        use crate::manager::state::DaemonStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config
+            .profiles
+            .push(Profile::default_with_name("Other".into(), String::new()));
+        config.save_to(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut state = SharedState::at_path(config, &path);
+        state.config.profiles[1]
+            .cycle_groups
+            .push(CycleGroup::default_group());
+        state.settings_changed = true;
+        state.pending_position_save = true;
+        state
+            .spatial_dirty_profiles
+            .insert(state.config.profiles[0].profile_name.clone());
+        let snapshot = serde_json::to_value(&state.config).unwrap();
+        let error = state.validate_config().unwrap_err().to_string();
+        assert!(error.contains("Other") && error.contains("Default"));
+        for mode in [
+            SaveMode::Explicit,
+            SaveMode::Implicit,
+            SaveMode::AutoPositions,
+            SaveMode::Positions,
+        ] {
+            assert!(state.persist_config(mode).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(serde_json::to_value(&state.config).unwrap(), snapshot);
+            assert!(state.settings_changed && state.pending_position_save);
+            assert_eq!(state.spatial_dirty_profiles.len(), 1);
+            assert!(state.config_load_error.is_none());
+        }
+        assert!(!state.switch_profile(1));
+        assert_eq!(state.selected_profile_idx, 0);
+        state.start_daemon().unwrap();
+        assert!(state.daemon.is_none());
+        assert_eq!(state.daemon_status, DaemonStatus::Stopped);
+        assert!(
+            state
+                .status_message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("Default")
+        );
+        let (tx, rx) = ipc_channel::ipc::channel().unwrap();
+        state.ipc_config_tx = Some(tx);
+        assert!(state.send_initial_config_to_daemon().is_err());
+        assert!(rx.try_recv().is_err());
+        state.config.profiles[1]
+            .rename_cycle_group(1, "Repaired")
+            .unwrap();
+        state.save_config(SaveMode::Explicit).unwrap();
+        assert!(!state.settings_changed && !state.pending_position_save);
+        assert!(state.spatial_dirty_profiles.is_empty());
+        assert!(
+            Config::read_from(&path)
+                .unwrap()
+                .validate_cycle_group_names()
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_shared_state_initialization() {

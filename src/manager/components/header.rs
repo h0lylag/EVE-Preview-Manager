@@ -122,7 +122,7 @@ pub fn render(
                 if let Err(err) = state.save_config(SaveMode::Explicit) {
                     error!(error = ?err, "Failed to save config");
                     state.status_message = Some(StatusMessage {
-                        text: format!("Save failed: {err}"),
+                        text: format!("Save failed: {err:#}"),
                         color: COLOR_ERROR,
                     });
                 } else {
