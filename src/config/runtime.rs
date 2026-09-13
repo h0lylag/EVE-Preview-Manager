@@ -378,6 +378,49 @@ mod tests {
     }
 
     #[test]
+    fn color_regression_display_config_preserves_zero_alpha_and_fallbacks() {
+        for (input, expected) in [
+            ("#00000000", 0x00000000u32),
+            ("#00FF0000", 0x00FF0000),
+            ("#01123456", 0x01123456),
+            ("#7F123456", 0x7F123456),
+            ("#FF123456", 0xFF123456),
+            ("#123456", 0xFF123456),
+        ] {
+            let mut state = test_config(100, 3, input, 0, 0, input, false, 20);
+            state.profile.thumbnail_inactive_border_color = input.into();
+            let config = state.build_display_config();
+            assert_eq!(config.text_color, expected, "{input}");
+            assert_eq!(
+                config.active_border_color.alpha,
+                ((expected >> 24) * 257) as u16,
+                "{input}"
+            );
+            assert_eq!(
+                config.inactive_border_color.alpha,
+                ((expected >> 24) * 257) as u16,
+                "{input}"
+            );
+        }
+        for input in ["#€ABC", "#€ABCDE", "##123456", "not-a-color", "12345"] {
+            let mut state = test_config(100, 3, input, 0, 0, input, false, 20);
+            state.profile.thumbnail_inactive_border_color = input.into();
+            let config = state.build_display_config();
+            let active = config.active_border_color;
+            assert_eq!(
+                [active.alpha, active.red, active.green, active.blue],
+                [65535, 65535, 0, 0]
+            );
+            assert_eq!(config.text_color, 0xFFFFFFFF);
+            let inactive = config.inactive_border_color;
+            assert_eq!(
+                [inactive.alpha, inactive.red, inactive.green, inactive.blue],
+                [0; 4]
+            );
+        }
+    }
+
+    #[test]
     fn test_build_display_config_valid_colors() {
         let state = test_config(75, 3, "#FF00FF00", 15, 25, "#FFFFFFFF", true, 20);
 

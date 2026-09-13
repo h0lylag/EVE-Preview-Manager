@@ -1089,6 +1089,61 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn static_preview_rejects_malformed_colors_and_recovers() {
+        use crate::common::types::{CharacterSettings, PreviewMode};
+        with_x11(|ctx| {
+            with_sources(ctx, |events, _| {
+                for (title, class, name, custom) in [
+                    ("EVE - Alice", "eve", "Alice", false),
+                    ("YouTube", "browser", "YouTube", true),
+                ] {
+                    let src = window(ctx, title, class);
+                    handle_event(events, create_event(ctx, src)).unwrap();
+                    let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                    let mut display = events.display_config.clone();
+                    for color in [
+                        "#€ABC",
+                        "#€ABCDE",
+                        "#😀12",
+                        "#😀1234",
+                        "##123456",
+                        "1234567",
+                    ] {
+                        let settings = if custom {
+                            &mut display.custom_source_settings
+                        } else {
+                            &mut display.character_settings
+                        };
+                        settings
+                            .entry(name.into())
+                            .or_insert_with(|| CharacterSettings::new(0, 0, 160, 100))
+                            .preview_mode = PreviewMode::Static {
+                            color: color.into(),
+                        };
+                        let error = thumbnail
+                            .update(&display, events.font_renderer)
+                            .unwrap_err();
+                        assert!(error.to_string().contains("Invalid hex color"));
+                        assert!(thumbnail.is_visible());
+                        // A subsequent valid update must still work on the same renderer.
+                        let settings = if custom {
+                            &mut display.custom_source_settings
+                        } else {
+                            &mut display.character_settings
+                        };
+                        settings.get_mut(name).unwrap().preview_mode = PreviewMode::Static {
+                            color: "#00000000".into(),
+                        };
+                        thumbnail.update(&display, events.font_renderer).unwrap();
+                    }
+                    ctx.conn.get_input_focus().unwrap().reply().unwrap();
+                }
+            });
+        });
+    }
+
     fn visibility_config() -> DaemonConfig {
         use crate::common::types::CharacterSettings;
         let mut profile = Profile {

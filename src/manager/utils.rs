@@ -100,29 +100,17 @@ pub fn spawn_daemon(ipc_server_name: &str, debug: bool) -> Result<Child> {
     command.spawn().context("Failed to spawn daemon process")
 }
 
-/// Parse hex color string - supports both #RRGGBB and #AARRGGBB formats.
-/// Returns a Color32 if parsing succeeds, treating 6-digit hex as full-opacity RGB.
+/// Parse six RGB or eight ARGB ASCII hex digits with one optional '#'.
+/// RGB implies full opacity; ARGB supplies alpha. Convert unmultiplied channels
+/// through Color32, preserving the Manager's existing color-picker semantics.
 pub fn parse_hex_color(hex: &str) -> Result<egui::Color32, ()> {
-    let hex = hex.trim_start_matches('#');
-
-    match hex.len() {
-        6 => {
-            // RGB format - assume full opacity
-            let rr = u8::from_str_radix(&hex[0..2], 16).map_err(|_| ())?;
-            let gg = u8::from_str_radix(&hex[2..4], 16).map_err(|_| ())?;
-            let bb = u8::from_str_radix(&hex[4..6], 16).map_err(|_| ())?;
-            Ok(egui::Color32::from_rgba_unmultiplied(rr, gg, bb, 255))
-        }
-        8 => {
-            // ARGB format
-            let aa = u8::from_str_radix(&hex[0..2], 16).map_err(|_| ())?;
-            let rr = u8::from_str_radix(&hex[2..4], 16).map_err(|_| ())?;
-            let gg = u8::from_str_radix(&hex[4..6], 16).map_err(|_| ())?;
-            let bb = u8::from_str_radix(&hex[6..8], 16).map_err(|_| ())?;
-            Ok(egui::Color32::from_rgba_unmultiplied(rr, gg, bb, aa))
-        }
-        _ => Err(()),
-    }
+    let argb = crate::common::color::HexColor::parse(hex)
+        .ok_or(())?
+        .argb32();
+    let [alpha, red, green, blue] = argb.to_be_bytes();
+    Ok(egui::Color32::from_rgba_unmultiplied(
+        red, green, blue, alpha,
+    ))
 }
 
 /// Format egui Color32 to hex string (#AARRGGBB or #RRGGBB)
@@ -139,5 +127,59 @@ pub fn format_hex_color(color: egui::Color32) -> String {
             color.g(),
             color.b()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_regression_manager_rejects_malformed_unicode() {
+        for input in [
+            "#€ABC",
+            "#€ABCDE",
+            "é1234",
+            "é123456",
+            "😀12",
+            "😀1234",
+            "",
+            "#",
+            "##123456",
+            " 123456",
+            "123456 ",
+            "+12345",
+            "+1234567",
+            "12345G",
+            "1234567",
+        ] {
+            assert_eq!(parse_hex_color(input), Err(()), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn color_regression_manager_preserves_unmultiplied_conversion() {
+        for alpha in [0, 1, 127, 255] {
+            let expected = egui::Color32::from_rgba_unmultiplied(0x12, 0x34, 0xAB, alpha);
+            for prefix in ["", "#"] {
+                let input = format!("{prefix}{alpha:02x}1234aB");
+                assert_eq!(parse_hex_color(&input).unwrap(), expected);
+            }
+        }
+        assert_eq!(
+            parse_hex_color("#1234ab").unwrap(),
+            egui::Color32::from_rgb(0x12, 0x34, 0xAB)
+        );
+        assert_eq!(
+            parse_hex_color("00000000").unwrap(),
+            egui::Color32::TRANSPARENT
+        );
+        // Keep the existing formatter's representation of Color32 channels.
+        assert_eq!(
+            format_hex_color(egui::Color32::from_rgb(0x12, 0x34, 0xAB)),
+            "#1234AB"
+        );
+        let premultiplied = egui::Color32::from_rgba_premultiplied(0x12, 0x34, 0x56, 0x7F);
+        assert_eq!(format_hex_color(premultiplied), "#7F123456");
     }
 }

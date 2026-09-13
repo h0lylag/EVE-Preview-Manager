@@ -2,6 +2,7 @@ use crate::common::constants::manager_ui::*;
 use crate::common::types::{Dimensions, Position};
 use crate::config::profile::Profile;
 use crate::manager::key_capture::{PositionPickResult, start_position_pick};
+use crate::manager::utils::{format_hex_color, parse_hex_color};
 use eframe::egui;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
@@ -998,52 +999,38 @@ fn render_position_apply_confirmation(
     changed
 }
 
-/// Parse hex color string - supports both #RRGGBB and #AARRGGBB formats.
-/// Returns a Color32 if parsing succeeds, treating 6-digit hex as full-opacity RGB.
-fn parse_hex_color(hex: &str) -> Result<egui::Color32, ()> {
-    let hex = hex.trim_start_matches('#');
-
-    match hex.len() {
-        6 => {
-            // RGB format - assume full opacity
-            let rr = u8::from_str_radix(&hex[0..2], 16).map_err(|_| ())?;
-            let gg = u8::from_str_radix(&hex[2..4], 16).map_err(|_| ())?;
-            let bb = u8::from_str_radix(&hex[4..6], 16).map_err(|_| ())?;
-            Ok(egui::Color32::from_rgba_unmultiplied(rr, gg, bb, 255))
-        }
-        8 => {
-            // ARGB format
-            let aa = u8::from_str_radix(&hex[0..2], 16).map_err(|_| ())?;
-            let rr = u8::from_str_radix(&hex[2..4], 16).map_err(|_| ())?;
-            let gg = u8::from_str_radix(&hex[4..6], 16).map_err(|_| ())?;
-            let bb = u8::from_str_radix(&hex[6..8], 16).map_err(|_| ())?;
-            Ok(egui::Color32::from_rgba_unmultiplied(rr, gg, bb, aa))
-        }
-        _ => Err(()),
-    }
-}
-
-/// Format egui Color32 to hex string (#AARRGGBB or #RRGGBB)
-fn format_hex_color(color: egui::Color32) -> String {
-    if color.a() == 255 {
-        // Full opacity - use shorter RGB format
-        format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
-    } else {
-        // Has transparency - use ARGB format
-        format!(
-            "#{:02X}{:02X}{:02X}{:02X}",
-            color.a(),
-            color.r(),
-            color.g(),
-            color.b()
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::types::CharacterSettings;
+
+    #[test]
+    fn color_regression_appearance_renders_malformed_color_fields_without_mutation() {
+        for invalid in ["#€ABC", "#€ABCDE", "#😀12", "#😀1234"] {
+            for field in 0..3 {
+                let ctx = egui::Context::default();
+                let mut profile = Profile {
+                    thumbnail_active_border: true,
+                    thumbnail_inactive_border: true,
+                    ..Profile::default()
+                };
+                match field {
+                    0 => profile.thumbnail_active_border_color = invalid.into(),
+                    1 => profile.thumbnail_inactive_border_color = invalid.into(),
+                    _ => profile.thumbnail_text_color = invalid.into(),
+                }
+                let before = serde_json::to_value(&profile).unwrap();
+                let mut state = VisualSettingsState::default();
+                for _ in 0..2 {
+                    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                        assert!(!super::ui(ui, &mut profile, &mut state));
+                    });
+                    output.textures_delta.clear();
+                }
+                assert_eq!(serde_json::to_value(&profile).unwrap(), before);
+            }
+        }
+    }
 
     #[test]
     fn saved_preview_reset_target_uses_custom_position_when_enabled() {

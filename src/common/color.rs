@@ -1,7 +1,7 @@
 //! Color type conversions and utilities
 //!
 //! Provides type-safe color handling with conversions between:
-//! - Hex strings (#AARRGGBB format)
+//! - Hex strings (#RRGGBB or #AARRGGBB format)
 //! - ARGB32 values (u32)
 //! - X11 render Colors (16-bit per channel)
 //! - Premultiplied ARGB32 (for text rendering)
@@ -13,23 +13,20 @@ use x11rb::protocol::render::Color;
 pub struct HexColor(u32);
 
 impl HexColor {
-    /// Parse hex color string supporting multiple formats:
-    /// - 6 digits: RRGGBB (full opacity assumed, becomes FFRRGGBB)
-    /// - 8 digits: AARRGGBB (explicit alpha)
-    /// - Optional '#' prefix supported but not required
+    /// Parse exactly six (RRGGBB) or eight (AARRGGBB) ASCII hex digits,
+    /// with one optional '#' prefix. RGB implies full opacity; ARGB preserves
+    /// explicit alpha, including zero. Whitespace and other syntax are rejected.
     pub fn parse(hex: &str) -> Option<Self> {
         let hex = hex.strip_prefix('#').unwrap_or(hex);
+        if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
         let value = u32::from_str_radix(hex, 16).ok()?;
-
-        // If 6 digits (RRGGBB), prepend full opacity (FF)
-        // Check if value fits in 24 bits (max 0xFFFFFF)
-        let argb = if value <= 0xFF_FF_FF {
-            0xFF_00_00_00 | value // Prepend FF for full opacity
+        Some(Self(if hex.len() == 6 {
+            0xFF_00_00_00 | value
         } else {
-            value // Already has alpha channel
-        };
-
-        Some(Self(argb))
+            value
+        }))
     }
 
     /// Create from ARGB32 value
@@ -113,6 +110,58 @@ impl Opacity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_regression_explicit_alpha_is_selected_by_digit_count() {
+        for (input, expected) in [
+            ("000000", 0xFF000000),
+            ("123aBc", 0xFF123ABC),
+            ("00000000", 0x00000000),
+            ("00FF0000", 0x00FF0000),
+            ("01123aBc", 0x01123ABC),
+            ("7f123aBc", 0x7F123ABC),
+            ("FF123aBc", 0xFF123ABC),
+        ] {
+            for prefix in ["", "#"] {
+                let color = HexColor::parse(&format!("{prefix}{input}")).unwrap();
+                assert_eq!(color.argb32(), expected, "{prefix}{input}");
+                assert_eq!(color.to_x11_color().alpha, ((expected >> 24) * 257) as u16);
+            }
+        }
+    }
+
+    #[test]
+    fn color_regression_rejects_unsupported_syntax() {
+        for input in [
+            "#€ABC",
+            "#€ABCDE",
+            "é1234",
+            "é123456",
+            "😀12",
+            "😀1234",
+            "",
+            "#",
+            "##123456",
+            "##12345678",
+            "12345G",
+            "G0123456",
+            " 123456",
+            "123456 ",
+            "#123456\n",
+            "+12345",
+            "+1234567",
+            "-12345",
+            "0x123456",
+            "0",
+            "FFF",
+            "12345",
+            "1234567",
+            "000000000",
+            "0000000000",
+        ] {
+            assert_eq!(HexColor::parse(input), None, "{input:?}");
+        }
+    }
 
     #[test]
     fn test_hex_color_parsing() {
