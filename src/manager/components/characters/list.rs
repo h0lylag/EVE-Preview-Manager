@@ -526,7 +526,7 @@ mod tests {
         state.renaming_group_idx = Some(1);
         state.rename_buffer = "Stale".into();
         state.rename_error = Some("Old error".into());
-        state.load_from_profile(&Profile::default());
+        state.reset();
         assert!(state.renaming_group_idx.is_none() && state.rename_error.is_none());
         assert!(state.rename_buffer.is_empty());
     }

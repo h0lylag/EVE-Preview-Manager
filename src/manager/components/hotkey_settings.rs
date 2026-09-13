@@ -36,6 +36,24 @@ pub struct HotkeySettingsState {
 }
 
 impl HotkeySettingsState {
+    #[cfg(test)]
+    pub(crate) fn pending_capture_for_test(custom_rule: bool) -> (Self, Receiver<()>) {
+        let mut state = Self::new();
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+        state.cancel_capture_tx = Some(cancel_tx);
+        state.show_key_capture_dialog = true;
+        state.capture_target = Some(if custom_rule {
+            CaptureTarget::CustomRule(0)
+        } else {
+            CaptureTarget::Character("GROUP:0:FWD".into())
+        });
+        // Model a completed capture awaiting Accept, without grabbing desktop input.
+        state.capture_result = Some(CaptureResult::Captured(crate::config::HotkeyBinding::new(
+            59, false, false, false, false,
+        )));
+        (state, cancel_rx)
+    }
+
     pub fn new() -> Self {
         // Load available input devices at Manager startup
         let (available_devices, device_load_error) = match crate::daemon::list_input_devices() {
@@ -88,7 +106,7 @@ impl HotkeySettingsState {
     }
 
     /// Cancel ongoing key capture
-    fn cancel_capture(&mut self) {
+    pub(crate) fn cancel_capture(&mut self) {
         if let Some(tx) = self.cancel_capture_tx.take() {
             let _ = tx.send(());
         }
@@ -98,6 +116,7 @@ impl HotkeySettingsState {
         self.capture_result_rx = None;
         self.current_capture_state = None;
         self.capture_result = None;
+        self.capture_error = None;
     }
 
     /// Public method for starting EVE character-specific hotkey capture.

@@ -24,6 +24,7 @@ pub enum SaveMode {
     /// Implicit save (e.g. Exit, Settings Change).
     /// Saves settings but REVERTS window positions to their last saved state
     /// if "Auto-Save" is disabled for the profile.
+    /// New or renamed identities without a saved match retain their current geometry.
     Implicit,
     /// Save only spatial fields for profiles with pending automatic position saves.
     AutoPositions,
@@ -44,8 +45,8 @@ pub struct SharedState {
     pub config_status_message: Option<StatusMessage>,
     pub settings_changed: bool,
     pub selected_profile_idx: usize,
-    /// Consumed when the Characters editor next renders after a profile replacement.
-    pub characters_reload_pending: bool,
+    /// Consumed before profile editors render after a successful profile replacement.
+    pub profile_editors_reload_pending: bool,
     pub should_quit: bool,
     pub last_save_attempt: Instant,
     pub(super) pending_position_save: bool,
@@ -115,7 +116,7 @@ impl SharedState {
             config_status_message: None,
             settings_changed: false,
             selected_profile_idx,
-            characters_reload_pending: false,
+            profile_editors_reload_pending: false,
             should_quit: false,
             last_save_attempt: Instant::now(),
             pending_position_save: false,
@@ -308,7 +309,7 @@ impl SharedState {
         // the daemon; live position acknowledgements use ConfigMessage::ThumbnailMoves.
         config_to_save.save_to(&self.config_path)?;
 
-        // Re-sync selected_profile_idx with the potentially reloaded profile list
+        // Keep the selected index aligned with the in-memory selected profile name.
         self.selected_profile_idx = self
             .config
             .profiles
@@ -384,7 +385,7 @@ impl SharedState {
             });
             false
         } else {
-            self.characters_reload_pending = true;
+            self.profile_editors_reload_pending = true;
             // Reload daemon with new profile
             self.reload_daemon_config();
             true
@@ -405,7 +406,7 @@ impl SharedState {
     pub fn discard_changes(&mut self) -> Result<()> {
         let config = self.read_config_for_reload()?;
         self.config = config;
-        self.characters_reload_pending = true;
+        self.profile_editors_reload_pending = true;
         self.config_load_error = None;
 
         // Re-find selected profile index after reload

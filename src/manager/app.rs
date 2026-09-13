@@ -275,19 +275,12 @@ impl ManagerApp {
             });
         });
 
-        let selected_profile_idx = config
-            .profiles
-            .iter()
-            .position(|p| p.profile_name == config.global.selected_profile)
-            .unwrap_or(0);
-
         let behavior_settings_state =
             components::behavior_settings::BehaviorSettingsState::default();
         let hotkey_settings_state = components::hotkey_settings::HotkeySettingsState::default();
         let visual_settings_state = components::visual_settings::VisualSettingsState::default();
 
-        let mut characters_state = components::characters::CharactersState::default();
-        characters_state.load_from_profile(&config.profiles[selected_profile_idx]);
+        let characters_state = components::characters::CharactersState::default();
 
         #[cfg(target_os = "linux")]
         let app = Self {
@@ -323,6 +316,17 @@ impl ManagerApp {
 }
 
 impl ManagerApp {
+    fn reset_profile_editors(
+        pending: &mut bool,
+        characters: &mut components::characters::CharactersState,
+        hotkeys: &mut components::hotkey_settings::HotkeySettingsState,
+    ) {
+        if std::mem::take(pending) {
+            characters.reset();
+            hotkeys.cancel_capture();
+        }
+    }
+
     fn reload_restored_config(
         state: &mut SharedState,
         behavior: &mut components::behavior_settings::BehaviorSettingsState,
@@ -460,7 +464,7 @@ impl eframe::App for ManagerApp {
             | ProfileAction::ProfileDeleted
             | ProfileAction::ProfileUpdated => {
                 if action == ProfileAction::ProfileDeleted {
-                    state.characters_reload_pending = true;
+                    state.profile_editors_reload_pending = true;
                 }
                 if let Err(err) = state.save_config(SaveMode::Implicit) {
                     error!(error = ?err, "Failed to save config after profile action");
@@ -476,6 +480,13 @@ impl eframe::App for ManagerApp {
             }
             ProfileAction::None => {}
         }
+
+        // Cancel old profile targets before any tab can consume them, including hotkey captures.
+        Self::reset_profile_editors(
+            &mut state.profile_editors_reload_pending,
+            &mut self.characters_state,
+            &mut self.hotkey_settings_state,
+        );
 
         // Main Content Body
         egui::CentralPanel::default().show(root_ui, |ui| {
@@ -532,7 +543,6 @@ impl eframe::App for ManagerApp {
                             current_profile,
                             &mut self.characters_state,
                             &mut self.hotkey_settings_state,
-                            std::mem::take(&mut state.characters_reload_pending),
                         ) {
                             state.settings_changed = true;
                             state.config_status_message = None;
@@ -989,5 +999,111 @@ mod tests {
         let output = run_logic(&mut app, false);
 
         assert!(root_commands(&output).contains(&egui::ViewportCommand::Close));
+    }
+    #[test]
+    fn profile_reload_cancels_pending_hotkey_targets_before_other_tabs_render() {
+        for custom_rule in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let saved = Config::default();
+            saved.save_to(&path).unwrap();
+            let mut state = SharedState::at_path(saved, &path);
+            let mut characters = components::characters::CharactersState::new();
+            let (mut hotkeys, cancelled) =
+                components::hotkey_settings::HotkeySettingsState::pending_capture_for_test(
+                    custom_rule,
+                );
+            assert!(hotkeys.is_dialog_open());
+            std::fs::write(&path, b"{broken").unwrap();
+            assert!(ProfileSelector::new().reload_config(&mut state).is_err());
+            ManagerApp::reset_profile_editors(
+                &mut state.profile_editors_reload_pending,
+                &mut characters,
+                &mut hotkeys,
+            );
+            assert!(
+                hotkeys.is_dialog_open(),
+                "failed reload must retain the pending capture"
+            );
+            assert!(cancelled.try_recv().is_err());
+            state.config.save_to(&path).unwrap();
+            ProfileSelector::new().reload_config(&mut state).unwrap();
+            ManagerApp::reset_profile_editors(
+                &mut state.profile_editors_reload_pending,
+                &mut characters,
+                &mut hotkeys,
+            );
+            assert!(!hotkeys.is_dialog_open());
+            assert!(cancelled.try_recv().is_ok());
+            assert!(!state.profile_editors_reload_pending);
+        }
+    }
+
+    #[test]
+    fn config_reload_cancels_pending_group_operations_only_after_success() {
+        for readable in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let mut saved = Config::default();
+            saved.profiles[0].cycle_groups[0].name = "Restored group".into();
+            saved.save_to(&path).unwrap();
+            if !readable {
+                std::fs::write(&path, b"{broken").unwrap();
+            }
+            let mut shared = SharedState::at_path(Config::default(), &path);
+            let mut editor = components::characters::CharactersState::new();
+            editor.show_add_characters_popup = true;
+            editor.character_selections.insert(
+                crate::config::profile::CycleSlot::Eve("Old profile character".into()),
+                true,
+            );
+            editor.renaming_group_idx = Some(0);
+            editor.rename_buffer = "Stale draft".into();
+            editor.rename_error = Some("Old error".into());
+            assert_eq!(
+                ProfileSelector::new().reload_config(&mut shared).is_ok(),
+                readable
+            );
+            let mut hotkeys = components::hotkey_settings::HotkeySettingsState::new();
+            ManagerApp::reset_profile_editors(
+                &mut shared.profile_editors_reload_pending,
+                &mut editor,
+                &mut hotkeys,
+            );
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                components::characters::ui(
+                    ui,
+                    &mut shared.config.profiles[0],
+                    &mut editor,
+                    &mut hotkeys,
+                );
+            });
+            output.textures_delta.clear();
+            if readable {
+                assert!(!editor.show_add_characters_popup);
+                assert!(editor.character_selections.is_empty());
+                assert!(
+                    shared.config.profiles[0].cycle_groups[0]
+                        .cycle_list
+                        .is_empty()
+                );
+                assert!(
+                    editor.renaming_group_idx.is_none(),
+                    "successful reload must cancel the old rename target"
+                );
+                assert!(editor.rename_buffer.is_empty() && editor.rename_error.is_none());
+                assert_eq!(
+                    shared.config.profiles[0].cycle_groups[0].name,
+                    "Restored group"
+                );
+            } else {
+                assert!(editor.show_add_characters_popup);
+                assert_eq!(editor.character_selections.len(), 1);
+                assert_eq!(editor.renaming_group_idx, Some(0));
+                assert_eq!(editor.rename_buffer, "Stale draft");
+                assert_eq!(editor.rename_error.as_deref(), Some("Old error"));
+            }
+        }
     }
 }
