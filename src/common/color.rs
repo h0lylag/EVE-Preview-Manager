@@ -66,24 +66,6 @@ impl HexColor {
     }
 }
 
-/// Convert HEX string to egui::Color32
-pub fn hex_to_color32(hex: &str) -> Option<egui::Color32> {
-    let color = HexColor::parse(hex)?;
-    let a = (color.0 >> 24) & 0xFF;
-    let r = (color.0 >> 16) & 0xFF;
-    let g = (color.0 >> 8) & 0xFF;
-    let b = color.0 & 0xFF;
-    Some(egui::Color32::from_rgba_premultiplied(
-        r as u8, g as u8, b as u8, a as u8,
-    ))
-}
-
-/// Convert egui::Color32 to HEX string (#AARRGGBB)
-pub fn color32_to_hex(color: egui::Color32) -> String {
-    let [r, g, b, a] = color.to_array();
-    format!("#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
-}
-
 /// Opacity as percentage (0-100)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opacity(u8);

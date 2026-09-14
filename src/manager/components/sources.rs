@@ -1,3 +1,4 @@
+use super::color_edit;
 use crate::config::profile::CustomWindowRule;
 use crate::manager::x11_utils::{WindowInfo, get_running_applications};
 use egui::{ScrollArea, Ui};
@@ -257,28 +258,10 @@ impl SourcesTab {
                                             ui.indent("active_border_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let color = rule
-                                                        .active_border_color
-                                                        .clone()
-                                                        .unwrap_or_else(|| {
-                                                            profile
-                                                                .thumbnail_active_border_color
-                                                                .clone()
-                                                        });
-                                                    let mut egui_color =
-                                                        crate::common::color::hex_to_color32(
-                                                            &color,
-                                                        )
-                                                        .unwrap_or(egui::Color32::WHITE);
-                                                    if ui
-                                                        .color_edit_button_srgba(&mut egui_color)
-                                                        .changed()
-                                                    {
-                                                        rule.active_border_color = Some(
-                                                            crate::common::color::color32_to_hex(
-                                                                egui_color,
-                                                            ),
-                                                        );
+                                                    let mut color = rule.active_border_color.clone()
+                                                        .unwrap_or_else(|| profile.thumbnail_active_border_color.clone());
+                                                    if color_edit::ui(ui, &mut color) {
+                                                        rule.active_border_color = Some(color);
                                                         changed = true;
                                                     }
                                                 });
@@ -330,28 +313,10 @@ impl SourcesTab {
                                             ui.indent("inactive_border_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let color = rule
-                                                        .inactive_border_color
-                                                        .clone()
-                                                        .unwrap_or_else(|| {
-                                                            profile
-                                                                .thumbnail_inactive_border_color
-                                                                .clone()
-                                                        });
-                                                    let mut egui_color =
-                                                        crate::common::color::hex_to_color32(
-                                                            &color,
-                                                        )
-                                                        .unwrap_or(egui::Color32::WHITE);
-                                                    if ui
-                                                        .color_edit_button_srgba(&mut egui_color)
-                                                        .changed()
-                                                    {
-                                                        rule.inactive_border_color = Some(
-                                                            crate::common::color::color32_to_hex(
-                                                                egui_color,
-                                                            ),
-                                                        );
+                                                    let mut color = rule.inactive_border_color.clone()
+                                                        .unwrap_or_else(|| profile.thumbnail_inactive_border_color.clone());
+                                                    if color_edit::ui(ui, &mut color) {
+                                                        rule.inactive_border_color = Some(color);
                                                         changed = true;
                                                     }
                                                 });
@@ -393,21 +358,7 @@ impl SourcesTab {
                                             ui.indent("text_color_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let mut egui_color =
-                                                        crate::common::color::hex_to_color32(
-                                                            color_hex,
-                                                        )
-                                                        .unwrap_or(egui::Color32::WHITE);
-                                                    if ui
-                                                        .color_edit_button_srgba(&mut egui_color)
-                                                        .changed()
-                                                    {
-                                                        *color_hex =
-                                                            crate::common::color::color32_to_hex(
-                                                                egui_color,
-                                                            );
-                                                        changed = true;
-                                                    }
+                                                    changed |= color_edit::ui(ui, color_hex);
                                                 });
                                             });
                                         }
@@ -446,31 +397,7 @@ impl SourcesTab {
                                             ui.indent("static_mode_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let mut color_str = color.clone();
-                                                    let text_edit =
-                                                        egui::TextEdit::singleline(&mut color_str)
-                                                            .desired_width(100.0);
-
-                                                    if ui.add(text_edit).changed() {
-                                                        *color = color_str.clone();
-                                                        changed = true;
-                                                    }
-
-                                                    if let Ok(mut c) =
-                                                        crate::manager::utils::parse_hex_color(
-                                                            &color_str,
-                                                        )
-                                                        && ui
-                                                            .color_edit_button_srgba(&mut c)
-                                                            .changed()
-                                                    {
-                                                        let new_hex =
-                                                            crate::manager::utils::format_hex_color(
-                                                                c,
-                                                            );
-                                                        *color = new_hex;
-                                                        changed = true;
-                                                    }
+                                                    changed |= color_edit::ui(ui, color);
                                                 });
                                             });
                                         }

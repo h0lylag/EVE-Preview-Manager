@@ -102,7 +102,7 @@ pub fn spawn_daemon(ipc_server_name: &str, debug: bool) -> Result<Child> {
 
 /// Parse six RGB or eight ARGB ASCII hex digits with one optional '#'.
 /// RGB implies full opacity; ARGB supplies alpha. Convert unmultiplied channels
-/// through Color32, preserving the Manager's existing color-picker semantics.
+/// through Color32 for static-preview rendering.
 pub fn parse_hex_color(hex: &str) -> Result<egui::Color32, ()> {
     let argb = crate::common::color::HexColor::parse(hex)
         .ok_or(())?
@@ -111,23 +111,6 @@ pub fn parse_hex_color(hex: &str) -> Result<egui::Color32, ()> {
     Ok(egui::Color32::from_rgba_unmultiplied(
         red, green, blue, alpha,
     ))
-}
-
-/// Format egui Color32 to hex string (#AARRGGBB or #RRGGBB)
-pub fn format_hex_color(color: egui::Color32) -> String {
-    if color.a() == 255 {
-        // Full opacity - use shorter RGB format
-        format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
-    } else {
-        // Has transparency - use ARGB format
-        format!(
-            "#{:02X}{:02X}{:02X}{:02X}",
-            color.a(),
-            color.r(),
-            color.g(),
-            color.b()
-        )
-    }
 }
 
 #[cfg(test)]
@@ -174,12 +157,5 @@ mod tests {
             parse_hex_color("00000000").unwrap(),
             egui::Color32::TRANSPARENT
         );
-        // Keep the existing formatter's representation of Color32 channels.
-        assert_eq!(
-            format_hex_color(egui::Color32::from_rgb(0x12, 0x34, 0xAB)),
-            "#1234AB"
-        );
-        let premultiplied = egui::Color32::from_rgba_premultiplied(0x12, 0x34, 0x56, 0x7F);
-        assert_eq!(format_hex_color(premultiplied), "#7F123456");
     }
 }

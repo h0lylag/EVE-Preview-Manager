@@ -1,8 +1,8 @@
+use super::color_edit;
 use crate::common::constants::manager_ui::*;
 use crate::common::types::{Dimensions, Position};
 use crate::config::profile::Profile;
 use crate::manager::key_capture::{PositionPickResult, start_position_pick};
-use crate::manager::utils::{format_hex_color, parse_hex_color};
 use eframe::egui;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
@@ -199,19 +199,7 @@ fn render_visual_controls(
                 ui.add_enabled_ui(profile.thumbnail_active_border, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Color:");
-                        let text_edit =
-                            egui::TextEdit::singleline(&mut profile.thumbnail_active_border_color)
-                                .desired_width(100.0);
-                        if ui.add(text_edit).changed() {
-                            changed = true;
-                        }
-
-                        // Color picker button
-                        if let Ok(mut color) =
-                            parse_hex_color(&profile.thumbnail_active_border_color)
-                            && ui.color_edit_button_srgba(&mut color).changed()
-                        {
-                            profile.thumbnail_active_border_color = format_hex_color(color);
+                        if color_edit::ui(ui, &mut profile.thumbnail_active_border_color) {
                             changed = true;
                         }
                     });
@@ -247,19 +235,7 @@ fn render_visual_controls(
                 ui.add_enabled_ui(profile.thumbnail_inactive_border, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Color:");
-                        let text_edit = egui::TextEdit::singleline(
-                            &mut profile.thumbnail_inactive_border_color,
-                        )
-                        .desired_width(100.0);
-                        if ui.add(text_edit).changed() {
-                            changed = true;
-                        }
-
-                        if let Ok(mut color) =
-                            parse_hex_color(&profile.thumbnail_inactive_border_color)
-                            && ui.color_edit_button_srgba(&mut color).changed()
-                        {
-                            profile.thumbnail_inactive_border_color = format_hex_color(color);
+                        if color_edit::ui(ui, &mut profile.thumbnail_inactive_border_color) {
                             changed = true;
                         }
                     });
@@ -312,17 +288,7 @@ fn render_visual_controls(
 
             ui.horizontal(|ui| {
                 ui.label("Text Color:");
-                let text_edit = egui::TextEdit::singleline(&mut profile.thumbnail_text_color)
-                    .desired_width(100.0);
-                if ui.add(text_edit).changed() {
-                    changed = true;
-                }
-
-                // Color picker button
-                if let Ok(mut color) = parse_hex_color(&profile.thumbnail_text_color)
-                    && ui.color_edit_button_srgba(&mut color).changed()
-                {
-                    profile.thumbnail_text_color = format_hex_color(color);
+                if color_edit::ui(ui, &mut profile.thumbnail_text_color) {
                     changed = true;
                 }
             });
