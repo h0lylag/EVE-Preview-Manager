@@ -29,11 +29,12 @@ pub enum CycleCommand {
     TogglePreviews,
 }
 
-/// A wrapper around CycleCommand that includes the timestamp of the input event
+/// A wrapper around CycleCommand that includes an X server timestamp for user activity
 #[derive(Debug, Clone)]
 pub struct TimestampedCommand {
     pub command: CycleCommand,
-    /// X11-compatible timestamp (milliseconds)
+    /// X server time in milliseconds, wrapping at 32 bits; never Unix time.
+    /// X11 input uses event time; evdev samples server time when handling the hotkey.
     pub timestamp: u32,
 }
 

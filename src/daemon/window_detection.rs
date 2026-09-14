@@ -119,13 +119,13 @@ pub fn identify_window(
     // Add identity notifications without dropping this connection's existing
     // subscriptions. A tracked custom source may take the refresh path without
     // reinstalling its focus/structure mask during thumbnail creation.
-    let event_mask = match ctx
+    let attributes = match ctx
         .conn
         .get_window_attributes(window)
         .context(format!("Failed to query event mask for {}", window))?
         .reply()
     {
-        Ok(attributes) => attributes.your_event_mask,
+        Ok(attributes) => attributes,
         Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => {
             return Ok(None);
         }
@@ -133,6 +133,13 @@ pub fn identify_window(
             return Err(error).context(format!("Failed to read event mask for {}", window));
         }
     };
+    // InputOnly windows (including evdev's timestamp helper) have no drawable
+    // content and must never become preview sources, even under broad rules.
+    // X11 CreateWindow: https://www.x.org/releases/X11R7.7/doc/xproto/x11protocol.html
+    if attributes.class == WindowClass::INPUT_ONLY {
+        return Ok(None);
+    }
+    let event_mask = attributes.your_event_mask;
     if !event_mask.contains(EventMask::PROPERTY_CHANGE) {
         ctx.conn.change_window_attributes(
             window,
@@ -805,6 +812,50 @@ mod tests {
         };
         // All fixture windows are owned by this connection and die when it closes.
         test(&ctx);
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn input_only_timestamp_windows_are_not_preview_sources() {
+        with_x11(|ctx| {
+            let helper = ctx.conn.generate_id().unwrap();
+            ctx.conn
+                .create_window(
+                    0,
+                    helper,
+                    ctx.screen.root,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0,
+                    WindowClass::INPUT_ONLY,
+                    0,
+                    &CreateWindowAux::new(),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            // Imported configurations can contain an empty substring pattern.
+            let rules: Vec<super::CustomWindowRule> = serde_json::from_value(serde_json::json!([
+                { "alias": "Broad match", "title_pattern": "", "limit": false }
+            ]))
+            .unwrap();
+            assert!(
+                super::identify_window(ctx, helper, &mut SessionState::new(), &rules)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                !ctx.conn
+                    .get_window_attributes(helper)
+                    .unwrap()
+                    .reply()
+                    .unwrap()
+                    .your_event_mask
+                    .contains(EventMask::PROPERTY_CHANGE)
+            );
+        });
     }
 
     fn with_sources(

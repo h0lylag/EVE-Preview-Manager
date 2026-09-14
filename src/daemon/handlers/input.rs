@@ -396,11 +396,10 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         let character_name = thumbnail.character_name.clone();
         clicked_identity = thumbnail.effective_source_identity();
 
-        // Left-click focuses the window (dragging is right-click only)
+        // Left-click requests focus (dragging is right-click only).
         if is_left_click {
             if ctx.daemon_config.profile.client_minimize_on_switch
-                && let Err(e) =
-                    unminimize_window(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms, src)
+                && let Err(e) = unminimize_window(ctx.app_ctx.conn, src)
             {
                 debug!(
                     window = src,
@@ -449,7 +448,7 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
             "thumbnail click",
         );
 
-        // Flush X11 connection to ensure border updates are rendered immediately
+        // Submit border updates; flush does not confirm rendering or focus.
         let _ = ctx.app_ctx.conn.flush();
     }
 
@@ -457,8 +456,7 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         && ctx.daemon_config.profile.client_minimize_on_switch
         && let Some(clicked_src) = clicked_src
     {
-        // Match the hotkey activation path: let focus settle before minimizing
-        // other clients, otherwise some WMs can redirect focus during restore.
+        // Retain the same settling delay as hotkeys; it is not focus confirmation.
         std::thread::sleep(std::time::Duration::from_millis(25));
 
         // Select from every tracked source, including sources without a rendered preview.

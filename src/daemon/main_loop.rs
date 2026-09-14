@@ -646,10 +646,10 @@ async fn run_event_loop(
                         );
 
                         // NOTE: When minimize mode is enabled, unminimize the target window FIRST
-                        // before calling activate_window. This ensures the window is restored from
-                        // minimized state so it can properly receive keyboard focus.
+                        // before calling activate_window. The WM still decides when to
+                        // restore and focus it; sending these requests is not confirmation.
                         if resources.config.profile.client_minimize_on_switch
-                            && let Err(e) = unminimize_window(ctx.conn, ctx.screen, ctx.atoms, window)
+                            && let Err(e) = unminimize_window(ctx.conn, window)
                         {
                             error!(window = window, error = %e, "Failed to unminimize window before activation");
                         }
@@ -657,11 +657,11 @@ async fn run_event_loop(
                         if let Err(e) = activate_window(ctx.conn, ctx.screen, ctx.atoms, window, timestamp) {
                             error!(window = window, error = %e, "Failed to activate window");
                         } else {
-                            debug!(window = window, "activate_window completed successfully");
+                            debug!(window = window, timestamp, "Window activation request sent");
 
-                            // Set current window immediately after successful activation.
-                            // This ensures the border shows correctly during the 25ms delay before
-                            // FocusIn arrives. The FocusIn handler will confirm this later.
+                            // Optimistically select the requested target and redraw its border.
+                            // FocusIn may reconcile this later; request submission is not focus
+                            // confirmation. Confirmation before minimization remains deferred.
                             resources
                                 .cycle
                                 .set_current_by_window_with_identity(window, source_identity.as_ref());
@@ -683,16 +683,13 @@ async fn run_event_loop(
                                 debug!(window = window, error = %e, "Failed to refresh pointer state after border redraw");
                             }
 
-                            // CRITICAL: Flush X11 connection to ensure border updates are rendered
-                            // before the 25ms delay. Without this, borders may flash to wrong clients.
+                            // Submit border and pointer requests before the delay. Flushing does
+                            // not wait for the server or compositor to finish rendering them.
                             let _ = ctx.conn.flush();
 
                             if resources.config.profile.client_minimize_on_switch {
-                                // NOTE: Critical delay to prevent KWin focus thrashing. Without this,
-                                // KWin repeatedly redirects focus to window 2097152 (internal KWin window)
-                                // during the minimize operations, causing continuous FocusOut/FocusIn loops.
-                                // The 25ms allows KWin to fully commit to the focus transfer before we
-                                // start changing other window states.
+                                // Retain the existing delay for previously reported KWin focus
+                                // thrashing. It does not establish that focus has transferred.
                                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
                                 // Select from every tracked source, including sources without a
