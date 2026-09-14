@@ -10,11 +10,11 @@ use x11rb::protocol::xproto::{ConnectionExt as XprotoExt, Font as X11Font};
 
 use super::discovery::{find_font_path, select_best_default_font};
 
-/// Rendered text as BGRA bitmap (optimized for X11)
+/// Rendered text as a premultiplied BGRA bitmap (optimized for X11)
 pub struct RenderedText {
     pub width: usize,
     pub height: usize,
-    /// Little-endian ARGB (BGRA in memory): Blue, Green, Red, Alpha
+    /// Premultiplied little-endian ARGB (BGRA in memory): Blue, Green, Red, Alpha
     pub data: Vec<u8>,
 }
 
@@ -144,7 +144,7 @@ impl FontRenderer {
         }
     }
 
-    /// Render text to a BGRA bitmap (X11 optimized)
+    /// Render straight-alpha ARGB text to a premultiplied BGRA bitmap (X11 optimized)
     pub fn render_text(&self, text: &str, fg_color: u32) -> Result<RenderedText> {
         match self {
             Self::Fontdue { font, size, .. } => {
@@ -185,7 +185,9 @@ impl FontRenderer {
                 // Allocate buffer for BGRA data (4 bytes per pixel)
                 let mut data = vec![0u8; width * height * 4];
 
-                // Pre-calculate color components
+                // Premultiply once, then apply glyph coverage to every channel.
+                let fg_color =
+                    crate::common::color::HexColor::from_argb32(fg_color).to_premultiplied_argb32();
                 let fg_a = (fg_color >> 24) & 0xFF;
                 let fg_r = (fg_color >> 16) & 0xFF;
                 let fg_g = (fg_color >> 8) & 0xFF;

@@ -39,6 +39,13 @@ impl HexColor {
         self.0
     }
 
+    /// Convert straight-alpha ARGB to premultiplied pixels for XRender compositing.
+    pub fn to_premultiplied_argb32(self) -> u32 {
+        let alpha = self.0 >> 24;
+        let premultiply = |shift: u32| (((self.0 >> shift) & 0xFF) * alpha + 127) / 255;
+        (alpha << 24) | (premultiply(16) << 16) | (premultiply(8) << 8) | premultiply(0)
+    }
+
     /// Convert straight-alpha ARGB to premultiplied XRender channels (0-65535).
     pub fn to_x11_color(self) -> Color {
         let a = (self.0 >> 24) & 0xFF;
@@ -180,6 +187,34 @@ mod tests {
         // Invalid
         assert_eq!(HexColor::parse("invalid"), None);
         assert_eq!(HexColor::parse(""), None);
+    }
+
+    #[test]
+    fn text_pixels_premultiply_rgb_and_preserve_alpha() {
+        for (argb, expected) in [
+            (0x00FF8040, 0x00000000),
+            (0x80FF8040, 0x80804020),
+            (0xFFFF8040, 0xFFFF8040),
+            (0x01FF8040, 0x01010100),
+        ] {
+            assert_eq!(
+                HexColor::from_argb32(argb).to_premultiplied_argb32(),
+                expected
+            );
+        }
+        for alpha in 0..=255 {
+            for channel in 0..=255 {
+                let argb = (alpha << 24) | (channel << 16) | (channel << 8) | channel;
+                let pixel = HexColor::from_argb32(argb).to_premultiplied_argb32();
+                assert_eq!(pixel >> 24, alpha);
+                for shift in [0, 8, 16] {
+                    assert!((pixel >> shift) & 255 <= alpha);
+                }
+                if alpha == 255 {
+                    assert_eq!(pixel, argb);
+                }
+            }
+        }
     }
 
     #[test]

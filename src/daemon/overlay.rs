@@ -10,7 +10,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::common::constants::x11;
-use crate::common::types::{Dimensions, SourceKind};
+use crate::common::types::{Dimensions, SourceKind, TextOffset};
 use crate::config::DisplayConfig;
 
 use super::font::FontRenderer;
@@ -280,14 +280,15 @@ impl<'a> OverlayRenderer<'a> {
 
     /// Renders the character name onto the overlay.
     ///
-    /// Handles both direct X11 text rendering (if core fonts are used) and
+    /// Handles both server-side X11 text rendering (if core fonts are used) and
     /// client-side rendering (if TrueType fonts are used via `fontdue`).
-    /// NOTE: This does NOT clear the background. You must call `clear_content_area` first.
+    /// The caller must clear the previous label first. Text is composited over any
+    /// remaining overlay content, including the skip indicator.
     pub fn update_name(
         &self,
         config: &DisplayConfig,
         identity: OverlayIdentity<'_>,
-        _dimensions: Dimensions,
+        dimensions: Dimensions,
         _border_size: u16,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
@@ -307,141 +308,160 @@ impl<'a> OverlayRenderer<'a> {
             (identity.display, config.text_color)
         };
 
-        // Render text based on font renderer type
+        if display_name.is_empty() || text_color >> 24 == 0 {
+            return Ok(());
+        }
+
         if font_renderer.requires_direct_rendering() {
-            // X11 fallback: direct rendering using ImageText8
             if let Some(font_id) = font_renderer.x11_font_id() {
-                // Create GC with font
-                let gc = self
-                    .conn
-                    .generate_id()
-                    .context("Failed to generate GC ID for X11 text")?;
+                // ImageText8 copies its background rectangle as well as glyph pixels.
+                // Draw onto a separate transparent layer so it cannot erase the skip indicator.
+                self.composite_text_layer(
+                    dimensions,
+                    TextOffset::from_border_edge(0, 0),
+                    |pixmap, picture| {
+                        self.conn
+                            .render_composite(
+                                PictOp::CLEAR,
+                                picture,
+                                0u32,
+                                picture,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                dimensions.width,
+                                dimensions.height,
+                            )
+                            .context("Failed to clear X11 text layer")?;
 
-                // Convert ARGB color to X11 pixel value (strip alpha)
-                let fg_pixel = text_color & 0x00FFFFFF;
+                        let gc = self
+                            .conn
+                            .generate_id()
+                            .context("Failed to generate X11 text GC ID")?;
+                        let pixel = crate::common::color::HexColor::from_argb32(text_color)
+                            .to_premultiplied_argb32();
+                        self.conn
+                            .create_gc(
+                                gc,
+                                pixmap,
+                                &CreateGCAux::new()
+                                    .font(font_id)
+                                    .foreground(pixel)
+                                    .background(0),
+                            )
+                            .context("Failed to create X11 text GC")?;
 
-                self.conn
-                    .create_gc(
-                        gc,
-                        self.overlay_pixmap,
-                        &CreateGCAux::new().font(font_id).foreground(fg_pixel),
-                    )
-                    .context(format!(
-                        "Failed to create GC for X11 text rendering for '{}'",
-                        identity.style
-                    ))?;
-
-                // ImageText8 renders directly to drawable
-                self.conn
-                    .image_text8(
-                        self.overlay_pixmap,
-                        gc,
-                        config.text_offset.x,
-                        config.text_offset.y + font_renderer.size() as i16, // Baseline adjustment
-                        display_name.as_bytes(),
-                    )
-                    .context(format!(
-                        "Failed to render text via X11 for '{}'",
-                        identity.style
-                    ))?;
-
-                self.conn.free_gc(gc)?;
+                        let draw = self
+                            .conn
+                            .image_text8(
+                                pixmap,
+                                gc,
+                                config.text_offset.x,
+                                config.text_offset.y + font_renderer.size() as i16,
+                                display_name.as_bytes(),
+                            )
+                            .context("Failed to draw X11 text");
+                        // Release the GC even if text serialization or drawing failed.
+                        let cleanup = self.conn.free_gc(gc);
+                        draw?;
+                        cleanup.context("Failed to free X11 text GC")?;
+                        Ok(())
+                    },
+                )?;
             }
         } else {
-            // Fontdue: pre-rendered bitmap
             let rendered = font_renderer
                 .render_text(display_name, text_color)
-                .context(format!(
-                    "Failed to render text '{}' with font renderer",
-                    identity.style
-                ))?;
-
+                .context("Failed to rasterize text")?;
             if rendered.width > 0 && rendered.height > 0 {
-                // Upload rendered text bitmap to X11
-                // rendered.data is already in BGRA format (Little Endian ARGB)
-                let text_pixmap = self
-                    .conn
-                    .generate_id()
-                    .context("Failed to generate ID for text pixmap")?;
-                self.conn
-                    .create_pixmap(
-                        x11::ARGB_DEPTH,
-                        text_pixmap,
-                        self.overlay_pixmap,
-                        rendered.width as u16,
-                        rendered.height as u16,
-                    )
-                    .context(format!(
-                        "Failed to create text pixmap for '{}'",
-                        identity.style
-                    ))?;
+                self.composite_text_layer(
+                    Dimensions::new(rendered.width as u16, rendered.height as u16),
+                    config.text_offset,
+                    |pixmap, _| {
+                        // Fontdue supplies premultiplied BGRA pixels for the whole layer.
+                        self.conn
+                            .put_image(
+                                ImageFormat::Z_PIXMAP,
+                                pixmap,
+                                self.overlay_gc,
+                                rendered.width as u16,
+                                rendered.height as u16,
+                                0,
+                                0,
+                                0,
+                                x11::ARGB_DEPTH,
+                                &rendered.data,
+                            )
+                            .context("Failed to upload text bitmap")?;
+                        Ok(())
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
 
-                self.conn
-                    .put_image(
-                        ImageFormat::Z_PIXMAP,
-                        text_pixmap,
-                        self.overlay_gc,
-                        rendered.width as u16,
-                        rendered.height as u16,
-                        0,
-                        0,
-                        0,
-                        x11::ARGB_DEPTH,
-                        &rendered.data,
-                    )
-                    .context(format!(
-                        "Failed to upload text image for '{}'",
-                        identity.style
-                    ))?;
+    /// Paint a temporary ARGB layer and composite it over the existing overlay.
+    /// Release both X11 resources on success and on failed painting/compositing.
+    fn composite_text_layer(
+        &self,
+        dimensions: Dimensions,
+        offset: TextOffset,
+        paint: impl FnOnce(Pixmap, Picture) -> Result<()>,
+    ) -> Result<()> {
+        let pixmap = self
+            .conn
+            .generate_id()
+            .context("Failed to generate text pixmap ID")?;
+        let picture = self
+            .conn
+            .generate_id()
+            .context("Failed to generate text picture ID")?;
+        self.conn
+            .create_pixmap(
+                x11::ARGB_DEPTH,
+                pixmap,
+                self.overlay_pixmap,
+                dimensions.width,
+                dimensions.height,
+            )
+            .context("Failed to create text pixmap")?;
 
-                // Create picture for the text pixmap
-                let text_picture = self
-                    .conn
-                    .generate_id()
-                    .context("Failed to generate ID for text picture")?;
-                self.conn
-                    .render_create_picture(
-                        text_picture,
-                        text_pixmap,
-                        self.formats.argb,
-                        &CreatePictureAux::new(),
-                    )
-                    .context(format!(
-                        "Failed to create text picture for '{}'",
-                        identity.style
-                    ))?;
-
-                // Composite text onto overlay
+        let result: Result<()> = (|| {
+            self.conn
+                .render_create_picture(picture, pixmap, self.formats.argb, &CreatePictureAux::new())
+                .context("Failed to create text picture")?;
+            let render: Result<()> = (|| {
+                paint(pixmap, picture)?;
                 self.conn
                     .render_composite(
                         PictOp::OVER,
-                        text_picture,
+                        picture,
                         0u32,
                         self.overlay_picture,
                         0,
                         0,
                         0,
                         0,
-                        config.text_offset.x,
-                        config.text_offset.y,
-                        rendered.width as u16,
-                        rendered.height as u16,
+                        offset.x,
+                        offset.y,
+                        dimensions.width,
+                        dimensions.height,
                     )
-                    .context(format!(
-                        "Failed to composite text onto overlay for '{}'",
-                        identity.style
-                    ))?;
-
-                // Cleanup
-                self.conn
-                    .render_free_picture(text_picture)
-                    .context("Failed to free text picture")?;
-                self.conn
-                    .free_pixmap(text_pixmap)
-                    .context("Failed to free text pixmap")?;
-            }
-        }
-
+                    .context("Failed to composite text layer")?;
+                Ok(())
+            })();
+            let cleanup = self.conn.render_free_picture(picture);
+            render?;
+            cleanup.context("Failed to free text picture")?;
+            Ok(())
+        })();
+        let cleanup = self.conn.free_pixmap(pixmap);
+        result?;
+        cleanup.context("Failed to free text pixmap")?;
         Ok(())
     }
 
@@ -689,5 +709,90 @@ impl Drop for OverlayRenderer<'_> {
                 "Failed to free inactive border fill picture"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DaemonConfig, profile::Profile};
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn text_layer_releases_resources_after_success_and_paint_failure() {
+        assert_eq!(std::env::var("EPM_X11_TESTS").as_deref(), Ok("1"));
+        let (conn, screen_number) = x11rb::connect(None).unwrap();
+        let screen = &conn.setup().roots[screen_number];
+        let formats = crate::x11::CachedFormats::new(&conn, screen).unwrap();
+        let config = DaemonConfig {
+            profile: Profile::default(),
+            character_thumbnails: Default::default(),
+            custom_source_thumbnails: Default::default(),
+            profile_hotkeys: Default::default(),
+            runtime_hidden: false,
+        }
+        .build_display_config();
+        let font_id = conn.generate_id().unwrap();
+        conn.open_font(font_id, b"fixed").unwrap().check().unwrap();
+        let font = FontRenderer::X11Fallback {
+            font_id,
+            size: 12.0,
+        };
+        let overlay = OverlayRenderer::new(
+            &conn,
+            &config,
+            &formats,
+            &font,
+            screen.root,
+            Dimensions::new(160, 100),
+            OverlayIdentity {
+                kind: SourceKind::Eve,
+                style: "",
+                display: "",
+            },
+        )
+        .unwrap();
+
+        for fail in [false, true] {
+            let mut allocated = (0, 0);
+            let result = overlay.composite_text_layer(
+                Dimensions::new(8, 8),
+                TextOffset::from_border_edge(0, 0),
+                |pixmap, picture| {
+                    allocated = (pixmap, picture);
+                    conn.render_composite(
+                        PictOp::CLEAR,
+                        picture,
+                        0u32,
+                        picture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        8,
+                        8,
+                    )?
+                    .check()?;
+                    anyhow::ensure!(!fail, "injected paint failure");
+                    Ok(())
+                },
+            );
+            if fail {
+                assert_eq!(result.unwrap_err().to_string(), "injected paint failure");
+            } else {
+                result.unwrap();
+            }
+            // Server replies prove both IDs were freed, rather than merely queued for cleanup.
+            assert!(conn.get_geometry(allocated.0).unwrap().reply().is_err());
+            assert!(
+                conn.render_free_picture(allocated.1)
+                    .unwrap()
+                    .check()
+                    .is_err()
+            );
+        }
+        conn.close_font(font_id).unwrap().check().unwrap();
     }
 }

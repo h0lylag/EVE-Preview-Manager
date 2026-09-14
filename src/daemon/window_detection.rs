@@ -752,6 +752,8 @@ pub fn scan_eve_windows<'a>(
 #[cfg(test)]
 mod tests {
     //! Display-dependent source detection regressions. Run only on an isolated Xvfb display.
+    //! The Fontdue text-alpha regression requires DejaVu Sans to be installed and
+    //! visible to fontconfig; it fails rather than silently using the X11 fallback.
     //!
     //! From the repository root, enter `nix develop`, then run:
     //!
@@ -828,11 +830,20 @@ mod tests {
 
     fn with_config<'a>(
         ctx: &AppContext<'a>,
+        config: DaemonConfig,
+        test: impl FnOnce(&mut EventContext<'a, '_>, &IpcReceiver<DaemonMessage>),
+    ) {
+        let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
+        with_config_and_font(ctx, config, &font, test);
+    }
+
+    fn with_config_and_font<'a>(
+        ctx: &AppContext<'a>,
         mut config: DaemonConfig,
+        font: &FontRenderer,
         test: impl FnOnce(&mut EventContext<'a, '_>, &IpcReceiver<DaemonMessage>),
     ) {
         let display = config.build_display_config();
-        let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
         let mut previews = HashMap::new();
         let mut session = SessionState::new();
         let mut cycle = CycleState::new(config.profile.cycle_groups.clone());
@@ -847,7 +858,7 @@ mod tests {
                 cycle_state: &mut cycle,
                 group_drag_state: &mut drag,
                 status_tx: &tx,
-                font_renderer: &font,
+                font_renderer: font,
                 display_config: &display,
             },
             &rx,
@@ -1087,6 +1098,203 @@ mod tests {
                 }
             })
         });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn text_alpha_x11_composites_global_and_source_colors_correctly() {
+        with_x11(|ctx| {
+            let font_id = ctx.conn.generate_id().unwrap();
+            ctx.conn
+                .open_font(font_id, b"fixed")
+                .unwrap()
+                .check()
+                .unwrap();
+            let font = FontRenderer::X11Fallback {
+                font_id,
+                size: 12.0,
+            };
+            check_text_alpha(ctx, &font);
+            ctx.conn.close_font(font_id).unwrap().check().unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and DejaVu Sans; see test module for command"]
+    fn text_alpha_fontdue_composites_global_and_source_colors_correctly() {
+        let font = FontRenderer::from_font_name("DejaVu Sans", 12.0)
+            .expect("text alpha regression requires DejaVu Sans installed for Fontdue");
+        assert!(matches!(font, FontRenderer::Fontdue { .. }));
+        with_x11(|ctx| check_text_alpha(ctx, &font));
+    }
+
+    fn check_text_alpha(ctx: &AppContext<'_>, font: &FontRenderer) {
+        use crate::common::types::{CharacterSettings, PreviewMode};
+
+        for custom in [false, true] {
+            for per_source in [false, true] {
+                let make_config = |color: Option<&str>| {
+                    let mut profile = Profile {
+                        thumbnail_opacity: 100,
+                        thumbnail_active_border: false,
+                        thumbnail_inactive_border: false,
+                        thumbnail_text_x: 10,
+                        thumbnail_text_y: 10,
+                        thumbnail_text_color: if per_source {
+                            "#FF00FF00"
+                        } else {
+                            color.unwrap()
+                        }
+                        .into(),
+                        ..Profile::default()
+                    };
+                    let mut settings = CharacterSettings::new(20, 20, 160, 100);
+                    settings.preview_mode = PreviewMode::Static {
+                        color: "#0000FF".into(),
+                    };
+                    if custom {
+                        profile.custom_windows.push(
+                            serde_json::from_value(serde_json::json!({
+                                "alias": "Review", "title_pattern": "Review source",
+                                "default_width": 160, "default_height": 100,
+                                "text_color": if per_source { color } else { None }
+                            }))
+                            .unwrap(),
+                        );
+                        profile
+                            .custom_source_thumbnails
+                            .insert("Review".into(), settings);
+                    } else {
+                        settings.override_text_color = if per_source {
+                            color.map(str::to_owned)
+                        } else {
+                            None
+                        };
+                        profile
+                            .character_thumbnails
+                            .insert("Review".into(), settings);
+                    }
+                    // Exercise the persisted profile contract before runtime override resolution.
+                    let json = serde_json::to_vec(&profile).unwrap();
+                    let profile: Profile = serde_json::from_slice(&json).unwrap();
+                    DaemonConfig {
+                        character_thumbnails: profile.character_thumbnails.clone(),
+                        custom_source_thumbnails: profile.custom_source_thumbnails.clone(),
+                        profile,
+                        profile_hotkeys: HashMap::new(),
+                        runtime_hidden: false,
+                    }
+                };
+                with_config_and_font(ctx, make_config(Some("#FFFF0000")), font, |events, _| {
+                    let (title, class) = if custom {
+                        ("Review source", "browser")
+                    } else {
+                        ("EVE - Review", "eve")
+                    };
+                    let src = window(ctx, title, class);
+                    handle_event(events, create_event(ctx, src)).unwrap();
+                    let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                    let read_pixels = |window| {
+                        let reply = ctx
+                            .conn
+                            .get_image(ImageFormat::Z_PIXMAP, window, 0, 0, 160, 100, u32::MAX)
+                            .unwrap()
+                            .reply()
+                            .unwrap();
+                        let pixels: Vec<u32> = reply
+                            .data
+                            .chunks_exact(4)
+                            .map(|bytes| {
+                                let bytes = bytes.try_into().unwrap();
+                                if ctx.conn.setup().image_byte_order == ImageOrder::LSB_FIRST {
+                                    u32::from_le_bytes(bytes)
+                                } else {
+                                    u32::from_be_bytes(bytes)
+                                }
+                            })
+                            .collect();
+                        assert_eq!(pixels.len(), 160 * 100);
+                        pixels
+                    };
+                    let mut opaque_coverage = Vec::new();
+                    for color in [
+                        Some("#FFFF0000"),
+                        Some("#00FF0000"),
+                        Some("#80FF0000"),
+                        Some("#FF0000"),
+                        None,
+                    ] {
+                        if color.is_none() && !per_source {
+                            continue;
+                        }
+                        let display = make_config(color).build_display_config();
+                        thumbnail.border(&display, false, false, font).unwrap();
+                        thumbnail.update(&display, font).unwrap();
+                        let pixels = read_pixels(thumbnail.window());
+                        if opaque_coverage.is_empty() {
+                            opaque_coverage =
+                                pixels.iter().map(|pixel| (pixel >> 16) & 255).collect();
+                            assert!(
+                                opaque_coverage.iter().any(|&coverage| coverage > 0),
+                                "fixture must render visible glyphs"
+                            );
+                        }
+                        for (index, (&pixel, &coverage)) in
+                            pixels.iter().zip(&opaque_coverage).enumerate()
+                        {
+                            let alpha = match color {
+                                Some("#00FF0000") => 0,
+                                Some("#80FF0000") => 128,
+                                _ => 255,
+                            };
+                            let contribution = coverage * alpha / 255;
+                            let expected = if color.is_none() {
+                                [0, contribution, 255 - contribution]
+                            } else {
+                                [contribution, 0, 255 - contribution]
+                            };
+                            let actual = [(pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255];
+                            for (actual, expected) in actual.into_iter().zip(expected) {
+                                assert!(
+                                    actual.abs_diff(expected) <= 1,
+                                    "custom={custom}, per_source={per_source}, color={color:?}, pixel={index}: channel {actual} != {expected}"
+                                );
+                            }
+                        }
+                    }
+                    // Text must blend over the skip indicator without erasing it.
+                    let transparent = make_config(Some("#00FF0000")).build_display_config();
+                    thumbnail.border(&transparent, false, true, font).unwrap();
+                    thumbnail.update(&transparent, font).unwrap();
+                    let skipped = read_pixels(thumbnail.window());
+                    let partial = make_config(Some("#80FF0000")).build_display_config();
+                    thumbnail.border(&partial, false, true, font).unwrap();
+                    thumbnail.update(&partial, font).unwrap();
+                    let pixels = read_pixels(thumbnail.window());
+                    assert!(
+                        skipped.iter().zip(&opaque_coverage).any(|(&pixel, &coverage)|
+                            pixel & 0xFFFFFF == 0xFF0000 && coverage > 0
+                        ),
+                        "fixture must overlap text and skip indicator",
+                    );
+                    for ((&pixel, &base), &coverage) in
+                        pixels.iter().zip(&skipped).zip(&opaque_coverage)
+                    {
+                        let alpha = coverage * 128 / 255;
+                        for (shift, foreground) in [(16, alpha), (8, 0), (0, 0)] {
+                            let expected =
+                                foreground + ((base >> shift) & 255) * (255 - alpha) / 255;
+                            let actual = (pixel >> shift) & 255;
+                            assert!(
+                                actual.abs_diff(expected) <= 1,
+                                "text erased the skip indicator: pixel={pixel:08X}, base={base:08X}, coverage={coverage}"
+                            );
+                        }
+                    }
+                    ctx.conn.destroy_window(src).unwrap().check().unwrap();
+                });
+            }
+        }
     }
 
     #[test]
