@@ -51,6 +51,12 @@ EVE Preview Manager is a Linux-native tool for managing multiple EVE Online clie
 
 <br>
 
+## Keyboard and Mouse Bindings
+
+See the [keyboard and mouse bindings guide](bindings.md) for preview controls, hotkey setup, and manager and system tray shortcuts.
+
+<br>
+
 ## System Requirements
 
 - **Required:** OpenGL, fontconfig, dbus, libxkbcommon, libxcb (standard on most distros).
