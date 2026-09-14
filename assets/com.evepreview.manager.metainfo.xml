@@ -52,6 +52,51 @@
   </screenshots>
 
   <releases>
+    <release version="1.9.0-beta.1" date="2026-09-14">
+      <description>
+        <p>New:</p>
+        <ul>
+          <li>Added group dragging for all visible previews using LMB+RMB.</li>
+          <li>Added default preview position controls, screen picker, and reset for off-screen
+            previews.</li>
+          <li>Added dedicated cycling hotkeys for unidentified login-screen clients, with optional
+            cycle-group inclusion.</li>
+          <li>Added an option to show remembered character names on logged-out clients.</li>
+        </ul>
+        <p>Fixed:</p>
+        <ul>
+          <li>Fixed minimize-on-switch and per-source exclusions when previews are disabled.</li>
+          <li>Fixed an X11 compatibility issue that could prevent minimized clients from restoring
+            when selected by hotkey or preview click.</li>
+          <li>Fixed an evdev timing issue that could prevent hotkeys from focusing clients.</li>
+          <li>Fixed cycling edge cases involving logged-out and unidentified clients.</li>
+          <li>Fixed Toggle Skip when preview rendering is disabled.</li>
+          <li>Fixed cases where previews appeared or remained hidden incorrectly after character,
+            focus, or visibility-setting changes.</li>
+          <li>Fixed hidden previews acting as invisible click targets.</li>
+          <li>Fixed conflicts when a custom source and EVE character shared the same name.</li>
+          <li>Fixed custom sources losing focus and resize tracking after redetection.</li>
+          <li>Prevented title-only custom-source rules from recursively capturing EPM preview
+            windows.</li>
+          <li>Fixed client detection when EPM runs on a non-default X11 screen.</li>
+          <li>Fixed automatic position saves that could overwrite unrelated unsaved edits or
+            character settings.</li>
+          <li>Prevented failed configuration loads from overwriting settings or leaving stale
+            editor selections.</li>
+          <li>Added validation to prevent duplicate profile and cycle-group names.</li>
+          <li>Fixed malformed color handling and transparent text and border rendering.</li>
+          <li>Hardened backup creation, validation, restoration, and deletion.</li>
+        </ul>
+        <p>Other:</p>
+        <ul>
+          <li>Added graceful preview-daemon shutdown and startup recovery.</li>
+          <li>Improved manager window and system-tray lifecycle reliability.</li>
+          <li>Made configuration writes atomic.</li>
+          <li>Added keyboard and mouse binding documentation.</li>
+          <li>Updated dependencies, Rust tooling, Nix packaging, and CI checks.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.8.0" date="2026-06-01">
       <description>
         <p>New:</p>
