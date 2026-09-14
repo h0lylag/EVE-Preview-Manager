@@ -96,8 +96,9 @@ struct ProfileHelper {
     hotkey_input_device: Option<String>,
     #[serde(default)]
     hotkey_logged_out_cycle: bool,
+    // Read-only migration flag; current profiles use the cycle mode alone.
     #[serde(default)]
-    hotkey_logged_out_unidentified_cycle: bool,
+    hotkey_logged_out_unidentified_cycle: Option<bool>,
     #[serde(default = "default_logged_out_unidentified_cycle_mode")]
     hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
     #[serde(default)]
@@ -239,9 +240,15 @@ impl From<ProfileHelper> for Profile {
             hotkey_backend: helper.hotkey_backend,
             hotkey_input_device: helper.hotkey_input_device,
             hotkey_logged_out_cycle: helper.hotkey_logged_out_cycle,
-            hotkey_logged_out_unidentified_cycle: helper.hotkey_logged_out_unidentified_cycle,
-            hotkey_logged_out_unidentified_cycle_mode: helper
-                .hotkey_logged_out_unidentified_cycle_mode,
+            // Older dev profiles could disable cycling while retaining append mode.
+            hotkey_logged_out_unidentified_cycle_mode: if helper
+                .hotkey_logged_out_unidentified_cycle
+                == Some(false)
+            {
+                LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+            } else {
+                helper.hotkey_logged_out_unidentified_cycle_mode
+            },
             hotkey_logged_out_unidentified_cycle_forward: helper
                 .hotkey_logged_out_unidentified_cycle_forward,
             hotkey_logged_out_unidentified_cycle_backward: helper
@@ -330,8 +337,6 @@ impl<'de> Deserialize<'de> for Profile {
                 pub cycle_groups: Vec<CycleGroupBinary>,
                 #[serde(default)]
                 pub hotkey_logged_out_cycle: bool,
-                #[serde(default)]
-                pub hotkey_logged_out_unidentified_cycle: bool,
                 #[serde(default = "default_logged_out_unidentified_cycle_mode")]
                 pub hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
                 #[serde(default)]
@@ -429,7 +434,6 @@ impl<'de> Deserialize<'de> for Profile {
                 hotkey_input_device: p.hotkey_input_device,
                 cycle_groups,
                 hotkey_logged_out_cycle: p.hotkey_logged_out_cycle,
-                hotkey_logged_out_unidentified_cycle: p.hotkey_logged_out_unidentified_cycle,
                 hotkey_logged_out_unidentified_cycle_mode: p
                     .hotkey_logged_out_unidentified_cycle_mode,
                 hotkey_logged_out_unidentified_cycle_forward: p
@@ -454,6 +458,58 @@ impl<'de> Deserialize<'de> for Profile {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unidentified_cycle_migrates_legacy_enable_flag() {
+        for enabled in [None, Some(false), Some(true)] {
+            for mode in [
+                LoggedOutUnidentifiedCycleMode::SeparateHotkeys,
+                LoggedOutUnidentifiedCycleMode::AppendToGroups,
+            ] {
+                let mut value = serde_json::to_value(Profile {
+                    hotkey_logged_out_unidentified_cycle_mode: mode,
+                    hotkey_logged_out_unidentified_cycle_forward: Some(
+                        crate::config::HotkeyBinding::new(16, false, false, false, false),
+                    ),
+                    hotkey_logged_out_unidentified_cycle_backward: Some(
+                        crate::config::HotkeyBinding::new(17, true, false, false, false),
+                    ),
+                    hotkey_logged_out_cycle: true,
+                    hotkey_cycle_reset_index: true,
+                    ..Profile::default()
+                })
+                .unwrap();
+                if let Some(enabled) = enabled {
+                    value["hotkey_logged_out_unidentified_cycle"] = json!(enabled);
+                }
+                let profile: Profile = serde_json::from_value(value).unwrap();
+                let expected = if enabled == Some(false) {
+                    LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+                } else {
+                    mode
+                };
+                assert_eq!(profile.hotkey_logged_out_unidentified_cycle_mode, expected);
+                assert!(
+                    profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .is_some()
+                );
+                let saved = serde_json::to_value(&profile).unwrap();
+                assert!(saved.get("hotkey_logged_out_unidentified_cycle").is_none());
+                let reloaded: Profile = serde_json::from_value(saved).unwrap();
+                assert_eq!(reloaded.hotkey_logged_out_unidentified_cycle_mode, expected);
+                // IPC uses the strict binary field order, unlike JSON migration.
+                let (tx, rx) = ipc_channel::ipc::channel::<Profile>().unwrap();
+                tx.send(reloaded).unwrap();
+                let received = rx.recv().unwrap();
+                assert_eq!(received.hotkey_logged_out_unidentified_cycle_mode, expected);
+                assert_eq!(
+                    serde_json::to_value(&received).unwrap(),
+                    serde_json::to_value(&profile).unwrap()
+                );
+            }
+        }
+    }
 
     #[test]
     fn legacy_cycle_strings_migrate_without_changing_typed_entries() {

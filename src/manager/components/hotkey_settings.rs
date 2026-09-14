@@ -2,7 +2,7 @@
 
 use crate::common::constants::manager_ui::*;
 use crate::config::HotkeyBackendType;
-use crate::config::profile::{LoggedOutUnidentifiedCycleMode, Profile};
+use crate::config::profile::Profile;
 use crate::manager::key_capture::{self, CaptureResult, CaptureState};
 use eframe::egui;
 use std::sync::mpsc::Receiver;
@@ -293,17 +293,108 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
             });
         });
 
-        // --- Column 2: Profile Settings ---
+        let device_selected = match profile.hotkey_backend {
+            HotkeyBackendType::X11 => true,
+            HotkeyBackendType::Evdev => profile.hotkey_input_device.is_some(),
+        };
+
+        columns[0].add_space(ITEM_SPACING);
+        columns[0].group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new("Cycle Group Hotkeys").strong());
+            ui.add_space(ITEM_SPACING);
+            ui.label("Set cycle group hotkeys in the Characters tab.");
+
+            ui.add_enabled_ui(device_selected, |ui| {
+                ui.add_space(ITEM_SPACING);
+                ui.separator();
+                ui.add_space(ITEM_SPACING);
+
+                ui.label("Unidentified Login-Screen Clients:");
+                ui.add_space(ITEM_SPACING / 2.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Forward:");
+                    let binding_text = profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .as_ref()
+                        .map(|b| b.display_name())
+                        .unwrap_or_else(|| "Not set".to_string());
+
+                    let color = if profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .is_none()
+                    {
+                        ui.style().visuals.weak_text_color()
+                    } else {
+                        ui.style().visuals.text_color()
+                    };
+
+                    ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                    if ui.button("⌨ Bind").clicked() {
+                        state.start_key_capture(
+                            CaptureTarget::LoggedOutUnidentifiedForward,
+                            profile.hotkey_backend,
+                        );
+                    }
+
+                    if profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .is_some()
+                        && ui.small_button("✖").on_hover_text("Clear binding").clicked()
+                    {
+                        profile.hotkey_logged_out_unidentified_cycle_forward = None;
+                        changed = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Backward:");
+                    let binding_text = profile
+                        .hotkey_logged_out_unidentified_cycle_backward
+                        .as_ref()
+                        .map(|b| b.display_name())
+                        .unwrap_or_else(|| "Not set".to_string());
+
+                    let color = if profile
+                        .hotkey_logged_out_unidentified_cycle_backward
+                        .is_none()
+                    {
+                        ui.style().visuals.weak_text_color()
+                    } else {
+                        ui.style().visuals.text_color()
+                    };
+
+                    ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                    if ui.button("⌨ Bind").clicked() {
+                        state.start_key_capture(
+                            CaptureTarget::LoggedOutUnidentifiedBackward,
+                            profile.hotkey_backend,
+                        );
+                    }
+
+                    if profile
+                        .hotkey_logged_out_unidentified_cycle_backward
+                        .is_some()
+                        && ui.small_button("✖").on_hover_text("Clear binding").clicked()
+                    {
+                        profile.hotkey_logged_out_unidentified_cycle_backward = None;
+                        changed = true;
+                    }
+                });
+
+                ui.add_space(ITEM_SPACING);
+                ui.label(egui::RichText::new("Cycle login-screen clients with no remembered character. Available whether or not they are appended to cycle groups.").weak().small());
+            });
+        });
+
+        // --- Column 2: Other Hotkeys ---
         columns[1].group(|ui| {
             ui.set_min_width(ui.available_width());
             ui.label(egui::RichText::new("Other Hotkeys").strong());
             ui.add_space(ITEM_SPACING);
-
-            // For X11 backend, device selection is not applicable (duplicated logic for right column enabled state)
-            let device_selected = match profile.hotkey_backend {
-                HotkeyBackendType::X11 => true,
-                HotkeyBackendType::Evdev => profile.hotkey_input_device.is_some(),
-            };
 
             ui.add_enabled_ui(device_selected, |ui| {
                  ui.label("Load Profile Hotkey:");
@@ -401,94 +492,6 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                  });
                  ui.add_space(ITEM_SPACING);
                  ui.label(egui::RichText::new("Show/Hide all thumbnails (resets to visible on restart).").weak().small());
-
-                 if profile.hotkey_logged_out_unidentified_cycle
-                    && profile.hotkey_logged_out_unidentified_cycle_mode
-                        == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
-                 {
-                    ui.add_space(ITEM_SPACING);
-                    ui.separator();
-                    ui.add_space(ITEM_SPACING);
-
-                    ui.label("Unidentified Login-Screen Clients:");
-                    ui.add_space(ITEM_SPACING / 2.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label("Forward:");
-                        let binding_text = profile
-                            .hotkey_logged_out_unidentified_cycle_forward
-                            .as_ref()
-                            .map(|b| b.display_name())
-                            .unwrap_or_else(|| "Not set".to_string());
-
-                        let color = if profile
-                            .hotkey_logged_out_unidentified_cycle_forward
-                            .is_none()
-                        {
-                            ui.style().visuals.weak_text_color()
-                        } else {
-                            ui.style().visuals.text_color()
-                        };
-
-                        ui.label(egui::RichText::new(binding_text).strong().color(color));
-
-                        if ui.button("⌨ Bind").clicked() {
-                            state.start_key_capture(
-                                CaptureTarget::LoggedOutUnidentifiedForward,
-                                profile.hotkey_backend,
-                            );
-                        }
-
-                        if profile
-                            .hotkey_logged_out_unidentified_cycle_forward
-                            .is_some()
-                            && ui.small_button("✖").on_hover_text("Clear binding").clicked()
-                        {
-                            profile.hotkey_logged_out_unidentified_cycle_forward = None;
-                            changed = true;
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Backward:");
-                        let binding_text = profile
-                            .hotkey_logged_out_unidentified_cycle_backward
-                            .as_ref()
-                            .map(|b| b.display_name())
-                            .unwrap_or_else(|| "Not set".to_string());
-
-                        let color = if profile
-                            .hotkey_logged_out_unidentified_cycle_backward
-                            .is_none()
-                        {
-                            ui.style().visuals.weak_text_color()
-                        } else {
-                            ui.style().visuals.text_color()
-                        };
-
-                        ui.label(egui::RichText::new(binding_text).strong().color(color));
-
-                        if ui.button("⌨ Bind").clicked() {
-                            state.start_key_capture(
-                                CaptureTarget::LoggedOutUnidentifiedBackward,
-                                profile.hotkey_backend,
-                            );
-                        }
-
-                        if profile
-                            .hotkey_logged_out_unidentified_cycle_backward
-                            .is_some()
-                            && ui.small_button("✖").on_hover_text("Clear binding").clicked()
-                        {
-                            profile.hotkey_logged_out_unidentified_cycle_backward = None;
-                            changed = true;
-                        }
-                    });
-
-                    ui.add_space(ITEM_SPACING);
-                    ui.label(egui::RichText::new("Separate-hotkey mode from Behavior Settings. Only cycles clients with no character name yet.").weak().small());
-                 }
-
 
                  if profile.hotkey_backend == HotkeyBackendType::Evdev {
                       ui.add_space(ITEM_SPACING);

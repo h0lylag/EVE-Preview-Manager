@@ -225,6 +225,34 @@ fn initialize_state(
     Ok((daemon_config, config, session_state, cycle_state))
 }
 
+fn cycle_hotkeys(
+    profile: &crate::config::profile::Profile,
+) -> Vec<(CycleCommand, crate::config::HotkeyBinding)> {
+    let mut cycle_hotkeys: Vec<(CycleCommand, crate::config::HotkeyBinding)> = profile
+        .cycle_groups
+        .iter()
+        .flat_map(|g| {
+            let mut hotkeys = Vec::new();
+            if let Some(fwd) = &g.hotkey_forward {
+                hotkeys.push((CycleCommand::Forward(g.name.clone()), fwd.clone()));
+            }
+            if let Some(bwd) = &g.hotkey_backward {
+                hotkeys.push((CycleCommand::Backward(g.name.clone()), bwd.clone()));
+            }
+            hotkeys
+        })
+        .collect();
+
+    if let Some(fwd) = &profile.hotkey_logged_out_unidentified_cycle_forward {
+        cycle_hotkeys.push((CycleCommand::LoggedOutUnidentifiedForward, fwd.clone()));
+    }
+    if let Some(bwd) = &profile.hotkey_logged_out_unidentified_cycle_backward {
+        cycle_hotkeys.push((CycleCommand::LoggedOutUnidentifiedBackward, bwd.clone()));
+    }
+
+    cycle_hotkeys
+}
+
 fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) -> HotkeyResources {
     // Create channel for hotkey thread → main loop
     let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
@@ -282,41 +310,7 @@ fn setup_hotkeys(daemon_config: &DaemonConfig, allowed_windows: AllowedWindows) 
     }
 
     // Spawn hotkey listener (start if any hotkeys configured: cycle or direct-source)
-    let mut cycle_hotkeys: Vec<(CycleCommand, crate::config::HotkeyBinding)> = daemon_config
-        .profile
-        .cycle_groups
-        .iter()
-        .flat_map(|g| {
-            let mut hotkeys = Vec::new();
-            if let Some(fwd) = &g.hotkey_forward {
-                hotkeys.push((CycleCommand::Forward(g.name.clone()), fwd.clone()));
-            }
-            if let Some(bwd) = &g.hotkey_backward {
-                hotkeys.push((CycleCommand::Backward(g.name.clone()), bwd.clone()));
-            }
-            hotkeys
-        })
-        .collect();
-
-    if daemon_config.profile.hotkey_logged_out_unidentified_cycle
-        && daemon_config
-            .profile
-            .hotkey_logged_out_unidentified_cycle_mode
-            == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
-    {
-        if let Some(fwd) = &daemon_config
-            .profile
-            .hotkey_logged_out_unidentified_cycle_forward
-        {
-            cycle_hotkeys.push((CycleCommand::LoggedOutUnidentifiedForward, fwd.clone()));
-        }
-        if let Some(bwd) = &daemon_config
-            .profile
-            .hotkey_logged_out_unidentified_cycle_backward
-        {
-            cycle_hotkeys.push((CycleCommand::LoggedOutUnidentifiedBackward, bwd.clone()));
-        }
-    }
+    let cycle_hotkeys = cycle_hotkeys(&daemon_config.profile);
 
     let has_cycle_keys = !cycle_hotkeys.is_empty();
     let has_direct_source_hotkeys = !source_hotkeys.is_empty();
@@ -1060,12 +1054,8 @@ fn handle_cycle_command<'a>(
     let append_unidentified = resources
         .config
         .profile
-        .hotkey_logged_out_unidentified_cycle
-        && resources
-            .config
-            .profile
-            .hotkey_logged_out_unidentified_cycle_mode
-            == LoggedOutUnidentifiedCycleMode::AppendToGroups;
+        .hotkey_logged_out_unidentified_cycle_mode
+        == LoggedOutUnidentifiedCycleMode::AppendToGroups;
 
     match command {
         CycleCommand::Forward(group) => {
@@ -1100,42 +1090,12 @@ fn handle_cycle_command<'a>(
                 )
             }
         }
-        CycleCommand::LoggedOutUnidentifiedForward => {
-            if resources
-                .config
-                .profile
-                .hotkey_logged_out_unidentified_cycle
-                && resources
-                    .config
-                    .profile
-                    .hotkey_logged_out_unidentified_cycle_mode
-                    == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
-            {
-                resources
-                    .cycle
-                    .cycle_unidentified_logged_out_forward(&resources.session.window_last_character)
-            } else {
-                None
-            }
-        }
-        CycleCommand::LoggedOutUnidentifiedBackward => {
-            if resources
-                .config
-                .profile
-                .hotkey_logged_out_unidentified_cycle
-                && resources
-                    .config
-                    .profile
-                    .hotkey_logged_out_unidentified_cycle_mode
-                    == LoggedOutUnidentifiedCycleMode::SeparateHotkeys
-            {
-                resources.cycle.cycle_unidentified_logged_out_backward(
-                    &resources.session.window_last_character,
-                )
-            } else {
-                None
-            }
-        }
+        CycleCommand::LoggedOutUnidentifiedForward => resources
+            .cycle
+            .cycle_unidentified_logged_out_forward(&resources.session.window_last_character),
+        CycleCommand::LoggedOutUnidentifiedBackward => resources
+            .cycle
+            .cycle_unidentified_logged_out_backward(&resources.session.window_last_character),
         CycleCommand::CharacterHotkey(binding) => {
             debug!(binding = %binding.display_name(), "Received direct-source hotkey command");
 
@@ -1226,13 +1186,145 @@ fn handle_cycle_command<'a>(
 
 #[cfg(test)]
 mod tests {
-    //! Run serially on isolated Xvfb with EPM_X11_TESTS=1 and an outer timeout.
+    //! Run display tests serially on isolated Xvfb with EPM_X11_TESTS=1 and an outer timeout.
     use super::*;
     use crate::common::types::{Dimensions, PreviewMode};
     use crate::config::profile::{CycleSlot, Profile};
     use crate::daemon::font::FontRenderer;
     use crate::x11::CachedFormats;
     use x11rb::wrapper::ConnectionExt as _;
+
+    #[test]
+    fn unidentified_hotkeys_are_registered_in_both_modes() {
+        use crate::config::HotkeyBinding;
+        for mode in [
+            LoggedOutUnidentifiedCycleMode::SeparateHotkeys,
+            LoggedOutUnidentifiedCycleMode::AppendToGroups,
+        ] {
+            let mut profile = Profile {
+                hotkey_logged_out_unidentified_cycle_mode: mode,
+                hotkey_logged_out_unidentified_cycle_forward: Some(HotkeyBinding::new(
+                    16, false, false, false, false,
+                )),
+                hotkey_logged_out_unidentified_cycle_backward: Some(HotkeyBinding::new(
+                    17, false, false, false, false,
+                )),
+                ..Profile::default()
+            };
+            profile.cycle_groups[0].hotkey_forward =
+                Some(HotkeyBinding::new(18, false, false, false, false));
+            let keys = cycle_hotkeys(&profile);
+            assert_eq!(keys.len(), 3);
+            assert!(
+                matches!(&keys[0].0, CycleCommand::Forward(name) if name == &profile.cycle_groups[0].name)
+            );
+            assert!(matches!(
+                keys[1].0,
+                CycleCommand::LoggedOutUnidentifiedForward
+            ));
+            assert_eq!(
+                Some(&keys[1].1),
+                profile
+                    .hotkey_logged_out_unidentified_cycle_forward
+                    .as_ref()
+            );
+            assert!(matches!(
+                keys[2].0,
+                CycleCommand::LoggedOutUnidentifiedBackward
+            ));
+            assert_eq!(
+                Some(&keys[2].1),
+                profile
+                    .hotkey_logged_out_unidentified_cycle_backward
+                    .as_ref()
+            );
+            profile.hotkey_logged_out_unidentified_cycle_forward = None;
+            let keys = cycle_hotkeys(&profile);
+            assert_eq!(keys.len(), 2);
+            assert_eq!(keys[1].0, CycleCommand::LoggedOutUnidentifiedBackward);
+            profile.hotkey_logged_out_unidentified_cycle_backward = None;
+            assert_eq!(cycle_hotkeys(&profile).len(), 1);
+            profile.cycle_groups[0].hotkey_forward = None;
+            assert!(cycle_hotkeys(&profile).is_empty());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn unidentified_commands_work_in_both_modes() {
+        with_x11(|ctx| {
+            for mode in [
+                LoggedOutUnidentifiedCycleMode::SeparateHotkeys,
+                LoggedOutUnidentifiedCycleMode::AppendToGroups,
+            ] {
+                with_daemon(ctx, |resources, font, tx| {
+                    resources
+                        .config
+                        .profile
+                        .hotkey_logged_out_unidentified_cycle_mode = mode;
+                    let alice = SourceIdentity::eve("Alice");
+                    resources.cycle.add_window(Some(alice.clone()), 10);
+                    resources.cycle.add_window(None, 20);
+                    resources.cycle.add_window(None, 30);
+                    resources.cycle.add_window(None, 40);
+                    resources
+                        .session
+                        .window_last_character
+                        .insert(40, "Bob".into());
+                    let keys = HashMap::new();
+                    let mut run =
+                        |command| {
+                            let target =
+                                handle_cycle_command(&command, resources, ctx, font, tx, &keys);
+                            if let Some((window, identity)) = &target {
+                                // The main loop records the current window after activation.
+                                assert!(resources.cycle.set_current_by_window_with_identity(
+                                    *window,
+                                    identity.as_ref()
+                                ));
+                            }
+                            target
+                        };
+                    assert_eq!(
+                        run(CycleCommand::LoggedOutUnidentifiedForward),
+                        Some((20, None))
+                    );
+                    assert_eq!(
+                        run(CycleCommand::LoggedOutUnidentifiedForward),
+                        Some((30, None))
+                    );
+                    assert_eq!(
+                        run(CycleCommand::LoggedOutUnidentifiedForward),
+                        Some((20, None))
+                    );
+                    assert_eq!(
+                        run(CycleCommand::LoggedOutUnidentifiedBackward),
+                        Some((30, None))
+                    );
+                    let group = resources.config.profile.cycle_groups[0].name.clone();
+                    for (command, unidentified_window) in [
+                        (CycleCommand::Forward(group.clone()), 20),
+                        (CycleCommand::Backward(group), 30),
+                    ] {
+                        assert!(
+                            resources
+                                .cycle
+                                .set_current_by_window_with_identity(10, Some(&alice))
+                        );
+                        let expected = if mode == LoggedOutUnidentifiedCycleMode::AppendToGroups {
+                            Some((unidentified_window, None))
+                        } else {
+                            Some((10, Some(alice.clone())))
+                        };
+                        assert_eq!(
+                            handle_cycle_command(&command, resources, ctx, font, tx, &keys),
+                            expected
+                        );
+                    }
+                });
+            }
+        });
+    }
 
     #[test]
     fn cycle_group_startup_rejects_duplicates_and_preserves_distinct_orders() {
