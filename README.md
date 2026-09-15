@@ -17,6 +17,7 @@ EVE Preview Manager is a Linux-native tool for managing multiple EVE Online clie
 - Auto-minimize inactive windows and inherit positions for new characters
 - Move one preview with RMB drag or all visible previews with an LMB+RMB drag
 - Option to disable thumbnails altogether
+- Options to hide the sole EVE preview or the active EVE preview
 
 <br>
 

@@ -97,7 +97,7 @@ impl<'a> Thumbnail<'a> {
     /// * `font_renderer` - Renderer for shared font resources.
     /// * `position` - Optional initial position (if loaded from config).
     /// * `dimensions` - Initial size.
-    /// * `externally_hidden` - Combined preview-toggle and focus block at creation.
+    /// * `externally_hidden` - Combined manual, focus, single-client, and active-source block at creation.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
@@ -385,7 +385,7 @@ impl<'a> Thumbnail<'a> {
         Ok(())
     }
 
-    /// Update global/focus blocking independently of the current source's render override.
+    /// Update external visibility blocking independently of the current source's render override.
     pub fn set_visibility_blocked(
         &mut self,
         blocked: bool,

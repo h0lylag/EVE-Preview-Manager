@@ -8,12 +8,21 @@ use x11rb::protocol::xproto::*;
 /// Handle FocusIn events - update focused state and visibility
 #[tracing::instrument(skip(ctx), fields(window = event.event))]
 pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()> {
+    if ctx.display_config.hide_active && matches!(event.mode, NotifyMode::GRAB | NotifyMode::UNGRAB)
+    {
+        return Ok(());
+    }
     if event.mode == NotifyMode::UNGRAB {
         debug!(window = event.event, "Ignoring FocusIn with mode Ungrab");
         return Ok(());
     }
 
     debug!(window = event.event, "FocusIn received");
+    if ctx.display_config.hide_active {
+        refresh_preview_focus(ctx);
+        reconcile_previews(ctx);
+        return Ok(());
+    }
 
     // Get the window we expect to be focused on (set by hotkey/click handlers)
     let expected_window = ctx.cycle_state.get_current_window();
@@ -61,7 +70,7 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
         ctx.cycle_state,
         ctx.display_config,
         ctx.font_renderer,
-        event.event,
+        Some(event.event),
         "focus in",
     );
 
@@ -71,12 +80,21 @@ pub fn handle_focus_in(ctx: &mut EventContext, event: FocusInEvent) -> Result<()
 /// Handle FocusOut events - update focused state and visibility  
 #[tracing::instrument(skip(ctx), fields(window = event.event))]
 pub fn handle_focus_out(ctx: &mut EventContext, event: FocusOutEvent) -> Result<()> {
+    if ctx.display_config.hide_active && matches!(event.mode, NotifyMode::GRAB | NotifyMode::UNGRAB)
+    {
+        return Ok(());
+    }
     if event.mode == NotifyMode::GRAB {
         debug!(window = event.event, "Ignoring FocusOut with mode Grab");
         return Ok(());
     }
 
     debug!(window = event.event, "FocusOut received");
+    if ctx.display_config.hide_active {
+        refresh_preview_focus(ctx);
+        reconcile_previews(ctx);
+        return Ok(());
+    }
 
     if ctx.display_config.hide_when_no_focus {
         let was_active = ctx
@@ -130,6 +148,11 @@ pub fn handle_net_wm_state(ctx: &mut EventContext, window: Window, atom: Atom) -
 /// Accept confirmed source focus, whether observed through FocusIn or late detection.
 /// The preview-toggle block remains authoritative.
 pub(super) fn restore_focus_visibility(ctx: &mut EventContext) {
+    if ctx.display_config.hide_active {
+        refresh_preview_focus(ctx);
+        reconcile_previews(ctx);
+        return;
+    }
     if ctx.session_state.focus_loss_deadline.take().is_some() {
         debug!("Cancelled pending focus loss hide");
     }
@@ -137,15 +160,70 @@ pub(super) fn restore_focus_visibility(ctx: &mut EventContext) {
     reconcile_previews(ctx);
 }
 
-/// Apply every active hiding reason, including when a previous reason has just cleared.
-fn reconcile_previews(ctx: &mut EventContext) {
-    let blocked = ctx.daemon_config.runtime_hidden
-        || (ctx.display_config.hide_when_no_focus && ctx.session_state.focus_hidden);
-    for thumbnail in ctx.eve_clients.values_mut() {
-        if let Err(error) =
-            thumbnail.set_visibility_blocked(blocked, ctx.display_config, ctx.font_renderer)
-        {
-            tracing::warn!(source = %thumbnail.character_name, error = %error, "Failed to reconcile preview visibility");
+/// Reconcile focus selection and borders from the WM property, never event/request ordering.
+pub(in crate::daemon) fn refresh_preview_focus(ctx: &mut EventContext) {
+    if !super::super::focus::refresh_active_source(
+        ctx.app_ctx,
+        ctx.eve_clients,
+        ctx.cycle_state,
+        ctx.session_state,
+        ctx.display_config,
+    ) {
+        return;
+    }
+    let active = ctx.session_state.active_source_window;
+    if let Some(window) = active {
+        let remembered = ctx
+            .session_state
+            .window_last_character
+            .get(&window)
+            .map(|name| SourceIdentity::eve(name.clone()));
+        ctx.cycle_state
+            .set_current_by_window_with_identity(window, remembered.as_ref());
+    }
+    sync_focused_borders(
+        ctx.eve_clients,
+        ctx.cycle_state,
+        ctx.display_config,
+        ctx.font_renderer,
+        active,
+        "confirmed active source",
+    );
+}
+
+/// Apply every active hiding reason, hiding first when overlapping previews swap.
+pub(in crate::daemon) fn reconcile_previews(ctx: &mut EventContext) {
+    let count = ctx.cycle_state.eve_client_count();
+    let decisions: Vec<_> = ctx
+        .eve_clients
+        .iter()
+        .map(|(&source, thumbnail)| {
+            let blocked = ctx.display_config.preview_visibility_blocked(
+                thumbnail.source_kind(),
+                ctx.daemon_config.runtime_hidden,
+                ctx.session_state.focus_hidden,
+                count,
+                ctx.session_state.active_source_window == Some(source),
+            );
+            (source, blocked)
+        })
+        .collect();
+    for &(source, blocked) in &decisions {
+        if blocked {
+            super::input::cancel_hidden_preview_input(ctx, source);
+        }
+    }
+    for phase in [true, false] {
+        for &(source, blocked) in &decisions {
+            if blocked != phase {
+                continue;
+            }
+            if let Some(thumbnail) = ctx.eve_clients.get_mut(&source)
+                && let Err(error) =
+                    thumbnail.set_visibility_blocked(blocked, ctx.display_config, ctx.font_renderer)
+            {
+                tracing::warn!(source = %thumbnail.character_name, error = %error, "Failed to reconcile preview visibility");
+            }
         }
     }
 }
@@ -160,6 +238,23 @@ pub fn toggle_previews(ctx: &mut EventContext) {
 }
 
 pub fn hide_after_focus_loss(ctx: &mut EventContext) {
+    refresh_preview_focus(ctx);
+    if ctx.display_config.hide_active && ctx.session_state.active_source_window.is_some() {
+        ctx.session_state.focus_loss_deadline = None;
+        reconcile_previews(ctx);
+        return;
+    }
+    // Preserve cancellation even if a drag has no currently visible members.
+    if ctx.group_drag_state.is_active()
+        && let Err(error) = super::input::cancel_group_drag(
+            ctx.app_ctx.conn,
+            ctx.eve_clients,
+            ctx.group_drag_state,
+            None,
+        )
+    {
+        tracing::warn!(error = %error, "Failed to restore group after focus loss");
+    }
     ctx.session_state.focus_hidden = true;
     ctx.session_state.focus_loss_deadline = None;
     reconcile_previews(ctx);

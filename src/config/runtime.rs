@@ -22,6 +22,8 @@ pub struct DisplayConfig {
     pub text_offset: TextOffset,
     pub text_color: u32,
     pub hide_when_no_focus: bool,
+    pub hide_when_single_client: bool,
+    pub hide_active: bool,
     pub inactive_border_enabled: bool,
     pub show_logged_out_character_name: bool,
 
@@ -35,6 +37,21 @@ pub struct DisplayConfig {
 }
 
 impl DisplayConfig {
+    /// Combine independent hiding reasons; rendering overrides cannot bypass them.
+    pub fn preview_visibility_blocked(
+        &self,
+        source_kind: SourceKind,
+        runtime_hidden: bool,
+        focus_hidden: bool,
+        eve_client_count: usize,
+        is_active_source: bool,
+    ) -> bool {
+        runtime_hidden
+            || (self.hide_when_no_focus && focus_hidden)
+            || (self.hide_when_single_client && source_kind.is_eve() && eve_client_count == 1)
+            || (self.hide_active && is_active_source)
+    }
+
     pub fn settings_for(&self, kind: SourceKind, name: &str) -> Option<&CharacterSettings> {
         match kind {
             SourceKind::Eve => self.character_settings.get(name),
@@ -205,6 +222,8 @@ impl DaemonConfig {
             ),
             text_color,
             hide_when_no_focus: self.profile.thumbnail_hide_not_focused,
+            hide_when_single_client: self.profile.thumbnail_hide_when_single_client,
+            hide_active: self.profile.thumbnail_hide_active,
             show_logged_out_character_name: self.profile.thumbnail_show_logged_out_character_name,
             inactive_border_enabled: self.profile.thumbnail_inactive_border,
             inactive_border_color,
@@ -346,6 +365,8 @@ mod tests {
                 thumbnail_auto_save_position: false,
                 thumbnail_snap_threshold: snap_threshold,
                 thumbnail_hide_not_focused: hide_when_no_focus,
+                thumbnail_hide_when_single_client: false,
+                thumbnail_hide_active: false,
                 thumbnail_preserve_position_on_swap: false,
                 thumbnail_show_logged_out_character_name: false,
                 client_minimize_on_switch: false,
@@ -619,5 +640,41 @@ mod tests {
         // 2. Verify it doesn't try to look up empty new_name
         let _ = state.handle_character_change("OldChar", "", Position::new(0, 0), 100, 100);
         assert!(!state.character_thumbnails.contains_key(""));
+    }
+    #[test]
+    fn preview_hiding_policy_combines_independent_reasons() {
+        let mut config = test_config(100, 3, "#FFFFFFFF", 0, 0, "#FFFFFFFF", false, 20);
+        for single in [false, true] {
+            for active in [false, true] {
+                for hide_focus in [false, true] {
+                    config.profile.thumbnail_hide_when_single_client = single;
+                    config.profile.thumbnail_hide_active = active;
+                    config.profile.thumbnail_hide_not_focused = hide_focus;
+                    let display = config.build_display_config();
+                    assert_eq!(display.hide_when_single_client, single);
+                    assert_eq!(display.hide_active, active);
+                    for kind in [SourceKind::Eve, SourceKind::Custom] {
+                        for count in 0..=3 {
+                            for manual in [false, true] {
+                                for lost_focus in [false, true] {
+                                    for focused in [false, true] {
+                                        let expected = manual
+                                            || (hide_focus && lost_focus)
+                                            || (single && kind == SourceKind::Eve && count == 1)
+                                            || (active && focused);
+                                        assert_eq!(
+                                            display.preview_visibility_blocked(
+                                                kind, manual, lost_focus, count, focused
+                                            ),
+                                            expected
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

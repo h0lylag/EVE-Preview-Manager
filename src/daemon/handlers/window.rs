@@ -104,6 +104,8 @@ pub fn handle_damage_notify(
                 ctx.cycle_state.remove_window(source_window);
                 ctx.session_state.remove_window(source_window);
                 ctx.eve_clients.remove(&source_window);
+                super::state::refresh_preview_focus(ctx);
+                super::state::reconcile_previews(ctx);
                 return Ok(());
             }
 
@@ -153,8 +155,11 @@ pub fn process_detected_window(
     );
     debug!(?identity, "Identity details");
 
-    let cycle_identity = (!identity.name.is_empty()).then(|| identity.source_identity());
+    let cycle_identity =
+        (identity.is_custom() || !identity.name.is_empty()).then(|| identity.source_identity());
     ctx.cycle_state.add_window(cycle_identity, window);
+    super::state::refresh_preview_focus(ctx);
+    super::state::reconcile_previews(ctx);
 
     // MapNotify/PropertyNotify can re-detect a source window that already has a
     // thumbnail, especially around minimize/restore. Refresh in place so the
@@ -172,6 +177,7 @@ pub fn process_detected_window(
         ctx.session_state,
         ctx.eve_clients,
         Some(identity.clone()),
+        ctx.cycle_state.eve_client_count(),
     ) {
         Ok(Some(mut thumbnail)) => {
             let geom_result = ctx
@@ -287,26 +293,30 @@ pub fn process_detected_window(
 
             // Check whether this newly created thumbnail belongs to the active source
             // window. Detection can arrive after activation but before FocusIn.
-            let is_actually_focused = crate::x11::get_active_window(
-                ctx.app_ctx.conn,
-                ctx.app_ctx.screen,
-                ctx.app_ctx.atoms,
-            )
-            .unwrap_or(None)
-            .map(|active| active == window)
-            .unwrap_or(false);
+            let is_actually_focused = if ctx.display_config.hide_active {
+                super::state::restore_focus_visibility(ctx);
+                ctx.session_state.active_source_window == Some(window)
+            } else {
+                crate::x11::get_active_window(
+                    ctx.app_ctx.conn,
+                    ctx.app_ctx.screen,
+                    ctx.app_ctx.atoms,
+                )
+                .unwrap_or(None)
+                    == Some(window)
+            };
 
-            if is_actually_focused {
+            if is_actually_focused && !ctx.display_config.hide_active {
                 super::state::restore_focus_visibility(ctx);
                 sync_focused_borders(
                     ctx.eve_clients,
                     ctx.cycle_state,
                     ctx.display_config,
                     ctx.font_renderer,
-                    window,
+                    Some(window),
                     "restored focused window",
                 );
-            } else {
+            } else if !is_actually_focused {
                 // Not focused, just draw inactive border
                 if let Some(thumb) = ctx.eve_clients.get_mut(&window)
                     && let Err(e) = thumb.border(
@@ -410,11 +420,6 @@ fn refresh_tracked_window(
         return Ok(false);
     }
 
-    let is_actually_focused =
-        get_active_window(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms)
-            .unwrap_or(None)
-            .map(|active| active == window)
-            .unwrap_or(false);
     let is_minimized =
         is_window_minimized(ctx.app_ctx.conn, window, ctx.app_ctx.atoms).unwrap_or(false);
 
@@ -531,17 +536,25 @@ fn refresh_tracked_window(
         });
     }
 
-    if is_actually_focused {
+    let is_actually_focused = if ctx.display_config.hide_active {
+        super::state::restore_focus_visibility(ctx);
+        ctx.session_state.active_source_window == Some(window)
+    } else {
+        get_active_window(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms).unwrap_or(None)
+            == Some(window)
+    };
+    if is_actually_focused && !ctx.display_config.hide_active {
         super::state::restore_focus_visibility(ctx);
         sync_focused_borders(
             ctx.eve_clients,
             ctx.cycle_state,
             ctx.display_config,
             ctx.font_renderer,
-            window,
+            Some(window),
             "tracked window refreshed",
         );
-    } else if !is_minimized
+    } else if !is_actually_focused
+        && !is_minimized
         && let Some(thumb) = ctx.eve_clients.get_mut(&window)
         && let Err(e) = thumb.border(
             ctx.display_config,
@@ -615,6 +628,8 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
         ctx.cycle_state.remove_window(win);
         ctx.session_state.remove_window(win);
         ctx.eve_clients.remove(&win);
+        super::state::refresh_preview_focus(ctx);
+        super::state::reconcile_previews(ctx);
     } else {
         debug!(
             window = event.window,

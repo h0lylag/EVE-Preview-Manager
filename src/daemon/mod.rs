@@ -3,6 +3,7 @@
 mod border_update;
 mod cycle_state;
 mod dispatcher;
+mod focus;
 pub mod font;
 mod group_drag;
 mod main_loop;

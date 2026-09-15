@@ -694,6 +694,17 @@ impl CycleState {
         self.current_window
     }
 
+    /// Count source IDs independently of rendering, groups, skip state, or live names.
+    pub fn eve_client_count(&self) -> usize {
+        self.active_windows
+            .values()
+            .filter(|identity| match identity {
+                None => true,
+                Some(identity) => identity.kind.is_eve(),
+            })
+            .count()
+    }
+
     /// Get all active source windows known to cycle state.
     pub fn get_active_windows(&self) -> &HashMap<Window, Option<SourceIdentity>> {
         &self.active_windows
@@ -1136,5 +1147,29 @@ mod tests {
             state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), true),
             eve_activation(10, "Pilot")
         );
+    }
+    #[test]
+    fn eve_count_tracks_windows_independently_of_cycle_eligibility() {
+        let mut state = CycleState::new(Vec::new());
+        assert_eq!(state.eve_client_count(), 0);
+        let alice = SourceIdentity::eve("Alice");
+        state.add_window(Some(alice.clone()), 10);
+        state.add_window(Some(alice.clone()), 10);
+        assert_eq!(state.eve_client_count(), 1);
+        state.add_window(None, 20);
+        state.add_window(Some(SourceIdentity::custom("Alice")), 30);
+        state.add_window(Some(SourceIdentity::custom("")), 40);
+        state.toggle_skip(&alice);
+        assert_eq!(state.eve_client_count(), 2);
+        state.update_character(10, "Bob".into());
+        state.update_character(10, String::new());
+        assert_eq!(state.eve_client_count(), 2);
+        state.remove_window(20);
+        state.remove_window(20);
+        state.remove_window(999);
+        assert_eq!(state.eve_client_count(), 1);
+        state.remove_window(10);
+        assert_eq!(state.eve_client_count(), 0);
+        assert_eq!(state.get_active_windows().len(), 2);
     }
 }

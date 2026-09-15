@@ -169,6 +169,22 @@ fn behavior_settings(
 
     setting_row(
         ui,
+        &mut profile.thumbnail_hide_when_single_client,
+        "Hide preview when only one EVE client is running",
+        "Hide the EVE preview while only one EVE client is running. Minimized and logged-out clients still count. Custom sources are unaffected.",
+        action,
+    );
+
+    setting_row(
+        ui,
+        &mut profile.thumbnail_hide_active,
+        "Hide preview of the active window",
+        "Hide the preview of the focused EVE client or custom source. Its preview returns when focus moves elsewhere.",
+        action,
+    );
+
+    setting_row(
+        ui,
         &mut profile.thumbnail_auto_save_position,
         "Automatically save thumbnail positions",
         "When disabled, positions are only saved when you use 'Save Thumbnail Positions' from the system tray menu",

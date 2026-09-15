@@ -47,7 +47,18 @@ pub(super) fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
         Event::ButtonRelease(event) => handlers::input::handle_button_release(ctx, event),
         Event::MotionNotify(event) => handlers::input::handle_motion_notify(ctx, event),
         PropertyNotify(event) => {
-            if event.atom == ctx.app_ctx.atoms.wm_name || event.atom == ctx.app_ctx.atoms.wm_class {
+            if event.window == ctx.app_ctx.screen.root {
+                // Root properties describe the desktop, never a preview source.
+                if event.atom == ctx.app_ctx.atoms.net_active_window
+                    && ctx.display_config.hide_active
+                {
+                    handlers::state::refresh_preview_focus(ctx);
+                    handlers::state::reconcile_previews(ctx);
+                }
+                Ok(())
+            } else if event.atom == ctx.app_ctx.atoms.wm_name
+                || event.atom == ctx.app_ctx.atoms.wm_class
+            {
                 handlers::window::handle_identity_update(ctx, event.window)
             } else if event.atom == ctx.app_ctx.atoms.net_wm_state {
                 handlers::state::handle_net_wm_state(ctx, event.window, event.atom)
@@ -58,6 +69,10 @@ pub(super) fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
         Event::ReparentNotify(event) => {
             if let Some(thumbnail) = ctx.eve_clients.get_mut(&event.window) {
                 thumbnail.set_parent(Some(event.parent));
+            }
+            if ctx.display_config.hide_active {
+                handlers::state::refresh_preview_focus(ctx);
+                handlers::state::reconcile_previews(ctx);
             }
             Ok(())
         }

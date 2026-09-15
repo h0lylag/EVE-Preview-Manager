@@ -13,6 +13,11 @@ use crate::common::types::{CharacterSettings, Position};
 /// Runtime window and focus state, never persisted to disk.
 #[derive(Default)]
 pub struct SessionState {
+    /// Confirmed active source, independent of optimistic cycle/border selection.
+    pub active_source_window: Option<Window>,
+    /// Source that owns the pending left-button click.
+    pub pressed_preview_source: Option<Window>,
+
     /// Window ID → position (session-only, not persisted)
     /// Used for logged-out windows that show "EVE" without character name
     /// Window IDs are ephemeral and don't survive X11 server restarts
@@ -89,8 +94,14 @@ impl SessionState {
         );
     }
 
-    /// Remove window from session tracking (called on DestroyNotify)
+    /// Remove a destroyed or stale source from session tracking.
     pub fn remove_window(&mut self, window: Window) {
+        if self.active_source_window == Some(window) {
+            self.active_source_window = None;
+        }
+        if self.pressed_preview_source == Some(window) {
+            self.pressed_preview_source = None;
+        }
         self.window_positions.remove(&window);
         self.window_last_character.remove(&window);
     }
@@ -135,6 +146,8 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            active_source_window: None,
+            pressed_preview_source: None,
         };
         let char_positions = HashMap::new();
 
@@ -150,6 +163,8 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            active_source_window: None,
+            pressed_preview_source: None,
         };
         let char_positions = HashMap::new();
 
@@ -165,6 +180,8 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            active_source_window: None,
+            pressed_preview_source: None,
         };
         let char_positions = HashMap::new();
 
@@ -180,6 +197,8 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            active_source_window: None,
+            pressed_preview_source: None,
         };
         let char_positions = HashMap::new();
 

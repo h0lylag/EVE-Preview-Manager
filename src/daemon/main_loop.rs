@@ -25,6 +25,7 @@ use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use super::border_update::sync_focused_borders;
 use super::cycle_state::{CycleActivation, CycleState};
 use super::dispatcher::{EventContext, handle_event};
+use super::focus::{active_tracked_source_window, tracked_source_window_for_window};
 use super::font;
 use super::group_drag::GroupDragState;
 use super::session_state::SessionState;
@@ -73,79 +74,6 @@ fn restore_interrupted_group_drag(
     }
 }
 
-fn direct_tracked_source_window(
-    thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
-    window: Window,
-) -> Option<Window> {
-    if active_windows.is_some_and(|windows| windows.contains_key(&window)) {
-        return Some(window);
-    }
-
-    if thumbnails.contains_key(&window) {
-        return Some(window);
-    }
-
-    thumbnails.iter().find_map(|(&source_window, thumbnail)| {
-        (thumbnail.window() == window
-            || thumbnail.src() == window
-            || thumbnail.parent() == Some(window))
-        .then_some(source_window)
-    })
-}
-
-fn tracked_source_window_for_window(
-    ctx: &AppContext<'_>,
-    thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
-    window: Window,
-) -> Option<Window> {
-    if let Some(source_window) = direct_tracked_source_window(thumbnails, active_windows, window) {
-        return Some(source_window);
-    }
-
-    let mut current = window;
-    for _ in 0..10 {
-        let parent = ctx
-            .conn
-            .query_tree(current)
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .map(|reply| reply.parent)?;
-
-        if let Some(source_window) =
-            direct_tracked_source_window(thumbnails, active_windows, parent)
-        {
-            debug!(
-                child = window,
-                parent = parent,
-                source_window = source_window,
-                "Matched focused window to tracked source ancestor"
-            );
-            return Some(source_window);
-        }
-
-        if parent == ctx.screen.root || parent == 0 {
-            break;
-        }
-        current = parent;
-    }
-
-    None
-}
-
-fn active_tracked_source_window(
-    ctx: &AppContext<'_>,
-    thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
-) -> Option<Window> {
-    let active_window = crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms)
-        .ok()
-        .flatten()?;
-
-    tracked_source_window_for_window(ctx, thumbnails, active_windows, active_window)
-}
-
 enum DaemonControlMessage {
     Config(ConfigMessage),
     ManagerDisconnected,
@@ -179,6 +107,7 @@ fn initialize_x11() -> Result<(
         screen.root,
         &ChangeWindowAttributesAux::new().event_mask(
             EventMask::SUBSTRUCTURE_NOTIFY
+                | EventMask::PROPERTY_CHANGE
                 | EventMask::BUTTON_PRESS
                 | EventMask::BUTTON_RELEASE
                 | EventMask::POINTER_MOTION,
@@ -672,7 +601,7 @@ async fn run_event_loop(
                                 &resources.cycle,
                                 &display_config,
                                 &font_renderer,
-                                window,
+                                Some(window),
                                 "hotkey activation",
                             );
 
@@ -778,7 +707,6 @@ async fn run_event_loop(
             // Only process this branch if there's an active deadline
             () = &mut hide_timer, if resources.session.focus_loss_deadline.is_some() => {
                 debug!("Executing delayed thumbnail hide");
-                restore_interrupted_group_drag(conn, &mut resources, "focus-loss hide");
                 let ctx = AppContext { conn, screen, atoms, formats };
                 crate::daemon::handlers::state::hide_after_focus_loss(&mut EventContext {
                     app_ctx: &ctx,
@@ -981,31 +909,18 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         atoms: &atoms,
         formats: &formats,
     };
-    let active_source_window = active_tracked_source_window(&init_ctx, &eve_clients, None);
-
-    for (window, thumbnail) in eve_clients.iter_mut() {
-        // Check if this window currently has focus
-        let is_focused = active_source_window.map(|w| w == *window).unwrap_or(false);
-
-        // Update state and draw appropriate border
-        thumbnail.state = crate::common::types::ThumbnailState::Normal {
-            focused: is_focused,
-        };
-        if let Err(e) = thumbnail.border(
-            &config,
-            is_focused,
-            cycle_state.is_skipped(thumbnail.effective_source_identity().as_ref()),
-            &font_renderer,
-        ) {
-            // Log warning but continue
-            tracing::warn!(
-                window = window,
-                character = %thumbnail.character_name,
-                error = %e,
-                "Failed to draw initial border"
-            );
-        }
-    }
+    let active_source_window = if config.hide_active {
+        session_state.active_source_window
+    } else {
+        active_tracked_source_window(&init_ctx, &eve_clients, None)
+    };
+    super::border_update::initialize_borders(
+        &mut eve_clients,
+        &cycle_state,
+        &config,
+        &font_renderer,
+        active_source_window,
+    );
 
     // 8. Run Main Event Loop
     let resources = DaemonResources {
@@ -1675,6 +1590,31 @@ mod tests {
                     toggle(ctx, resources, font, tx);
                     assert!(!resources.cycle.is_skipped(Some(&identity)));
                 })
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_toggle_preserves_cancelled_drag_release() {
+        with_x11(|ctx| {
+            with_daemon(ctx, |resources, font, tx| {
+                resources.group_drag = GroupDragState::SuppressingRelease(
+                    crate::daemon::group_drag::ChordButtons::Right,
+                );
+                handle_cycle_command(
+                    &CycleCommand::TogglePreviews,
+                    resources,
+                    ctx,
+                    font,
+                    tx,
+                    &HashMap::new(),
+                );
+                assert!(
+                    resources
+                        .group_drag
+                        .consume_suppressed_release(crate::common::constants::mouse::BUTTON_RIGHT)
+                );
             })
         });
     }

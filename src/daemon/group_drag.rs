@@ -159,10 +159,10 @@ impl GroupDragState {
 
     /// Cancels an active chord and returns its captured layout for restoration.
     pub fn cancel_active(&mut self) -> Option<Vec<GroupDragMember>> {
-        let Self::Active { members, .. } = std::mem::take(self) else {
+        let Self::Active { members, .. } = self else {
             return None;
         };
-
+        let members = std::mem::take(members);
         *self = Self::SuppressingRelease(ChordButtons::Both);
         Some(members)
     }

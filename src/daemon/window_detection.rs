@@ -305,6 +305,8 @@ pub fn check_and_create_window<'a>(
     state: &mut SessionState,
     existing_thumbnails: &HashMap<Window, Thumbnail>,
     known_identity: Option<WindowIdentity>,
+    // Includes the registered candidate, independently of thumbnail creation.
+    eve_client_count: usize,
 ) -> Result<Option<Thumbnail<'a>>> {
     // Check if window matches EVE or Custom Rule
     let identity = if let Some(id) = known_identity {
@@ -542,7 +544,13 @@ pub fn check_and_create_window<'a>(
         position,
         dimensions,
         preview_mode,
-        daemon_config.runtime_hidden || (display_config.hide_when_no_focus && state.focus_hidden),
+        display_config.preview_visibility_blocked(
+            identity.kind,
+            daemon_config.runtime_hidden,
+            state.focus_hidden,
+            eve_client_count,
+            state.active_source_window == Some(window),
+        ),
     )
     .context(format!(
         "Failed to create thumbnail for '{}' (window {})",
@@ -589,6 +597,7 @@ pub fn scan_eve_windows<'a>(
     let windows = crate::x11::get_client_list(ctx.conn, ctx.screen, ctx.atoms)
         .context("Failed to get window list via _NET_CLIENT_LIST")?;
 
+    let mut detected_windows = Vec::new();
     for w in windows {
         // 1. Identify valid windows (EVE or Custom Source)
         // We use identify_window directly so we can track them even if no thumbnail is created
@@ -602,9 +611,16 @@ pub fn scan_eve_windows<'a>(
         };
 
         // Register identified window with CycleState
-        let cycle_identity = (!identity.name.is_empty()).then(|| identity.source_identity());
+        let cycle_identity =
+            (identity.is_custom() || !identity.name.is_empty()).then(|| identity.source_identity());
         cycle_state.add_window(cycle_identity, w);
+        detected_windows.push((w, identity));
+    }
+    let eve_client_count = cycle_state.eve_client_count();
+    super::focus::refresh_active_source(ctx, &eve_clients, cycle_state, state, display_config);
 
+    // Register the entire initial population before a preview can map.
+    for (w, identity) in detected_windows {
         // 2. Try to create thumbnail
         match check_and_create_window(
             ctx,
@@ -615,6 +631,7 @@ pub fn scan_eve_windows<'a>(
             state,
             &eve_clients,
             Some(identity.clone()),
+            eve_client_count,
         ) {
             Ok(Some(eve)) => {
                 // Save initial position and dimensions (important for first-time characters)
@@ -1874,6 +1891,945 @@ mod tests {
                 );
                 after.reply().unwrap();
             })
+        });
+    }
+    fn hiding_config(single: bool, active: bool) -> DaemonConfig {
+        DaemonConfig {
+            profile: Profile {
+                thumbnail_hide_when_single_client: single,
+                thumbnail_hide_active: active,
+                thumbnail_hide_not_focused: false,
+                thumbnail_default_width: 160,
+                thumbnail_default_height: 100,
+                custom_windows: vec![
+                    serde_json::from_value(serde_json::json!({
+                        "alias": "Browser", "title_pattern": "Custom Browser", "limit": false
+                    }))
+                    .unwrap(),
+                ],
+                ..Profile::default()
+            },
+            character_thumbnails: HashMap::new(),
+            custom_source_thumbnails: HashMap::new(),
+            profile_hotkeys: HashMap::new(),
+            runtime_hidden: false,
+        }
+    }
+
+    fn active_property(ctx: &AppContext<'_>, source: Option<Window>) {
+        ctx.conn
+            .change_property32(
+                PropMode::REPLACE,
+                ctx.screen.root,
+                ctx.atoms.net_active_window,
+                AtomEnum::WINDOW,
+                &source.into_iter().collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    fn observe_active(
+        ctx: &AppContext<'_>,
+        events: &mut EventContext<'_, '_>,
+        source: Option<Window>,
+    ) {
+        active_property(ctx, source);
+        handle_event(
+            events,
+            property_event(ctx.screen.root, ctx.atoms.net_active_window),
+        )
+        .unwrap();
+    }
+
+    fn destroy_event(source: Window) -> Event {
+        Event::DestroyNotify(DestroyNotifyEvent {
+            response_type: DESTROY_NOTIFY_EVENT,
+            event: source,
+            window: source,
+            ..Default::default()
+        })
+    }
+
+    fn destroy_source(ctx: &AppContext<'_>, events: &mut EventContext<'_, '_>, source: Window) {
+        ctx.conn.destroy_window(source).unwrap().check().unwrap();
+        handle_event(events, destroy_event(source)).unwrap();
+    }
+
+    fn pointer_event(preview: Window, button: u8, pressed: bool, state: KeyButMask) -> Event {
+        let event = ButtonPressEvent {
+            response_type: if pressed {
+                BUTTON_PRESS_EVENT
+            } else {
+                BUTTON_RELEASE_EVENT
+            },
+            event: preview,
+            detail: button,
+            root_x: 110,
+            root_y: 110,
+            event_x: 10,
+            event_y: 10,
+            same_screen: true,
+            state,
+            ..Default::default()
+        };
+        if pressed {
+            Event::ButtonPress(event)
+        } else {
+            Event::ButtonRelease(event)
+        }
+    }
+
+    fn queued_events(ctx: &AppContext<'_>) -> Vec<Event> {
+        ctx.conn.get_input_focus().unwrap().reply().unwrap();
+        let mut result = Vec::new();
+        for _ in 0..4096 {
+            let Some(event) = ctx.conn.poll_for_event().unwrap() else {
+                return result;
+            };
+            result.push(event);
+        }
+        panic!("event queue did not drain");
+    }
+
+    fn watch_root(ctx: &AppContext<'_>) {
+        ctx.conn
+            .change_window_attributes(
+                ctx.screen.root,
+                &ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_startup_never_maps_blocked_previews() {
+        with_x11(|ctx| {
+            watch_root(ctx);
+            for single in [false, true] {
+                for active in [false, true] {
+                    for count in 0..=2 {
+                        for custom_first in [false, true] {
+                            let sources: Vec<_> = (0..count)
+                                .map(|i| window(ctx, &format!("EVE - Pilot{i}"), "eve"))
+                                .collect();
+                            let custom = window(ctx, "Custom Browser", "browser");
+                            let mut list = sources.clone();
+                            if custom_first {
+                                list.insert(0, custom);
+                            } else {
+                                list.push(custom);
+                            }
+                            ctx.conn
+                                .change_property32(
+                                    PropMode::REPLACE,
+                                    ctx.screen.root,
+                                    ctx.atoms.net_client_list,
+                                    AtomEnum::WINDOW,
+                                    &list,
+                                )
+                                .unwrap()
+                                .check()
+                                .unwrap();
+                            active_property(ctx, sources.first().copied());
+                            queued_events(ctx);
+                            with_config(ctx, hiding_config(single, active), |events, _| {
+                                *events.eve_clients = super::scan_eve_windows(
+                                    ctx,
+                                    events.display_config,
+                                    events.font_renderer,
+                                    events.daemon_config,
+                                    events.session_state,
+                                    events.cycle_state,
+                                    events.status_tx,
+                                )
+                                .unwrap();
+                                assert_eq!(events.cycle_state.eve_client_count(), count);
+                                let mut blocked = Vec::new();
+                                for (i, &source) in sources.iter().enumerate() {
+                                    let hidden = (single && count == 1) || (active && i == 0);
+                                    assert_visible(ctx, events, source, !hidden);
+                                    if hidden {
+                                        blocked.push(events.eve_clients[&source].window());
+                                    }
+                                }
+                                assert_visible(ctx, events, custom, true);
+                                for event in queued_events(ctx) {
+                                    assert!(
+                                        !matches!(event, Event::MapNotify(event) if blocked.contains(&event.window)),
+                                        "a blocked preview mapped during startup"
+                                    );
+                                }
+                            });
+                            for source in list {
+                                ctx.conn.destroy_window(source).unwrap().check().unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_dynamic_counts_and_geometry() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(true, false), |events, _| {
+                let a = window(ctx, "EVE - A", "eve");
+                for event in detection_events(ctx, a) {
+                    handle_event(events, event).unwrap();
+                }
+                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_visible(ctx, events, a, false);
+                events
+                    .eve_clients
+                    .get_mut(&a)
+                    .unwrap()
+                    .reposition(100, 100)
+                    .unwrap();
+                let preview = events.eve_clients[&a].window();
+                let dimensions = events.eve_clients[&a].dimensions;
+                let custom = window(ctx, "Custom Browser", "browser");
+                handle_event(events, create_event(ctx, custom)).unwrap();
+                assert_visible(ctx, events, custom, true);
+                assert_visible(ctx, events, a, false);
+                let b = window(ctx, "Not identified yet", "eve");
+                handle_event(events, create_event(ctx, b)).unwrap();
+                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                set_title(ctx, b, "EVE");
+                handle_event(events, property_event(b, ctx.atoms.wm_name)).unwrap();
+                assert_eq!(events.cycle_state.eve_client_count(), 2);
+                assert_visible(ctx, events, a, true);
+                assert_visible(ctx, events, b, true);
+                swap_character(ctx, events, b, "B");
+                set_title(ctx, b, "EVE");
+                handle_event(events, property_event(b, ctx.atoms.wm_name)).unwrap();
+                // Minimize and restore without unregistering the source.
+                ctx.conn
+                    .change_property32(
+                        PropMode::REPLACE,
+                        b,
+                        ctx.atoms.net_wm_state,
+                        AtomEnum::ATOM,
+                        &[ctx.atoms.net_wm_state_hidden],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                handle_event(events, property_event(b, ctx.atoms.net_wm_state)).unwrap();
+                ctx.conn.unmap_window(b).unwrap().check().unwrap();
+                handle_event(
+                    events,
+                    Event::UnmapNotify(UnmapNotifyEvent {
+                        response_type: UNMAP_NOTIFY_EVENT,
+                        event: b,
+                        window: b,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+                assert_eq!(events.cycle_state.eve_client_count(), 2);
+                assert_visible(ctx, events, a, true);
+                destroy_source(ctx, events, b);
+                handle_event(events, destroy_event(b)).unwrap();
+                handle_event(events, destroy_event(preview)).unwrap();
+                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_visible(ctx, events, a, false);
+                let c = window(ctx, "EVE - C", "eve");
+                handle_event(events, create_event(ctx, c)).unwrap();
+                assert_visible(ctx, events, a, true);
+                assert_eq!(events.eve_clients[&a].window(), preview);
+                assert_eq!(
+                    events.eve_clients[&a].current_position,
+                    crate::common::types::Position::new(100, 100)
+                );
+                assert_eq!(events.eve_clients[&a].dimensions, dimensions);
+                destroy_source(ctx, events, a);
+                destroy_source(ctx, events, c);
+                assert_eq!(events.cycle_state.eve_client_count(), 0);
+                assert_visible(ctx, events, custom, true);
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_counts_sources_without_thumbnails() {
+        with_x11(|ctx| {
+            let mut config = hiding_config(true, false);
+            config.profile.thumbnail_enabled = false;
+            config.profile.character_thumbnails.insert(
+                "A".into(),
+                crate::common::types::CharacterSettings {
+                    override_render_preview: Some(true),
+                    ..crate::common::types::CharacterSettings::new(100, 100, 160, 100)
+                },
+            );
+            with_config(ctx, config, |events, _| {
+                let a = window(ctx, "EVE - A", "eve");
+                let b = window(ctx, "EVE", "eve");
+                handle_event(events, create_event(ctx, a)).unwrap();
+                assert_visible(ctx, events, a, false);
+                handle_event(events, create_event(ctx, b)).unwrap();
+                assert!(!events.eve_clients.contains_key(&b));
+                assert_eq!(events.cycle_state.eve_client_count(), 2);
+                assert_visible(ctx, events, a, true);
+                destroy_source(ctx, events, b);
+                assert_visible(ctx, events, a, false);
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_confirmed_focus_and_event_order() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, _| {
+                watch_root(ctx);
+                active_property(ctx, None);
+                let a = window(ctx, "EVE - A", "eve");
+                let b = window(ctx, "EVE - B", "eve");
+                let custom = window(ctx, "Custom Browser", "browser");
+                for source in [a, b, custom] {
+                    handle_event(events, create_event(ctx, source)).unwrap();
+                }
+                observe_active(ctx, events, Some(a));
+                assert_visible(ctx, events, a, false);
+                assert_visible(ctx, events, b, true);
+                let pa = events.eve_clients[&a].window();
+                let pb = events.eve_clients[&b].window();
+                // Border/cycle optimism must not substitute for WM confirmation.
+                events
+                    .cycle_state
+                    .set_current_by_window_with_identity(b, None);
+                crate::daemon::border_update::sync_focused_borders(
+                    events.eve_clients,
+                    events.cycle_state,
+                    events.display_config,
+                    events.font_renderer,
+                    Some(b),
+                    "test requested activation",
+                );
+                crate::daemon::handlers::state::reconcile_previews(events);
+                assert_visible(ctx, events, a, false);
+                assert_visible(ctx, events, b, true);
+                queued_events(ctx);
+                observe_active(ctx, events, Some(b));
+                let queued = queued_events(ctx);
+                let hide = queued
+                    .iter()
+                    .position(|e| matches!(e, Event::UnmapNotify(e) if e.window == pb))
+                    .unwrap();
+                let reveal = queued
+                    .iter()
+                    .position(|e| matches!(e, Event::MapNotify(e) if e.window == pa))
+                    .unwrap();
+                assert!(hide < reveal);
+                // A stale FocusIn for A must read the current B property.
+                focus_in(events, a);
+                assert_eq!(events.session_state.active_source_window, Some(b));
+                assert_visible(ctx, events, b, false);
+                assert_visible(ctx, events, a, true);
+                for mode in [NotifyMode::GRAB, NotifyMode::UNGRAB] {
+                    handle_event(
+                        events,
+                        Event::FocusIn(FocusInEvent {
+                            response_type: FOCUS_IN_EVENT,
+                            event: a,
+                            mode,
+                            ..Default::default()
+                        }),
+                    )
+                    .unwrap();
+                    handle_event(
+                        events,
+                        Event::FocusOut(FocusOutEvent {
+                            response_type: FOCUS_OUT_EVENT,
+                            event: b,
+                            mode,
+                            ..Default::default()
+                        }),
+                    )
+                    .unwrap();
+                    assert_eq!(events.session_state.active_source_window, Some(b));
+                }
+                observe_active(ctx, events, Some(custom));
+                assert_visible(ctx, events, custom, false);
+                assert_visible(ctx, events, b, true);
+                let other = window(ctx, "Untracked", "other");
+                for source in [Some(other), Some(0), Some(ctx.screen.root), None, Some(pa)] {
+                    observe_active(ctx, events, source);
+                    assert_eq!(events.session_state.active_source_window, None);
+                    for source in [a, b, custom] {
+                        assert_visible(ctx, events, source, true);
+                    }
+                }
+                observe_active(ctx, events, Some(a));
+                ctx.conn
+                    .delete_property(ctx.screen.root, ctx.atoms.net_active_window)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                handle_event(
+                    events,
+                    property_event(ctx.screen.root, ctx.atoms.net_active_window),
+                )
+                .unwrap();
+                assert_visible(ctx, events, a, true);
+                observe_active(ctx, events, Some(b));
+                destroy_source(ctx, events, b);
+                assert_eq!(events.session_state.active_source_window, None);
+                assert_visible(ctx, events, a, true);
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_focus_matches_children_and_unrendered_frames() {
+        with_x11(|ctx| {
+            let mut config = hiding_config(false, true);
+            config.profile.thumbnail_enabled = false;
+            with_config(ctx, config, |events, _| {
+                active_property(ctx, None);
+                let frame = window(ctx, "Frame", "wm");
+                let source = window(ctx, "EVE - A", "eve");
+                ctx.conn
+                    .reparent_window(source, frame, 0, 0)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                handle_event(events, create_event(ctx, source)).unwrap();
+                let child = window(ctx, "Child", "widget");
+                ctx.conn
+                    .reparent_window(child, source, 0, 0)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                assert!(events.eve_clients.is_empty());
+                for active in [source, child, frame] {
+                    observe_active(ctx, events, Some(active));
+                    assert_eq!(events.session_state.active_source_window, Some(source));
+                }
+                let next_frame = window(ctx, "Other frame", "wm");
+                active_property(ctx, Some(next_frame));
+                ctx.conn
+                    .reparent_window(source, next_frame, 0, 0)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                handle_event(
+                    events,
+                    Event::ReparentNotify(ReparentNotifyEvent {
+                        response_type: REPARENT_NOTIFY_EVENT,
+                        event: source,
+                        window: source,
+                        parent: next_frame,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+                assert_eq!(events.session_state.active_source_window, Some(source));
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_reasons_and_stale_focus_deadline() {
+        with_x11(|ctx| {
+            let mut config = hiding_config(true, true);
+            config.profile.thumbnail_hide_not_focused = true;
+            with_config(ctx, config, |events, _| {
+                let a = window(ctx, "EVE - A", "eve");
+                active_property(ctx, Some(a));
+                handle_event(events, create_event(ctx, a)).unwrap();
+                observe_active(ctx, events, None);
+                assert_visible(ctx, events, a, false); // single-client rule outlives active rule
+                let deadline = events.session_state.focus_loss_deadline;
+                assert!(deadline.is_some());
+                observe_active(ctx, events, None);
+                assert_eq!(events.session_state.focus_loss_deadline, deadline);
+                let b = window(ctx, "EVE - B", "eve");
+                events.daemon_config.runtime_hidden = true;
+                handle_event(events, create_event(ctx, b)).unwrap();
+                for source in [a, b] {
+                    assert_visible(ctx, events, source, false);
+                }
+                crate::daemon::handlers::state::hide_after_focus_loss(events);
+                crate::daemon::handlers::state::toggle_previews(events);
+                assert!(!events.daemon_config.runtime_hidden);
+                for source in [a, b] {
+                    assert_visible(ctx, events, source, false);
+                }
+                observe_active(ctx, events, Some(a));
+                assert!(!events.session_state.focus_hidden);
+                assert_visible(ctx, events, b, true);
+                assert_visible(ctx, events, a, false);
+                // A timer queued before confirmed focus return cannot hide B.
+                events.session_state.focus_loss_deadline = Some(std::time::Instant::now());
+                crate::daemon::handlers::state::hide_after_focus_loss(events);
+                assert!(events.session_state.focus_loss_deadline.is_none());
+                assert_visible(ctx, events, b, true);
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_stale_damage_removes_source_and_hides_survivor() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(true, false), |events, _| {
+                let a = window(ctx, "EVE - A", "eve");
+                let b = window(ctx, "EVE - B", "eve");
+                for source in [a, b] {
+                    handle_event(events, create_event(ctx, source)).unwrap();
+                }
+                let damage = events.eve_clients[&b].damage();
+                ctx.conn.destroy_window(b).unwrap().check().unwrap();
+                handle_event(
+                    events,
+                    Event::DamageNotify(x11rb::protocol::damage::NotifyEvent {
+                        damage,
+                        drawable: b,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+                assert!(!events.cycle_state.get_active_windows().contains_key(&b));
+                assert_visible(ctx, events, a, false);
+                handle_event(events, destroy_event(b)).unwrap();
+                assert_eq!(events.cycle_state.eve_client_count(), 1);
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_overlapping_clicks_use_the_pressed_source() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, _| {
+                watch_root(ctx);
+                let a = window(ctx, "EVE - A", "eve");
+                let b = window(ctx, "EVE - B", "eve");
+                active_property(ctx, Some(a));
+                for source in [a, b] {
+                    handle_event(events, create_event(ctx, source)).unwrap();
+                    events
+                        .eve_clients
+                        .get_mut(&source)
+                        .unwrap()
+                        .reposition(100, 100)
+                        .unwrap();
+                }
+                let pa = events.eve_clients[&a].window();
+                let pb = events.eve_clients[&b].window();
+                queued_events(ctx);
+                handle_event(events, pointer_event(pb, 1, true, KeyButMask::default())).unwrap();
+                handle_event(events, pointer_event(pb, 1, false, KeyButMask::BUTTON1)).unwrap();
+                let requests: Vec<_> = queued_events(ctx)
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::ClientMessage(e) if e.type_ == ctx.atoms.net_active_window => {
+                            Some(e.window)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(requests, [b]);
+                assert_visible(ctx, events, a, false); // request alone is not confirmation
+                assert_visible(ctx, events, b, true);
+                observe_active(ctx, events, Some(b));
+                assert_visible(ctx, events, b, false);
+                assert_visible(ctx, events, a, true);
+                handle_event(events, pointer_event(pa, 1, true, KeyButMask::default())).unwrap();
+                observe_active(ctx, events, Some(a));
+                assert!(events.session_state.pressed_preview_source.is_none());
+                queued_events(ctx);
+                handle_event(events, pointer_event(pa, 1, true, KeyButMask::default())).unwrap();
+                assert!(events.session_state.pressed_preview_source.is_none());
+                for preview in [pa, pb, pb] {
+                    handle_event(
+                        events,
+                        pointer_event(preview, 1, false, KeyButMask::BUTTON1),
+                    )
+                    .unwrap();
+                }
+                assert!(!queued_events(ctx).iter().any(|event| matches!(event,
+                Event::ClientMessage(e) if e.type_ == ctx.atoms.net_active_window)));
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_cancels_single_and_group_drags_without_saving() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, rx| {
+                let a = window(ctx, "EVE - A", "eve");
+                let b = window(ctx, "EVE - B", "eve");
+                active_property(ctx, None);
+                for source in [a, b] {
+                    handle_event(events, create_event(ctx, source)).unwrap();
+                    events
+                        .eve_clients
+                        .get_mut(&source)
+                        .unwrap()
+                        .reposition(100, 100)
+                        .unwrap();
+                }
+                let pa = events.eve_clients[&a].window();
+                for group in [false, true] {
+                    observe_active(ctx, events, None);
+                    handle_event(events, pointer_event(pa, 3, true, KeyButMask::default()))
+                        .unwrap();
+                    if group {
+                        handle_event(events, pointer_event(pa, 1, true, KeyButMask::BUTTON3))
+                            .unwrap();
+                        assert!(events.group_drag_state.is_active());
+                    }
+                    let moving: &[Window] = if group { &[a, b] } else { &[a] };
+                    handle_event(
+                        events,
+                        Event::MotionNotify(MotionNotifyEvent {
+                            response_type: MOTION_NOTIFY_EVENT,
+                            event: pa,
+                            root_x: 310,
+                            root_y: 330,
+                            state: if group {
+                                KeyButMask::BUTTON1 | KeyButMask::BUTTON3
+                            } else {
+                                KeyButMask::BUTTON3
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .unwrap();
+                    for source in moving {
+                        assert_ne!(
+                            events.eve_clients[source].current_position,
+                            crate::common::types::Position::new(100, 100)
+                        );
+                    }
+                    drain_messages(rx);
+                    observe_active(ctx, events, Some(a));
+                    assert!(!events.group_drag_state.is_active());
+                    assert!(!events.eve_clients[&a].input_state.dragging);
+                    for source in moving {
+                        assert_eq!(
+                            events.eve_clients[source].current_position,
+                            crate::common::types::Position::new(100, 100)
+                        );
+                    }
+                    handle_event(events, pointer_event(pa, 3, false, KeyButMask::BUTTON3)).unwrap();
+                    if group {
+                        handle_event(events, pointer_event(pa, 1, false, KeyButMask::BUTTON1))
+                            .unwrap();
+                    }
+                    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+                }
+            })
+        });
+    }
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_focus_errors_preserve_observation() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, _| {
+                let source = window(ctx, "EVE - A", "eve");
+                active_property(ctx, Some(source));
+                handle_event(events, create_event(ctx, source)).unwrap();
+                let deadline = Some(std::time::Instant::now());
+                events.session_state.focus_loss_deadline = deadline;
+                let mut screen = ctx.screen.clone();
+                screen.root = ctx.conn.generate_id().unwrap(); // nonexistent root forces BadWindow
+                let invalid_ctx = AppContext {
+                    conn: ctx.conn,
+                    screen: &screen,
+                    atoms: ctx.atoms,
+                    formats: ctx.formats,
+                };
+                crate::daemon::focus::refresh_active_source(
+                    &invalid_ctx,
+                    events.eve_clients,
+                    events.cycle_state,
+                    events.session_state,
+                    events.display_config,
+                );
+                assert_eq!(events.session_state.active_source_window, Some(source));
+                assert_eq!(events.session_state.focus_loss_deadline, deadline);
+                assert!(!events.session_state.focus_hidden);
+                assert_visible(ctx, events, source, false);
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_parent_destruction_updates_count() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(true, true), |events, _| {
+                let a = window(ctx, "EVE - A", "eve");
+                let frame = window(ctx, "Frame", "wm");
+                let b = window(ctx, "EVE - B", "eve");
+                ctx.conn
+                    .reparent_window(b, frame, 0, 0)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                active_property(ctx, Some(frame));
+                for source in [a, b] {
+                    handle_event(events, create_event(ctx, source)).unwrap();
+                }
+                assert_eq!(events.session_state.active_source_window, Some(b));
+                assert_visible(ctx, events, a, true);
+                assert_visible(ctx, events, b, false);
+                destroy_source(ctx, events, frame);
+                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_eq!(events.session_state.active_source_window, None);
+                assert_visible(ctx, events, a, false);
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_completed_drags_save_without_activation() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, rx| {
+                watch_root(ctx);
+                active_property(ctx, None);
+                let a = window(ctx, "EVE - A", "eve");
+                handle_event(events, create_event(ctx, a)).unwrap();
+                events
+                    .eve_clients
+                    .get_mut(&a)
+                    .unwrap()
+                    .reposition(100, 100)
+                    .unwrap();
+                let preview = events.eve_clients[&a].window();
+                for group in [false, true] {
+                    events
+                        .eve_clients
+                        .get_mut(&a)
+                        .unwrap()
+                        .reposition(100, 100)
+                        .unwrap();
+                    drain_messages(rx);
+                    queued_events(ctx);
+                    handle_event(
+                        events,
+                        pointer_event(preview, 3, true, KeyButMask::default()),
+                    )
+                    .unwrap();
+                    if group {
+                        handle_event(events, pointer_event(preview, 1, true, KeyButMask::BUTTON3))
+                            .unwrap();
+                    }
+                    handle_event(
+                        events,
+                        Event::MotionNotify(MotionNotifyEvent {
+                            response_type: MOTION_NOTIFY_EVENT,
+                            event: preview,
+                            root_x: 310,
+                            root_y: 330,
+                            state: KeyButMask::BUTTON3,
+                            ..Default::default()
+                        }),
+                    )
+                    .unwrap();
+                    handle_event(
+                        events,
+                        pointer_event(preview, 3, false, KeyButMask::BUTTON3),
+                    )
+                    .unwrap();
+                    if group {
+                        handle_event(
+                            events,
+                            pointer_event(preview, 1, false, KeyButMask::BUTTON1),
+                        )
+                        .unwrap();
+                    }
+                    assert_eq!(
+                        events.eve_clients[&a].current_position,
+                        crate::common::types::Position::new(300, 320)
+                    );
+                    let DaemonMessage::PositionsChanged { updates } = rx.try_recv().unwrap() else {
+                        panic!("expected spatial update");
+                    };
+                    assert_eq!(updates.len(), 1);
+                    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+                    assert!(!queued_events(ctx).iter().any(|event| matches!(event,
+                    Event::ClientMessage(e) if e.type_ == ctx.atoms.net_active_window)));
+                }
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_stale_focus_preserves_confirmed_cycle_and_borders() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, _| {
+                let a = window(ctx, "EVE - A", "eve");
+                let b = window(ctx, "EVE - B", "eve");
+                active_property(ctx, Some(a));
+                for source in [a, b] {
+                    handle_event(events, create_event(ctx, source)).unwrap();
+                }
+                observe_active(ctx, events, Some(b));
+                focus_in(events, a); // delayed event contradicts the current WM property
+                assert_eq!(events.cycle_state.get_current_window(), Some(b));
+                assert!(!events.eve_clients[&a].state.is_focused());
+                assert!(events.eve_clients[&b].state.is_focused());
+                observe_active(ctx, events, None);
+                assert!(!events.eve_clients[&a].state.is_focused());
+                assert!(!events.eve_clients[&b].state.is_focused());
+                assert_visible(ctx, events, a, true);
+                assert_visible(ctx, events, b, true);
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_destroyed_preview_cannot_retarget_queued_press() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, _| {
+                watch_root(ctx);
+                active_property(ctx, None);
+                let a = window(ctx, "EVE - A", "eve");
+                let b = window(ctx, "EVE - B", "eve");
+                for source in [a, b] {
+                    handle_event(events, create_event(ctx, source)).unwrap();
+                    events
+                        .eve_clients
+                        .get_mut(&source)
+                        .unwrap()
+                        .reposition(100, 100)
+                        .unwrap();
+                }
+                let old_preview = events.eve_clients[&b].window();
+                let survivor = events.eve_clients[&a].window();
+                destroy_source(ctx, events, b);
+                queued_events(ctx);
+                handle_event(
+                    events,
+                    pointer_event(old_preview, 1, true, KeyButMask::default()),
+                )
+                .unwrap();
+                assert!(events.session_state.pressed_preview_source.is_none());
+                handle_event(
+                    events,
+                    pointer_event(survivor, 1, false, KeyButMask::BUTTON1),
+                )
+                .unwrap();
+                assert!(!queued_events(ctx).iter().any(|event| matches!(event,
+                Event::ClientMessage(e) if e.type_ == ctx.atoms.net_active_window)));
+            })
+        });
+    }
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_startup_preserves_minimized_state_on_reveal() {
+        use crate::common::types::ThumbnailState;
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(true, true), |events, _| {
+                active_property(ctx, None);
+                let a = window(ctx, "EVE - A", "eve");
+                ctx.conn
+                    .change_property32(
+                        PropMode::REPLACE,
+                        a,
+                        ctx.atoms.net_wm_state,
+                        AtomEnum::ATOM,
+                        &[ctx.atoms.net_wm_state_hidden],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                ctx.conn
+                    .change_property32(
+                        PropMode::REPLACE,
+                        ctx.screen.root,
+                        ctx.atoms.net_client_list,
+                        AtomEnum::WINDOW,
+                        &[a],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                *events.eve_clients = super::scan_eve_windows(
+                    ctx,
+                    events.display_config,
+                    events.font_renderer,
+                    events.daemon_config,
+                    events.session_state,
+                    events.cycle_state,
+                    events.status_tx,
+                )
+                .unwrap();
+                assert_eq!(events.eve_clients[&a].state, ThumbnailState::Minimized);
+                crate::daemon::border_update::initialize_borders(
+                    events.eve_clients,
+                    events.cycle_state,
+                    events.display_config,
+                    events.font_renderer,
+                    events.session_state.active_source_window,
+                );
+                assert_eq!(events.eve_clients[&a].state, ThumbnailState::Minimized);
+                assert_visible(ctx, events, a, false);
+                let b = window(ctx, "EVE - B", "eve");
+                handle_event(events, create_event(ctx, b)).unwrap();
+                assert_visible(ctx, events, a, true);
+                assert_eq!(events.eve_clients[&a].state, ThumbnailState::Minimized);
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_failed_ancestor_query_preserves_observation() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, _| {
+                let source = window(ctx, "EVE - A", "eve");
+                active_property(ctx, Some(source));
+                handle_event(events, create_event(ctx, source)).unwrap();
+                let nonexistent = ctx.conn.generate_id().unwrap();
+                observe_active(ctx, events, Some(nonexistent));
+                assert_eq!(events.session_state.active_source_window, Some(source));
+                assert_visible(ctx, events, source, false);
+                // Destruction clears the last observation even if the next read fails.
+                destroy_source(ctx, events, source);
+                assert_eq!(events.session_state.active_source_window, None);
+            });
+        });
+    }
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_hiding_root_properties_cannot_register_desktop_as_source() {
+        with_x11(|ctx| {
+            with_config(ctx, hiding_config(false, true), |events, _| {
+                ctx.conn
+                    .change_property8(
+                        PropMode::REPLACE,
+                        ctx.screen.root,
+                        ctx.atoms.wm_name,
+                        AtomEnum::STRING,
+                        b"Custom Browser",
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                handle_event(events, property_event(ctx.screen.root, ctx.atoms.wm_name)).unwrap();
+                assert!(events.cycle_state.get_active_windows().is_empty());
+                assert!(events.eve_clients.is_empty());
+            });
         });
     }
 }
