@@ -9,10 +9,16 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::common::constants::{input, paths, permissions};
+use crate::common::types::Position;
 use crate::config::{HotkeyBackendType, HotkeyBinding};
 use crate::input::device_detection;
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt, GrabMode, KeyButMask};
+use x11rb::protocol::Event;
+use x11rb::protocol::xproto::{
+    AtomEnum, ConfigureWindowAux, ConnectionExt, CreateWindowAux, Cursor, EventMask, Font,
+    GrabMode, GrabStatus, InputFocus, KeyButMask, PropMode, StackMode, Window, WindowClass,
+};
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 /// Result of a key capture operation
 #[derive(Debug, Clone)]
@@ -24,6 +30,15 @@ pub enum CaptureResult {
     /// Capture timed out (no key pressed within timeout period)
     Timeout,
     /// Error occurred during capture
+    Error(String),
+}
+
+/// Result of a global screen-position picker operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PositionPickResult {
+    Picked(Position),
+    Cancelled,
+    Timeout,
     Error(String),
 }
 
@@ -89,6 +104,356 @@ impl Default for CaptureState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+const POSITION_PICK_TIMEOUT: Duration = Duration::from_secs(30);
+const POSITION_PICK_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const POSITION_PICK_OVERLAY_OPACITY: u32 = 0x6600_0000;
+const X11_CURSOR_CROSSHAIR: u16 = 34;
+const X11_CURSOR_CROSSHAIR_MASK: u16 = 35;
+
+/// Start picking a root-screen position in the background.
+/// Returns a result receiver and a cancellation sender.
+pub fn start_position_pick() -> (Receiver<PositionPickResult>, Sender<()>) {
+    let (result_tx, result_rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let result = capture_position_x11(cancel_rx).unwrap_or_else(|err| {
+            warn!(error = %err, "Position picker error");
+            PositionPickResult::Error(err.to_string())
+        });
+
+        let _ = result_tx.send(result);
+    });
+
+    (result_rx, cancel_tx)
+}
+
+fn capture_position_x11(cancel_rx: Receiver<()>) -> Result<PositionPickResult> {
+    capture_position_overlay(&cancel_rx).or_else(|overlay_error| {
+        warn!(
+            error = %overlay_error,
+            "Position picker overlay failed; falling back to root pointer grab"
+        );
+        capture_position_root_grab(&cancel_rx)
+    })
+}
+
+fn capture_position_overlay(cancel_rx: &Receiver<()>) -> Result<PositionPickResult> {
+    let (conn, screen_num) = x11rb::connect(None).context("Failed to connect to X11")?;
+    let screen = &conn.setup().roots[screen_num];
+    let root = screen.root;
+
+    let cursor = create_crosshair_cursor(&conn).unwrap_or(0);
+    let overlay = create_position_pick_overlay(&conn, screen, cursor)?;
+    let keyboard_grabbed = conn
+        .grab_keyboard(
+            false,
+            overlay,
+            x11rb::CURRENT_TIME,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .is_some_and(|reply| reply.status == GrabStatus::SUCCESS);
+
+    let _ = conn.set_input_focus(InputFocus::POINTER_ROOT, overlay, x11rb::CURRENT_TIME);
+    conn.configure_window(
+        overlay,
+        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+    )
+    .context("Failed to raise position picker overlay")?;
+    conn.flush().context("Failed to flush X11 picker overlay")?;
+    info!(
+        keyboard_grabbed,
+        width = screen.width_in_pixels,
+        height = screen.height_in_pixels,
+        "Position picker overlay mapped"
+    );
+
+    let start = std::time::Instant::now();
+    let result = loop {
+        if start.elapsed() > POSITION_PICK_TIMEOUT {
+            break PositionPickResult::Timeout;
+        }
+
+        match cancel_rx.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                break PositionPickResult::Cancelled;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        if let Some(event) = conn.poll_for_event()? {
+            match event {
+                Event::ButtonPress(event) => match event.detail {
+                    1 => {
+                        break PositionPickResult::Picked(Position::new(
+                            event.root_x,
+                            event.root_y,
+                        ));
+                    }
+                    3 => break PositionPickResult::Cancelled,
+                    _ => {}
+                },
+                Event::KeyPress(event) => {
+                    let evdev_code = (event.detail as u16).saturating_sub(8);
+                    if evdev_code == 1 {
+                        break PositionPickResult::Cancelled;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        thread::sleep(POSITION_PICK_POLL_INTERVAL);
+    };
+
+    if keyboard_grabbed {
+        let _ = conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+    }
+    let _ = conn.destroy_window(overlay);
+    let _ = conn.flush();
+
+    debug!(root, overlay, "Position picker overlay closed");
+    Ok(result)
+}
+
+fn create_position_pick_overlay<C: Connection>(
+    conn: &C,
+    screen: &x11rb::protocol::xproto::Screen,
+    cursor: Cursor,
+) -> Result<Window> {
+    let window = conn
+        .generate_id()
+        .context("Failed to generate position picker overlay ID")?;
+
+    let mut aux = CreateWindowAux::new()
+        .background_pixel(screen.black_pixel)
+        .override_redirect(crate::common::constants::x11::OVERRIDE_REDIRECT)
+        .event_mask(
+            EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE
+                | EventMask::KEY_PRESS
+                | EventMask::EXPOSURE
+                | EventMask::STRUCTURE_NOTIFY,
+        );
+
+    if cursor != x11rb::NONE {
+        aux = aux.cursor(cursor);
+    }
+
+    conn.create_window(
+        screen.root_depth,
+        window,
+        screen.root,
+        0,
+        0,
+        screen.width_in_pixels,
+        screen.height_in_pixels,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        screen.root_visual,
+        &aux,
+    )
+    .context("Failed to create position picker overlay")?;
+
+    set_position_pick_overlay_properties(conn, window)?;
+    conn.map_window(window)
+        .context("Failed to map position picker overlay")?;
+
+    Ok(window)
+}
+
+fn set_position_pick_overlay_properties<C: Connection>(conn: &C, window: Window) -> Result<()> {
+    let net_wm_name = intern_atom(conn, b"_NET_WM_NAME")?;
+    let utf8_string = intern_atom(conn, b"UTF8_STRING")?;
+    let wm_class = intern_atom(conn, b"WM_CLASS")?;
+    let net_wm_pid = intern_atom(conn, b"_NET_WM_PID")?;
+    let net_wm_window_opacity = intern_atom(conn, b"_NET_WM_WINDOW_OPACITY")?;
+    let net_wm_state = intern_atom(conn, b"_NET_WM_STATE")?;
+    let net_wm_state_above = intern_atom(conn, b"_NET_WM_STATE_ABOVE")?;
+    let net_wm_state_fullscreen = intern_atom(conn, b"_NET_WM_STATE_FULLSCREEN")?;
+    let net_wm_window_type = intern_atom(conn, b"_NET_WM_WINDOW_TYPE")?;
+    let net_wm_window_type_utility = intern_atom(conn, b"_NET_WM_WINDOW_TYPE_UTILITY")?;
+
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        net_wm_name,
+        utf8_string,
+        b"EPM Position Picker",
+    )
+    .context("Failed to set position picker title")?;
+    conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        wm_class,
+        AtomEnum::STRING,
+        b"eve-preview-position-picker\0eve-preview-position-picker\0",
+    )
+    .context("Failed to set position picker WM_CLASS")?;
+    conn.change_property32(
+        PropMode::REPLACE,
+        window,
+        net_wm_pid,
+        AtomEnum::CARDINAL,
+        &[std::process::id()],
+    )
+    .context("Failed to set position picker PID")?;
+    conn.change_property32(
+        PropMode::REPLACE,
+        window,
+        net_wm_window_opacity,
+        AtomEnum::CARDINAL,
+        &[POSITION_PICK_OVERLAY_OPACITY],
+    )
+    .context("Failed to set position picker opacity")?;
+    conn.change_property32(
+        PropMode::REPLACE,
+        window,
+        net_wm_state,
+        AtomEnum::ATOM,
+        &[net_wm_state_above, net_wm_state_fullscreen],
+    )
+    .context("Failed to set position picker window state")?;
+    conn.change_property32(
+        PropMode::REPLACE,
+        window,
+        net_wm_window_type,
+        AtomEnum::ATOM,
+        &[net_wm_window_type_utility],
+    )
+    .context("Failed to set position picker window type")?;
+
+    Ok(())
+}
+
+fn intern_atom<C: Connection>(conn: &C, name: &[u8]) -> Result<u32> {
+    Ok(conn
+        .intern_atom(false, name)
+        .context("Failed to intern X11 atom")?
+        .reply()
+        .context("Failed to get X11 atom reply")?
+        .atom)
+}
+
+fn capture_position_root_grab(cancel_rx: &Receiver<()>) -> Result<PositionPickResult> {
+    let (conn, screen_num) = x11rb::connect(None).context("Failed to connect to X11")?;
+    let screen = &conn.setup().roots[screen_num];
+    let root = screen.root;
+
+    let cursor = create_crosshair_cursor(&conn).unwrap_or(0);
+    let pointer_reply = conn
+        .grab_pointer(
+            false,
+            root,
+            EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+            x11rb::NONE,
+            cursor,
+            x11rb::CURRENT_TIME,
+        )
+        .context("Failed to grab pointer")?
+        .reply()
+        .context("Failed to get grab_pointer reply")?;
+
+    if pointer_reply.status != GrabStatus::SUCCESS {
+        return Err(anyhow::anyhow!(
+            "GrabPointer failed with status: {:?}",
+            pointer_reply.status
+        ));
+    }
+
+    let keyboard_grabbed = conn
+        .grab_keyboard(
+            false,
+            root,
+            x11rb::CURRENT_TIME,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .is_some_and(|reply| reply.status == GrabStatus::SUCCESS);
+
+    conn.flush().context("Failed to flush X11 picker grabs")?;
+    info!(
+        keyboard_grabbed,
+        "Pointer grabbed for preview position picker"
+    );
+
+    let start = std::time::Instant::now();
+    let result = loop {
+        if start.elapsed() > POSITION_PICK_TIMEOUT {
+            break PositionPickResult::Timeout;
+        }
+
+        match cancel_rx.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                break PositionPickResult::Cancelled;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        if let Some(event) = conn.poll_for_event()? {
+            match event {
+                Event::ButtonPress(event) => match event.detail {
+                    1 => {
+                        break PositionPickResult::Picked(Position::new(
+                            event.root_x,
+                            event.root_y,
+                        ));
+                    }
+                    3 => break PositionPickResult::Cancelled,
+                    _ => {}
+                },
+                Event::KeyPress(event) => {
+                    let evdev_code = (event.detail as u16).saturating_sub(8);
+                    if evdev_code == 1 {
+                        break PositionPickResult::Cancelled;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        thread::sleep(POSITION_PICK_POLL_INTERVAL);
+    };
+
+    let _ = conn.ungrab_pointer(x11rb::CURRENT_TIME);
+    if keyboard_grabbed {
+        let _ = conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+    }
+    let _ = conn.flush();
+
+    Ok(result)
+}
+
+fn create_crosshair_cursor<C: Connection>(conn: &C) -> Option<Cursor> {
+    let font: Font = conn.generate_id().ok()?;
+    conn.open_font(font, b"cursor").ok()?;
+
+    let cursor: Cursor = conn.generate_id().ok()?;
+    conn.create_glyph_cursor(
+        cursor,
+        font,
+        font,
+        X11_CURSOR_CROSSHAIR,
+        X11_CURSOR_CROSSHAIR_MASK,
+        u16::MAX,
+        u16::MAX,
+        u16::MAX,
+        0,
+        0,
+        0,
+    )
+    .ok()?;
+
+    Some(cursor)
 }
 
 /// Start capturing a key press in the background

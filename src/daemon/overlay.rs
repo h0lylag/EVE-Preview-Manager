@@ -10,10 +10,17 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::common::constants::x11;
-use crate::common::types::Dimensions;
+use crate::common::types::{Dimensions, SourceKind, TextOffset};
 use crate::config::DisplayConfig;
 
 use super::font::FontRenderer;
+
+#[derive(Clone, Copy)]
+pub struct OverlayIdentity<'a> {
+    pub kind: SourceKind,
+    pub style: &'a str,
+    pub display: &'a str,
+}
 
 #[derive(Debug)]
 /// Handles text and border overlay rendering for thumbnails.
@@ -48,7 +55,7 @@ impl<'a> OverlayRenderer<'a> {
     /// * `font_renderer` - System for rendering text glyphs (used for initial render).
     /// * `root` - Root window ID (for pixmap creation).
     /// * `dimensions` - Initial size of the overlay.
-    /// * `character_name` - Debug name for error logging.
+    /// * `identity` - Effective styling key and label text for the thumbnail.
     pub fn new<'b>(
         conn: &'a RustConnection,
         config: &'b DisplayConfig,
@@ -56,10 +63,8 @@ impl<'a> OverlayRenderer<'a> {
         font_renderer: &FontRenderer,
         root: u32,
         dimensions: Dimensions,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
     ) -> Result<Self> {
-        // ... (implementation of new)
-        // Create overlay pixmap
         let overlay_pixmap = conn
             .generate_id()
             .context("Failed to generate ID for overlay pixmap")?;
@@ -72,7 +77,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create overlay pixmap for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create overlay picture
@@ -87,7 +92,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create overlay picture for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create overlay GC
@@ -101,7 +106,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create graphics context for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create skipped indicator GC (Red)
@@ -117,7 +122,7 @@ impl<'a> OverlayRenderer<'a> {
         )
         .context(format!(
             "Failed to create skipped indicator GC for '{}'",
-            character_name
+            identity.style
         ))?;
 
         // Create active border fill
@@ -127,7 +132,7 @@ impl<'a> OverlayRenderer<'a> {
         conn.render_create_solid_fill(active_border_fill, config.active_border_color)
             .context(format!(
                 "Failed to create active border fill for '{}'",
-                character_name
+                identity.style
             ))?;
 
         // Create inactive border fill
@@ -137,7 +142,7 @@ impl<'a> OverlayRenderer<'a> {
         conn.render_create_solid_fill(inactive_border_fill, config.inactive_border_color)
             .context(format!(
                 "Failed to create inactive border fill for '{}'",
-                character_name
+                identity.style
             ))?;
 
         let renderer = Self {
@@ -152,25 +157,25 @@ impl<'a> OverlayRenderer<'a> {
         };
 
         // Render initial name
-        let initial_border_size = renderer.calculate_border_size(config, character_name, false);
+        let initial_border_size = renderer.calculate_border_size(config, identity, false);
         renderer
             .clear_content_area(dimensions, initial_border_size)
             .context(format!(
                 "Failed to clear content area for initial render of '{}'",
-                character_name
+                identity.style
             ))?;
 
         renderer
             .update_name(
                 config,
-                character_name,
+                identity,
                 dimensions,
                 initial_border_size,
                 font_renderer,
             )
             .context(format!(
                 "Failed to render initial name for '{}'",
-                character_name
+                identity.style
             ))?;
 
         Ok(renderer)
@@ -200,8 +205,6 @@ impl<'a> OverlayRenderer<'a> {
 
         Ok(())
     }
-
-    // ... (calculate_border_size unused here, implementation below)
 
     /// Draws the skipped indicator (diagonal red lines)
     pub fn draw_skipped_indicator(&self, dimensions: Dimensions) -> Result<()> {
@@ -234,10 +237,10 @@ impl<'a> OverlayRenderer<'a> {
     pub fn calculate_border_size(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         focused: bool,
     ) -> u16 {
-        if let Some(settings) = config.character_settings.get(character_name) {
+        if let Some(settings) = config.settings_for(identity.kind, identity.style) {
             if focused {
                 settings
                     .override_active_border_size
@@ -277,168 +280,188 @@ impl<'a> OverlayRenderer<'a> {
 
     /// Renders the character name onto the overlay.
     ///
-    /// Handles both direct X11 text rendering (if core fonts are used) and
+    /// Handles both server-side X11 text rendering (if core fonts are used) and
     /// client-side rendering (if TrueType fonts are used via `fontdue`).
-    /// NOTE: This does NOT clear the background. You must call `clear_content_area` first.
+    /// The caller must clear the previous label first. Text is composited over any
+    /// remaining overlay content, including the skip indicator.
     pub fn update_name(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
-        _dimensions: Dimensions,
+        identity: OverlayIdentity<'_>,
+        dimensions: Dimensions,
         _border_size: u16,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         // Resolve settings overrides
-        let (display_name, text_color) =
-            if let Some(settings) = config.character_settings.get(character_name) {
-                let name = settings.alias.as_deref().unwrap_or(character_name);
-                let color = if let Some(hex_color) = &settings.override_text_color {
-                    crate::common::color::HexColor::parse(hex_color)
-                        .map(|c| c.argb32())
-                        .unwrap_or(config.text_color)
-                } else {
-                    config.text_color
-                };
-                (name, color)
-            } else {
-                (character_name, config.text_color)
-            };
+        let (display_name, text_color) = if identity.display.is_empty() {
+            ("", config.text_color)
+        } else if let Some(settings) = config.settings_for(identity.kind, identity.style) {
+            let display_name = settings.alias.as_deref().unwrap_or(identity.display);
+            let text_color = settings
+                .override_text_color
+                .as_deref()
+                .and_then(crate::common::color::HexColor::parse)
+                .map(|c| c.argb32())
+                .unwrap_or(config.text_color);
+            (display_name, text_color)
+        } else {
+            (identity.display, config.text_color)
+        };
 
-        // Render text based on font renderer type
+        if display_name.is_empty() || text_color >> 24 == 0 {
+            return Ok(());
+        }
+
         if font_renderer.requires_direct_rendering() {
-            // X11 fallback: direct rendering using ImageText8
             if let Some(font_id) = font_renderer.x11_font_id() {
-                // Create GC with font
-                let gc = self
-                    .conn
-                    .generate_id()
-                    .context("Failed to generate GC ID for X11 text")?;
+                // ImageText8 copies its background rectangle as well as glyph pixels.
+                // Draw onto a separate transparent layer so it cannot erase the skip indicator.
+                self.composite_text_layer(
+                    dimensions,
+                    TextOffset::from_border_edge(0, 0),
+                    |pixmap, picture| {
+                        self.conn
+                            .render_composite(
+                                PictOp::CLEAR,
+                                picture,
+                                0u32,
+                                picture,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                dimensions.width,
+                                dimensions.height,
+                            )
+                            .context("Failed to clear X11 text layer")?;
 
-                // Convert ARGB color to X11 pixel value (strip alpha)
-                let fg_pixel = text_color & 0x00FFFFFF;
+                        let gc = self
+                            .conn
+                            .generate_id()
+                            .context("Failed to generate X11 text GC ID")?;
+                        let pixel = crate::common::color::HexColor::from_argb32(text_color)
+                            .to_premultiplied_argb32();
+                        self.conn
+                            .create_gc(
+                                gc,
+                                pixmap,
+                                &CreateGCAux::new()
+                                    .font(font_id)
+                                    .foreground(pixel)
+                                    .background(0),
+                            )
+                            .context("Failed to create X11 text GC")?;
 
-                self.conn
-                    .create_gc(
-                        gc,
-                        self.overlay_pixmap,
-                        &CreateGCAux::new().font(font_id).foreground(fg_pixel),
-                    )
-                    .context(format!(
-                        "Failed to create GC for X11 text rendering for '{}'",
-                        character_name
-                    ))?;
-
-                // ImageText8 renders directly to drawable
-                self.conn
-                    .image_text8(
-                        self.overlay_pixmap,
-                        gc,
-                        config.text_offset.x,
-                        config.text_offset.y + font_renderer.size() as i16, // Baseline adjustment
-                        display_name.as_bytes(),
-                    )
-                    .context(format!(
-                        "Failed to render text via X11 for '{}'",
-                        character_name
-                    ))?;
-
-                self.conn.free_gc(gc)?;
+                        let draw = self
+                            .conn
+                            .image_text8(
+                                pixmap,
+                                gc,
+                                config.text_offset.x,
+                                config.text_offset.y + font_renderer.size() as i16,
+                                display_name.as_bytes(),
+                            )
+                            .context("Failed to draw X11 text");
+                        // Release the GC even if text serialization or drawing failed.
+                        let cleanup = self.conn.free_gc(gc);
+                        draw?;
+                        cleanup.context("Failed to free X11 text GC")?;
+                        Ok(())
+                    },
+                )?;
             }
         } else {
-            // Fontdue: pre-rendered bitmap
             let rendered = font_renderer
                 .render_text(display_name, text_color)
-                .context(format!(
-                    "Failed to render text '{}' with font renderer",
-                    character_name
-                ))?;
-
+                .context("Failed to rasterize text")?;
             if rendered.width > 0 && rendered.height > 0 {
-                // Upload rendered text bitmap to X11
-                // rendered.data is already in BGRA format (Little Endian ARGB)
-                let text_pixmap = self
-                    .conn
-                    .generate_id()
-                    .context("Failed to generate ID for text pixmap")?;
-                self.conn
-                    .create_pixmap(
-                        x11::ARGB_DEPTH,
-                        text_pixmap,
-                        self.overlay_pixmap,
-                        rendered.width as u16,
-                        rendered.height as u16,
-                    )
-                    .context(format!(
-                        "Failed to create text pixmap for '{}'",
-                        character_name
-                    ))?;
+                self.composite_text_layer(
+                    Dimensions::new(rendered.width as u16, rendered.height as u16),
+                    config.text_offset,
+                    |pixmap, _| {
+                        // Fontdue supplies premultiplied BGRA pixels for the whole layer.
+                        self.conn
+                            .put_image(
+                                ImageFormat::Z_PIXMAP,
+                                pixmap,
+                                self.overlay_gc,
+                                rendered.width as u16,
+                                rendered.height as u16,
+                                0,
+                                0,
+                                0,
+                                x11::ARGB_DEPTH,
+                                &rendered.data,
+                            )
+                            .context("Failed to upload text bitmap")?;
+                        Ok(())
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
 
-                self.conn
-                    .put_image(
-                        ImageFormat::Z_PIXMAP,
-                        text_pixmap,
-                        self.overlay_gc,
-                        rendered.width as u16,
-                        rendered.height as u16,
-                        0,
-                        0,
-                        0,
-                        x11::ARGB_DEPTH,
-                        &rendered.data,
-                    )
-                    .context(format!(
-                        "Failed to upload text image for '{}'",
-                        character_name
-                    ))?;
+    /// Paint a temporary ARGB layer and composite it over the existing overlay.
+    /// Release both X11 resources on success and on failed painting/compositing.
+    fn composite_text_layer(
+        &self,
+        dimensions: Dimensions,
+        offset: TextOffset,
+        paint: impl FnOnce(Pixmap, Picture) -> Result<()>,
+    ) -> Result<()> {
+        let pixmap = self
+            .conn
+            .generate_id()
+            .context("Failed to generate text pixmap ID")?;
+        let picture = self
+            .conn
+            .generate_id()
+            .context("Failed to generate text picture ID")?;
+        self.conn
+            .create_pixmap(
+                x11::ARGB_DEPTH,
+                pixmap,
+                self.overlay_pixmap,
+                dimensions.width,
+                dimensions.height,
+            )
+            .context("Failed to create text pixmap")?;
 
-                // Create picture for the text pixmap
-                let text_picture = self
-                    .conn
-                    .generate_id()
-                    .context("Failed to generate ID for text picture")?;
-                self.conn
-                    .render_create_picture(
-                        text_picture,
-                        text_pixmap,
-                        self.formats.argb,
-                        &CreatePictureAux::new(),
-                    )
-                    .context(format!(
-                        "Failed to create text picture for '{}'",
-                        character_name
-                    ))?;
-
-                // Composite text onto overlay
+        let result: Result<()> = (|| {
+            self.conn
+                .render_create_picture(picture, pixmap, self.formats.argb, &CreatePictureAux::new())
+                .context("Failed to create text picture")?;
+            let render: Result<()> = (|| {
+                paint(pixmap, picture)?;
                 self.conn
                     .render_composite(
                         PictOp::OVER,
-                        text_picture,
+                        picture,
                         0u32,
                         self.overlay_picture,
                         0,
                         0,
                         0,
                         0,
-                        config.text_offset.x,
-                        config.text_offset.y,
-                        rendered.width as u16,
-                        rendered.height as u16,
+                        offset.x,
+                        offset.y,
+                        dimensions.width,
+                        dimensions.height,
                     )
-                    .context(format!(
-                        "Failed to composite text onto overlay for '{}'",
-                        character_name
-                    ))?;
-
-                // Cleanup
-                self.conn
-                    .render_free_picture(text_picture)
-                    .context("Failed to free text picture")?;
-                self.conn
-                    .free_pixmap(text_pixmap)
-                    .context("Failed to free text pixmap")?;
-            }
-        }
-
+                    .context("Failed to composite text layer")?;
+                Ok(())
+            })();
+            let cleanup = self.conn.render_free_picture(picture);
+            render?;
+            cleanup.context("Failed to free text picture")?;
+            Ok(())
+        })();
+        let cleanup = self.conn.free_pixmap(pixmap);
+        result?;
+        cleanup.context("Failed to free text pixmap")?;
         Ok(())
     }
 
@@ -449,7 +472,7 @@ impl<'a> OverlayRenderer<'a> {
     pub fn draw_border(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         focused: bool,
         skipped: bool,
@@ -480,22 +503,16 @@ impl<'a> OverlayRenderer<'a> {
         }
 
         // Determine effective border size and color source
-        let effective_size = self.calculate_border_size(config, character_name, focused);
+        let effective_size = self.calculate_border_size(config, identity, focused);
 
         // 3. Draw Text
         // We pass effective_size mainly if text positioning depended on it,
         // but currently text is positioned by config offset.
-        self.update_name(
-            config,
-            character_name,
-            dimensions,
-            effective_size,
-            font_renderer,
-        )
-        .context(format!(
-            "Failed to update name overlay for '{}'",
-            character_name
-        ))?;
+        self.update_name(config, identity, dimensions, effective_size, font_renderer)
+            .context(format!(
+                "Failed to update name overlay for '{}'",
+                identity.style
+            ))?;
 
         // 4. Draw Border (Top Layer)
         // Only if size > 0 and enabled
@@ -507,7 +524,7 @@ impl<'a> OverlayRenderer<'a> {
 
         if should_draw_border {
             let (fill_picture, temp_fill_id) =
-                if let Some(settings) = config.character_settings.get(character_name) {
+                if let Some(settings) = config.settings_for(identity.kind, identity.style) {
                     let override_color_hex = if focused {
                         settings.override_active_border_color.as_ref()
                     } else {
@@ -616,22 +633,15 @@ impl<'a> OverlayRenderer<'a> {
     pub fn draw_minimized(
         &self,
         config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
-        self.draw_border(
-            config,
-            character_name,
-            dimensions,
-            false,
-            false,
-            font_renderer,
-        )
-        .context(format!(
-            "Failed to clear border for minimized window '{}'",
-            character_name
-        ))?;
+        self.draw_border(config, identity, dimensions, false, false, font_renderer)
+            .context(format!(
+                "Failed to clear border for minimized window '{}'",
+                identity.style
+            ))?;
 
         if !config.minimized_overlay_enabled {
             return Ok(());
@@ -660,7 +670,7 @@ impl<'a> OverlayRenderer<'a> {
             )
             .context(format!(
                 "Failed to render MINIMIZED text for '{}'",
-                character_name
+                identity.style
             ))?;
         Ok(())
     }
@@ -699,5 +709,90 @@ impl Drop for OverlayRenderer<'_> {
                 "Failed to free inactive border fill picture"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DaemonConfig, profile::Profile};
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn text_layer_releases_resources_after_success_and_paint_failure() {
+        assert_eq!(std::env::var("EPM_X11_TESTS").as_deref(), Ok("1"));
+        let (conn, screen_number) = x11rb::connect(None).unwrap();
+        let screen = &conn.setup().roots[screen_number];
+        let formats = crate::x11::CachedFormats::new(&conn, screen).unwrap();
+        let config = DaemonConfig {
+            profile: Profile::default(),
+            character_thumbnails: Default::default(),
+            custom_source_thumbnails: Default::default(),
+            profile_hotkeys: Default::default(),
+            runtime_hidden: false,
+        }
+        .build_display_config();
+        let font_id = conn.generate_id().unwrap();
+        conn.open_font(font_id, b"fixed").unwrap().check().unwrap();
+        let font = FontRenderer::X11Fallback {
+            font_id,
+            size: 12.0,
+        };
+        let overlay = OverlayRenderer::new(
+            &conn,
+            &config,
+            &formats,
+            &font,
+            screen.root,
+            Dimensions::new(160, 100),
+            OverlayIdentity {
+                kind: SourceKind::Eve,
+                style: "",
+                display: "",
+            },
+        )
+        .unwrap();
+
+        for fail in [false, true] {
+            let mut allocated = (0, 0);
+            let result = overlay.composite_text_layer(
+                Dimensions::new(8, 8),
+                TextOffset::from_border_edge(0, 0),
+                |pixmap, picture| {
+                    allocated = (pixmap, picture);
+                    conn.render_composite(
+                        PictOp::CLEAR,
+                        picture,
+                        0u32,
+                        picture,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        8,
+                        8,
+                    )?
+                    .check()?;
+                    anyhow::ensure!(!fail, "injected paint failure");
+                    Ok(())
+                },
+            );
+            if fail {
+                assert_eq!(result.unwrap_err().to_string(), "injected paint failure");
+            } else {
+                result.unwrap();
+            }
+            // Server replies prove both IDs were freed, rather than merely queued for cleanup.
+            assert!(conn.get_geometry(allocated.0).unwrap().reply().is_err());
+            assert!(
+                conn.render_free_picture(allocated.1)
+                    .unwrap()
+                    .check()
+                    .is_err()
+            );
+        }
+        conn.close_font(font_id).unwrap().check().unwrap();
     }
 }

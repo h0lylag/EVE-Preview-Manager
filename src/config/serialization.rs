@@ -1,15 +1,41 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use crate::common::types::CharacterSettings;
+use crate::common::types::{CharacterSettings, Position};
 use crate::config::profile::{
-    CustomWindowRule, CycleGroup, HotkeyBackendType, Profile,
-    default_auto_save_thumbnail_positions, default_border_enabled, default_border_size,
+    CustomWindowRule, CycleGroup, CycleSlot, HotkeyBackendType, LoggedOutUnidentifiedCycleMode,
+    Profile, default_auto_save_thumbnail_positions, default_border_enabled, default_border_size,
     default_hotkey_backend, default_inactive_border_color, default_inactive_border_enabled,
-    default_preserve_thumbnail_position_on_swap, default_profile_name, default_snap_threshold,
+    default_logged_out_unidentified_cycle_mode, default_preserve_thumbnail_position_on_swap,
+    default_profile_name, default_show_logged_out_character_name, default_snap_threshold,
     default_text_font_family, default_thumbnail_enabled, default_thumbnail_height,
     default_thumbnail_width,
 };
+
+// Keep legacy strings distinct until the profile's custom rules are available.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CycleSlotHelper {
+    Legacy(String),
+    Typed(CycleSlot),
+}
+
+#[derive(Deserialize)]
+struct CycleGroupHelper {
+    name: String,
+    #[serde(default, alias = "characters", alias = "slots")]
+    cycle_list: Vec<CycleSlotHelper>,
+    hotkey_forward: Option<crate::config::HotkeyBinding>,
+    hotkey_backward: Option<crate::config::HotkeyBinding>,
+}
+
+fn migrate_legacy_slot(name: String, rules: &[CustomWindowRule]) -> CycleSlot {
+    if rules.iter().any(|rule| rule.alias == name) {
+        CycleSlot::Source(name)
+    } else {
+        CycleSlot::Eve(name)
+    }
+}
 
 /// Helper struct for migration during deserialization
 #[derive(Deserialize)]
@@ -22,6 +48,10 @@ struct ProfileHelper {
     thumbnail_default_width: u16,
     #[serde(default = "default_thumbnail_height")]
     thumbnail_default_height: u16,
+    #[serde(default)]
+    thumbnail_default_position_enabled: Option<bool>,
+    #[serde(default)]
+    thumbnail_default_position: Option<Position>,
     #[serde(default = "default_thumbnail_enabled")]
     thumbnail_enabled: bool,
     thumbnail_opacity: u8,
@@ -54,6 +84,8 @@ struct ProfileHelper {
     thumbnail_hide_not_focused: bool,
     #[serde(default = "default_preserve_thumbnail_position_on_swap")]
     thumbnail_preserve_position_on_swap: bool,
+    #[serde(default = "default_show_logged_out_character_name")]
+    thumbnail_show_logged_out_character_name: bool,
     #[serde(default)]
     client_minimize_on_switch: bool,
     #[serde(default)]
@@ -64,6 +96,15 @@ struct ProfileHelper {
     hotkey_input_device: Option<String>,
     #[serde(default)]
     hotkey_logged_out_cycle: bool,
+    // Read-only migration flag; current profiles use the cycle mode alone.
+    #[serde(default)]
+    hotkey_logged_out_unidentified_cycle: Option<bool>,
+    #[serde(default = "default_logged_out_unidentified_cycle_mode")]
+    hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
+    #[serde(default)]
+    hotkey_logged_out_unidentified_cycle_forward: Option<crate::config::HotkeyBinding>,
+    #[serde(default)]
+    hotkey_logged_out_unidentified_cycle_backward: Option<crate::config::HotkeyBinding>,
     #[serde(default)]
     hotkey_require_eve_focus: bool,
     #[serde(default)]
@@ -86,7 +127,7 @@ struct ProfileHelper {
 
     // New field
     #[serde(default)]
-    cycle_groups: Vec<CycleGroup>,
+    cycle_groups: Vec<CycleGroupHelper>,
 
     // Legacy fields for migration
     #[serde(default)]
@@ -99,7 +140,25 @@ struct ProfileHelper {
 
 impl From<ProfileHelper> for Profile {
     fn from(helper: ProfileHelper) -> Self {
-        let mut cycle_groups = helper.cycle_groups;
+        let mut cycle_groups: Vec<CycleGroup> = helper
+            .cycle_groups
+            .into_iter()
+            .map(|group| CycleGroup {
+                name: group.name,
+                cycle_list: group
+                    .cycle_list
+                    .into_iter()
+                    .map(|slot| match slot {
+                        CycleSlotHelper::Legacy(name) => {
+                            migrate_legacy_slot(name, &helper.custom_windows)
+                        }
+                        CycleSlotHelper::Typed(slot) => slot,
+                    })
+                    .collect(),
+                hotkey_forward: group.hotkey_forward,
+                hotkey_backward: group.hotkey_backward,
+            })
+            .collect();
 
         // Migration logic:
         // If we have legacy fields but no cycle groups, create a "Default" group from them
@@ -113,13 +172,7 @@ impl From<ProfileHelper> for Profile {
                 cycle_list: helper
                     .hotkey_cycle_group
                     .into_iter()
-                    .map(|name| {
-                        if helper.custom_windows.iter().any(|w| w.alias == name) {
-                            crate::config::profile::CycleSlot::Source(name)
-                        } else {
-                            crate::config::profile::CycleSlot::Eve(name)
-                        }
-                    })
+                    .map(|name| migrate_legacy_slot(name, &helper.custom_windows))
                     .collect(),
                 hotkey_forward: helper.hotkey_cycle_forward,
                 hotkey_backward: helper.hotkey_cycle_backward,
@@ -131,8 +184,8 @@ impl From<ProfileHelper> for Profile {
             cycle_groups.push(CycleGroup::default_group());
         }
 
-        // Enforce separation: Ensure no custom sources remain in character_thumbnails
-        let mut character_thumbnails = helper.character_thumbnails;
+        // Preserve EVE entries while copying legacy custom source positions when needed.
+        let character_thumbnails = helper.character_thumbnails;
         let mut custom_source_thumbnails = helper.custom_source_thumbnails;
 
         let custom_aliases: Vec<String> = helper
@@ -141,28 +194,16 @@ impl From<ProfileHelper> for Profile {
             .map(|w| w.alias.clone())
             .collect();
 
-        // Move any entry that matches a custom alias to the correct map
-        let keys_to_move: Vec<String> = character_thumbnails
+        // Copy legacy custom source positions if they were saved in the old
+        // character map, but never remove the EVE entry: names can validly collide.
+        for key in character_thumbnails
             .keys()
             .filter(|k| custom_aliases.contains(k))
-            .cloned()
-            .collect();
-
-        for key in keys_to_move {
-            if let Some(val) = character_thumbnails.remove(&key) {
-                custom_source_thumbnails.insert(key, val);
-            }
-        }
-
-        // Fixup: Go through all cycle groups and ensure any entry matching a custom window is Source
-        let custom_aliases_set = custom_aliases; // move ownership
-        for group in &mut cycle_groups {
-            for slot in &mut group.cycle_list {
-                if let crate::config::profile::CycleSlot::Eve(name) = slot
-                    && custom_aliases_set.contains(name)
-                {
-                    *slot = crate::config::profile::CycleSlot::Source(name.clone());
-                }
+        {
+            if !custom_source_thumbnails.contains_key(key)
+                && let Some(val) = character_thumbnails.get(key)
+            {
+                custom_source_thumbnails.insert(key.clone(), val.clone());
             }
         }
 
@@ -171,6 +212,10 @@ impl From<ProfileHelper> for Profile {
             profile_description: helper.profile_description,
             thumbnail_default_width: helper.thumbnail_default_width,
             thumbnail_default_height: helper.thumbnail_default_height,
+            thumbnail_default_position_enabled: helper
+                .thumbnail_default_position_enabled
+                .unwrap_or_else(|| helper.thumbnail_default_position.is_some()),
+            thumbnail_default_position: helper.thumbnail_default_position.unwrap_or_default(),
             thumbnail_enabled: helper.thumbnail_enabled,
             thumbnail_opacity: helper.thumbnail_opacity,
             thumbnail_active_border: helper.thumbnail_active_border,
@@ -188,11 +233,26 @@ impl From<ProfileHelper> for Profile {
             thumbnail_snap_threshold: helper.thumbnail_snap_threshold,
             thumbnail_hide_not_focused: helper.thumbnail_hide_not_focused,
             thumbnail_preserve_position_on_swap: helper.thumbnail_preserve_position_on_swap,
+            thumbnail_show_logged_out_character_name: helper
+                .thumbnail_show_logged_out_character_name,
             client_minimize_on_switch: helper.client_minimize_on_switch,
             client_minimize_show_overlay: helper.client_minimize_show_overlay,
             hotkey_backend: helper.hotkey_backend,
             hotkey_input_device: helper.hotkey_input_device,
             hotkey_logged_out_cycle: helper.hotkey_logged_out_cycle,
+            // Older dev profiles could disable cycling while retaining append mode.
+            hotkey_logged_out_unidentified_cycle_mode: if helper
+                .hotkey_logged_out_unidentified_cycle
+                == Some(false)
+            {
+                LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+            } else {
+                helper.hotkey_logged_out_unidentified_cycle_mode
+            },
+            hotkey_logged_out_unidentified_cycle_forward: helper
+                .hotkey_logged_out_unidentified_cycle_forward,
+            hotkey_logged_out_unidentified_cycle_backward: helper
+                .hotkey_logged_out_unidentified_cycle_backward,
             hotkey_require_eve_focus: helper.hotkey_require_eve_focus,
             hotkey_cycle_reset_index: helper.hotkey_cycle_reset_index,
             hotkey_profile_switch: helper.hotkey_profile_switch,
@@ -207,7 +267,7 @@ impl From<ProfileHelper> for Profile {
     }
 }
 
-// Custom implementation to support both Helper (JSON/Human) and Strict/Binary (Bincode/IPC)
+// Custom implementation to support both flexible JSON and strict binary IPC formats.
 impl<'de> Deserialize<'de> for Profile {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -217,7 +277,7 @@ impl<'de> Deserialize<'de> for Profile {
             // Use ProfileHelper for JSON migration and flexibility
             ProfileHelper::deserialize(deserializer).map(Profile::from)
         } else {
-            // Use strict binary structure for IPC/Bincode (matches Serialize output)
+            // Use the strict binary structure for IPC (matches Serialize output).
             #[derive(Deserialize)]
             struct ProfileBinary {
                 pub profile_name: String,
@@ -227,6 +287,10 @@ impl<'de> Deserialize<'de> for Profile {
                 pub thumbnail_default_width: u16,
                 #[serde(default = "default_thumbnail_height")]
                 pub thumbnail_default_height: u16,
+                #[serde(default)]
+                pub thumbnail_default_position_enabled: bool,
+                #[serde(default)]
+                pub thumbnail_default_position: Position,
                 #[serde(default = "default_thumbnail_enabled")]
                 pub thumbnail_enabled: bool,
                 pub thumbnail_opacity: u8,
@@ -259,6 +323,8 @@ impl<'de> Deserialize<'de> for Profile {
                 pub thumbnail_hide_not_focused: bool,
                 #[serde(default = "default_preserve_thumbnail_position_on_swap")]
                 pub thumbnail_preserve_position_on_swap: bool,
+                #[serde(default = "default_show_logged_out_character_name")]
+                pub thumbnail_show_logged_out_character_name: bool,
                 #[serde(default)]
                 pub client_minimize_on_switch: bool,
                 #[serde(default)]
@@ -271,6 +337,14 @@ impl<'de> Deserialize<'de> for Profile {
                 pub cycle_groups: Vec<CycleGroupBinary>,
                 #[serde(default)]
                 pub hotkey_logged_out_cycle: bool,
+                #[serde(default = "default_logged_out_unidentified_cycle_mode")]
+                pub hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
+                #[serde(default)]
+                pub hotkey_logged_out_unidentified_cycle_forward:
+                    Option<crate::config::HotkeyBinding>,
+                #[serde(default)]
+                pub hotkey_logged_out_unidentified_cycle_backward:
+                    Option<crate::config::HotkeyBinding>,
                 #[serde(default)]
                 pub hotkey_require_eve_focus: bool,
                 #[serde(default)]
@@ -333,6 +407,8 @@ impl<'de> Deserialize<'de> for Profile {
                 profile_description: p.profile_description,
                 thumbnail_default_width: p.thumbnail_default_width,
                 thumbnail_default_height: p.thumbnail_default_height,
+                thumbnail_default_position_enabled: p.thumbnail_default_position_enabled,
+                thumbnail_default_position: p.thumbnail_default_position,
                 thumbnail_enabled: p.thumbnail_enabled,
                 thumbnail_opacity: p.thumbnail_opacity,
                 thumbnail_active_border: p.thumbnail_active_border,
@@ -350,12 +426,20 @@ impl<'de> Deserialize<'de> for Profile {
                 thumbnail_snap_threshold: p.thumbnail_snap_threshold,
                 thumbnail_hide_not_focused: p.thumbnail_hide_not_focused,
                 thumbnail_preserve_position_on_swap: p.thumbnail_preserve_position_on_swap,
+                thumbnail_show_logged_out_character_name: p
+                    .thumbnail_show_logged_out_character_name,
                 client_minimize_on_switch: p.client_minimize_on_switch,
                 client_minimize_show_overlay: p.client_minimize_show_overlay,
                 hotkey_backend: p.hotkey_backend,
                 hotkey_input_device: p.hotkey_input_device,
                 cycle_groups,
                 hotkey_logged_out_cycle: p.hotkey_logged_out_cycle,
+                hotkey_logged_out_unidentified_cycle_mode: p
+                    .hotkey_logged_out_unidentified_cycle_mode,
+                hotkey_logged_out_unidentified_cycle_forward: p
+                    .hotkey_logged_out_unidentified_cycle_forward,
+                hotkey_logged_out_unidentified_cycle_backward: p
+                    .hotkey_logged_out_unidentified_cycle_backward,
                 hotkey_require_eve_focus: p.hotkey_require_eve_focus,
                 hotkey_cycle_reset_index: p.hotkey_cycle_reset_index,
                 hotkey_profile_switch: p.hotkey_profile_switch,
@@ -367,5 +451,113 @@ impl<'de> Deserialize<'de> for Profile {
                 custom_windows: p.custom_windows,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unidentified_cycle_migrates_legacy_enable_flag() {
+        for enabled in [None, Some(false), Some(true)] {
+            for mode in [
+                LoggedOutUnidentifiedCycleMode::SeparateHotkeys,
+                LoggedOutUnidentifiedCycleMode::AppendToGroups,
+            ] {
+                let mut value = serde_json::to_value(Profile {
+                    hotkey_logged_out_unidentified_cycle_mode: mode,
+                    hotkey_logged_out_unidentified_cycle_forward: Some(
+                        crate::config::HotkeyBinding::new(16, false, false, false, false),
+                    ),
+                    hotkey_logged_out_unidentified_cycle_backward: Some(
+                        crate::config::HotkeyBinding::new(17, true, false, false, false),
+                    ),
+                    hotkey_logged_out_cycle: true,
+                    hotkey_cycle_reset_index: true,
+                    ..Profile::default()
+                })
+                .unwrap();
+                if let Some(enabled) = enabled {
+                    value["hotkey_logged_out_unidentified_cycle"] = json!(enabled);
+                }
+                let profile: Profile = serde_json::from_value(value).unwrap();
+                let expected = if enabled == Some(false) {
+                    LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+                } else {
+                    mode
+                };
+                assert_eq!(profile.hotkey_logged_out_unidentified_cycle_mode, expected);
+                assert!(
+                    profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .is_some()
+                );
+                let saved = serde_json::to_value(&profile).unwrap();
+                assert!(saved.get("hotkey_logged_out_unidentified_cycle").is_none());
+                let reloaded: Profile = serde_json::from_value(saved).unwrap();
+                assert_eq!(reloaded.hotkey_logged_out_unidentified_cycle_mode, expected);
+                // IPC uses the strict binary field order, unlike JSON migration.
+                let (tx, rx) = ipc_channel::ipc::channel::<Profile>().unwrap();
+                tx.send(reloaded).unwrap();
+                let received = rx.recv().unwrap();
+                assert_eq!(received.hotkey_logged_out_unidentified_cycle_mode, expected);
+                assert_eq!(
+                    serde_json::to_value(&received).unwrap(),
+                    serde_json::to_value(&profile).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_cycle_strings_migrate_without_changing_typed_entries() {
+        for field in ["cycle_list", "characters", "slots"] {
+            let mut value = serde_json::to_value(Profile::default()).unwrap();
+            value["custom_windows"] = json!([{
+                "alias": "Browser", "class_pattern": "firefox"
+            }]);
+            value["cycle_groups"] = json!([{
+                "name": "Default",
+                field: ["Browser", "Pilot", {"eve": "Browser"}, {"source": "Browser"}]
+            }]);
+
+            let profile: Profile = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                profile.cycle_groups[0].cycle_list,
+                vec![
+                    CycleSlot::Source("Browser".to_string()),
+                    CycleSlot::Eve("Pilot".to_string()),
+                    CycleSlot::Eve("Browser".to_string()),
+                    CycleSlot::Source("Browser".to_string()),
+                ]
+            );
+            let reloaded: Profile =
+                serde_json::from_value(serde_json::to_value(&profile).unwrap()).unwrap();
+            assert_eq!(
+                reloaded.cycle_groups[0].cycle_list,
+                profile.cycle_groups[0].cycle_list
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_flat_cycle_list_resolves_custom_sources() {
+        let mut value = serde_json::to_value(Profile::default()).unwrap();
+        value["custom_windows"] = json!([{
+            "alias": "Browser", "class_pattern": "firefox"
+        }]);
+        value["cycle_groups"] = json!([]);
+        value["hotkey_cycle_group"] = json!(["Browser", "Pilot"]);
+
+        let profile: Profile = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![
+                CycleSlot::Source("Browser".to_string()),
+                CycleSlot::Eve("Pilot".to_string())
+            ]
+        );
     }
 }

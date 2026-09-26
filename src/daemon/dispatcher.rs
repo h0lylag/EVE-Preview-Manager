@@ -10,6 +10,7 @@ use x11rb::protocol::Event::{
 use x11rb::protocol::xproto::*;
 
 use super::cycle_state::CycleState;
+use super::group_drag::GroupDragState;
 use super::session_state::SessionState;
 use super::thumbnail::Thumbnail;
 use crate::config::DaemonConfig;
@@ -21,18 +22,19 @@ use ipc_channel::ipc::IpcSender;
 use super::handlers;
 
 /// Context bundle for event handlers to reduce argument count
-pub struct EventContext<'a, 'b> {
+pub(super) struct EventContext<'a, 'b> {
     pub app_ctx: &'b AppContext<'a>,
     pub daemon_config: &'b mut DaemonConfig,
     pub eve_clients: &'b mut HashMap<Window, Thumbnail<'a>>,
     pub session_state: &'b mut SessionState,
     pub cycle_state: &'b mut CycleState,
+    pub group_drag_state: &'b mut GroupDragState,
     pub status_tx: &'b IpcSender<DaemonMessage>,
     pub font_renderer: &'b crate::daemon::font::FontRenderer,
     pub display_config: &'b crate::config::DisplayConfig,
 }
 
-pub fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
+pub(super) fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
     match event {
         DamageNotify(event) => handlers::window::handle_damage_notify(ctx, event),
         CreateNotify(event) => handlers::window::handle_create_notify(ctx, event),

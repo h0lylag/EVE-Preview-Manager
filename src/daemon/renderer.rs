@@ -16,11 +16,11 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::common::constants::x11;
-use crate::common::types::Dimensions;
+use crate::common::types::{Dimensions, SourceKind};
 use crate::x11::{AppContext, to_fixed};
 
 use super::font::FontRenderer;
-use super::overlay::OverlayRenderer;
+use super::overlay::{OverlayIdentity, OverlayRenderer};
 use crate::config::DisplayConfig;
 
 #[derive(Debug)]
@@ -35,7 +35,7 @@ pub struct ThumbnailRenderer<'a> {
     // === X11 Window Handles ===
     /// The X11 window ID for the clickable thumbnail.
     pub window: Window,
-    /// The source X11 window ID (the EVE client).
+    /// The source X11 window ID.
     pub src: Window,
     /// The parent window ID, if the source window has been reparented (e.g. by a window manager).
     pub parent: Option<Window>,
@@ -105,9 +105,9 @@ impl<'a> ThumbnailRenderer<'a> {
         conn: &RustConnection,
         atoms: &crate::x11::CachedAtoms,
         window: Window,
-        character_name: &str,
+        display_character_name: &str,
     ) -> Result<()> {
-        let title = format!("EPM Thumbnail - {}", character_name);
+        let title = format!("EPM Thumbnail - {}", display_character_name);
 
         conn.change_property8(
             PropMode::REPLACE,
@@ -118,7 +118,7 @@ impl<'a> ThumbnailRenderer<'a> {
         )
         .context(format!(
             "Failed to update _NET_WM_NAME for '{}'",
-            character_name
+            display_character_name
         ))?;
 
         conn.change_property8(
@@ -128,7 +128,10 @@ impl<'a> ThumbnailRenderer<'a> {
             AtomEnum::STRING,
             title.as_bytes(),
         )
-        .context(format!("Failed to update WM_NAME for '{}'", character_name))?;
+        .context(format!(
+            "Failed to update WM_NAME for '{}'",
+            display_character_name
+        ))?;
 
         Ok(())
     }
@@ -139,8 +142,10 @@ impl<'a> ThumbnailRenderer<'a> {
         window: Window,
         opacity: u32,
         character_name: &str,
+        display_character_name: &str,
     ) -> Result<()> {
-        // Set PID so we can identify our own thumbnail windows
+        // Publish PID and class before the title or mapping. Source detection
+        // rechecks ownership after matching, including during another instance's setup.
         let pid = std::process::id();
         ctx.conn
             .change_property32(
@@ -180,7 +185,7 @@ impl<'a> ThumbnailRenderer<'a> {
             )
             .context(format!("Failed to set WM_CLASS for '{}'", character_name))?;
 
-        Self::set_window_title(ctx.conn, ctx.atoms, window, character_name)?;
+        Self::set_window_title(ctx.conn, ctx.atoms, window, display_character_name)?;
 
         // Set always-on-top
         ctx.conn
@@ -196,25 +201,7 @@ impl<'a> ThumbnailRenderer<'a> {
                 character_name
             ))?;
 
-        // Map window to make it visible
-        ctx.conn
-            .map_window(window)
-            .inspect_err(|e| {
-                error!(
-                    window = window,
-                    error = ?e,
-                    "Failed to map thumbnail window"
-                )
-            })
-            .context(format!(
-                "Failed to map thumbnail window for '{}'",
-                character_name
-            ))?;
-        debug!(
-            window = window,
-            character = %character_name,
-            "Mapped thumbnail window"
-        );
+        // Thumbnail applies visibility policy before the first map.
 
         Ok(())
     }
@@ -302,7 +289,7 @@ impl<'a> ThumbnailRenderer<'a> {
     ///
     /// # Arguments
     /// * `ctx` - The application context containing X11 connection and config.
-    /// * `character_name` - Name of the character (for logging and window titles).
+    /// * `character_name` - Effective character name for logging and styling.
     /// * `src` - The source window ID to render as a thumbnail.
     /// * `src_depth` - The depth of the source window (to select correct Render format).
     /// * `font_renderer` - Renderer for text overlays.
@@ -314,7 +301,9 @@ impl<'a> ThumbnailRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
+        source_kind: SourceKind,
         character_name: &str,
+        display_character_name: &str,
         src: Window,
         src_depth: u8,
         display_config: &crate::config::DisplayConfig,
@@ -359,7 +348,13 @@ impl<'a> ThumbnailRenderer<'a> {
             should_cleanup: true,
         };
 
-        Self::setup_window_properties(ctx, window, display_config.opacity, character_name)?;
+        Self::setup_window_properties(
+            ctx,
+            window,
+            display_config.opacity,
+            character_name,
+            display_character_name,
+        )?;
 
         // Create rendering resources
         let (src_picture, dst_picture) =
@@ -373,7 +368,11 @@ impl<'a> ThumbnailRenderer<'a> {
             font_renderer,
             ctx.screen.root,
             dimensions,
-            character_name,
+            OverlayIdentity {
+                kind: source_kind,
+                style: character_name,
+                display: display_character_name,
+            },
         )?;
 
         // Setup damage tracking
@@ -433,13 +432,13 @@ impl<'a> ThumbnailRenderer<'a> {
 
     /// Maps the thumbnail window, making it visible on screen.
     pub fn map(&self) -> Result<()> {
-        self.conn.map_window(self.window)?;
+        self.conn.map_window(self.window)?.check()?;
         Ok(())
     }
 
     /// Unmaps the thumbnail window, hiding it from screen.
     pub fn unmap(&self) -> Result<()> {
-        self.conn.unmap_window(self.window)?;
+        self.conn.unmap_window(self.window)?.check()?;
         Ok(())
     }
 
@@ -555,12 +554,12 @@ impl<'a> ThumbnailRenderer<'a> {
     /// Draws the border and updates the name overlay.
     ///
     /// # Arguments
-    /// * `focused` - If true, draws the border. If false, clears the border area.
+    /// * `focused` - Selects the configured active or inactive border style.
     /// * `skipped` - If true, draws the skipped indicator (diagonal red lines).
     pub fn border(
         &self,
         display_config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         focused: bool,
         skipped: bool,
@@ -568,15 +567,15 @@ impl<'a> ThumbnailRenderer<'a> {
     ) -> Result<()> {
         self.overlay.draw_border(
             display_config,
-            character_name,
+            identity,
             dimensions,
             focused,
             skipped,
             font_renderer,
         )?;
 
-        self.overlay(character_name, dimensions)
-            .context(format!("Failed to apply overlay for '{}'", character_name))
+        self.overlay(identity.style, dimensions)
+            .context(format!("Failed to apply overlay for '{}'", identity.style))
     }
 
     /// Renders the "MINIMIZED" state overlay.
@@ -585,12 +584,12 @@ impl<'a> ThumbnailRenderer<'a> {
     pub fn minimized(
         &self,
         display_config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.overlay
-            .draw_minimized(display_config, character_name, dimensions, font_renderer)?;
+            .draw_minimized(display_config, identity, dimensions, font_renderer)?;
 
         // Explicitly clear background to black using fill_static.
         // We cannot use self.update() here because it calls capture(), which correctly skips
@@ -602,11 +601,11 @@ impl<'a> ThumbnailRenderer<'a> {
             blue: 0,
             alpha: 0xffff,
         };
-        self.fill_static(character_name, dimensions, black)?;
+        self.fill_static(identity.style, dimensions, black)?;
 
-        self.overlay(character_name, dimensions).context(format!(
+        self.overlay(identity.style, dimensions).context(format!(
             "Failed to update minimized display for '{}'",
-            character_name
+            identity.style
         ))?;
         Ok(())
     }
@@ -615,7 +614,7 @@ impl<'a> ThumbnailRenderer<'a> {
     pub fn update_name(
         &self,
         display_config: &DisplayConfig,
-        character_name: &str,
+        identity: OverlayIdentity<'_>,
         dimensions: Dimensions,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
@@ -624,21 +623,21 @@ impl<'a> ThumbnailRenderer<'a> {
         // However, if we are focused, the next border() call will correct it.
         let border_size = self
             .overlay
-            .calculate_border_size(display_config, character_name, false);
+            .calculate_border_size(display_config, identity, false);
 
         // Must clear content area explicitly now
         self.overlay
             .clear_content_area(dimensions, border_size)
             .context(format!(
                 "Failed to clear content area for '{}'",
-                character_name
+                identity.style
             ))?;
 
-        Self::set_window_title(self.conn, self.atoms, self.window, character_name)?;
+        Self::set_window_title(self.conn, self.atoms, self.window, identity.display)?;
 
         self.overlay.update_name(
             display_config,
-            character_name,
+            identity,
             dimensions,
             border_size,
             font_renderer,
@@ -694,20 +693,28 @@ impl<'a> ThumbnailRenderer<'a> {
     }
 
     /// Moves the thumbnail window to a new position.
-    pub fn reposition(&mut self, character_name: &str, x: i16, y: i16) -> Result<()> {
+    pub fn reposition(&mut self, x: i16, y: i16) -> Result<()> {
+        self.queue_reposition(x, y)?;
+
+        self.conn
+            .flush()
+            .context("Failed to flush X11 connection after reposition")?;
+        Ok(())
+    }
+
+    /// Queues a thumbnail move without flushing the X11 connection.
+    pub(super) fn queue_reposition(&self, x: i16, y: i16) -> Result<()> {
         self.conn
             .configure_window(
                 self.window,
                 &ConfigureWindowAux::new().x(x as i32).y(y as i32),
             )
-            .context(format!(
-                "Failed to reposition window for '{}' to ({}, {})",
-                character_name, x, y
-            ))?;
-
-        self.conn
-            .flush()
-            .context("Failed to flush X11 connection after reposition")?;
+            .with_context(|| {
+                format!(
+                    "Failed to reposition thumbnail window {} to ({}, {})",
+                    self.window, x, y
+                )
+            })?;
         Ok(())
     }
 

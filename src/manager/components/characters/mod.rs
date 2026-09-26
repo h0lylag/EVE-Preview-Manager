@@ -8,12 +8,14 @@ mod modals;
 /// State for character management UI
 pub struct CharactersState {
     pub(crate) show_add_characters_popup: bool,
-    pub(crate) character_selections: std::collections::HashMap<String, bool>,
+    pub(crate) character_selections:
+        std::collections::HashMap<crate::config::profile::CycleSlot, bool>,
     pub(crate) expanded_rows: std::collections::HashMap<String, bool>,
     pub(crate) cached_overrides: std::collections::HashMap<String, CachedOverrides>,
     pub(crate) selected_cycle_group_index: usize,
     pub(crate) renaming_group_idx: Option<usize>,
     pub(crate) rename_buffer: String,
+    pub(crate) rename_error: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -35,11 +37,13 @@ impl CharactersState {
             selected_cycle_group_index: 0,
             renaming_group_idx: None,
             rename_buffer: String::new(),
+            rename_error: None,
         }
     }
 
-    pub fn load_from_profile(&mut self, _profile: &Profile) {
-        self.cached_overrides.clear();
+    /// Cancel pending operations and cached state belonging to the previous profile.
+    pub fn reset(&mut self) {
+        *self = Self::new();
     }
 }
 

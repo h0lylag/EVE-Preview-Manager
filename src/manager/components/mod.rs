@@ -1,5 +1,6 @@
 pub mod behavior_settings;
 pub mod characters;
+mod color_edit;
 pub mod header;
 pub mod hotkey_settings;
 pub mod profile_selector;

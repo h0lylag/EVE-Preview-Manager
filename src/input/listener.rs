@@ -15,6 +15,10 @@ pub enum CycleCommand {
     Forward(String),
     /// Cycle backward in the specified group
     Backward(String),
+    /// Cycle forward through logged-out clients without remembered character identity
+    LoggedOutUnidentifiedForward,
+    /// Cycle backward through logged-out clients without remembered character identity
+    LoggedOutUnidentifiedBackward,
     /// Triggered when a character-specific hotkey is pressed, carrying its binding configuration for context
     CharacterHotkey(HotkeyBinding),
     /// Triggered when a profile switch hotkey is pressed
@@ -25,11 +29,12 @@ pub enum CycleCommand {
     TogglePreviews,
 }
 
-/// A wrapper around CycleCommand that includes the timestamp of the input event
+/// A wrapper around CycleCommand that includes an X server timestamp for user activity
 #[derive(Debug, Clone)]
 pub struct TimestampedCommand {
     pub command: CycleCommand,
-    /// X11-compatible timestamp (milliseconds)
+    /// X server time in milliseconds, wrapping at 32 bits; never Unix time.
+    /// X11 input uses event time; evdev samples server time when handling the hotkey.
     pub timestamp: u32,
 }
 

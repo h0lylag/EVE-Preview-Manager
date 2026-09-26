@@ -1,7 +1,7 @@
 //! Runtime configuration for the preview daemon
 //!
 //! Loads the selected profile and global settings at startup,
-//! then maintains character positions synchronized with the config file.
+//! then maintains source positions synchronized with the config file.
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use tracing::{error, info};
 use x11rb::protocol::render::Color;
 
 use crate::common::color::{HexColor, Opacity};
-use crate::common::types::{CharacterSettings, Position, TextOffset};
+use crate::common::types::{CharacterSettings, Position, SourceKind, TextOffset};
 
 /// Snapshot of display settings for the renderer.
 #[derive(Debug, Clone)]
@@ -23,13 +23,24 @@ pub struct DisplayConfig {
     pub text_color: u32,
     pub hide_when_no_focus: bool,
     pub inactive_border_enabled: bool,
+    pub show_logged_out_character_name: bool,
 
-    /// Map of character name -> settings (overrides, aliases, etc)
-    pub character_settings:
-        std::collections::HashMap<String, crate::common::types::CharacterSettings>,
+    /// Map of EVE character name -> settings (overrides, aliases, etc).
+    pub character_settings: HashMap<String, crate::common::types::CharacterSettings>,
+    /// Map of custom source alias -> settings and rule-derived overrides.
+    pub custom_source_settings: HashMap<String, crate::common::types::CharacterSettings>,
     pub inactive_border_color: Color,
     pub inactive_border_size: u16,
     pub minimized_overlay_enabled: bool,
+}
+
+impl DisplayConfig {
+    pub fn settings_for(&self, kind: SourceKind, name: &str) -> Option<&CharacterSettings> {
+        match kind {
+            SourceKind::Eve => self.character_settings.get(name),
+            SourceKind::Custom => self.custom_source_settings.get(name),
+        }
+    }
 }
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +68,43 @@ impl DaemonConfig {
         )
     }
 
+    /// Get the configured fallback position for a new preview with no saved/session position.
+    ///
+    /// The fixed profile default wins when enabled. Otherwise we keep the historical behavior:
+    /// spawn near the source window using the standard offset.
+    pub fn fallback_new_thumbnail_position(
+        &self,
+        source_position: Option<Position>,
+    ) -> Option<Position> {
+        self.profile
+            .thumbnail_default_position_enabled
+            .then_some(self.profile.thumbnail_default_position)
+            .or_else(|| {
+                source_position.map(|source| {
+                    let offset = crate::common::constants::positioning::DEFAULT_SPAWN_OFFSET;
+                    Position::new(
+                        source.x.saturating_add(offset),
+                        source.y.saturating_add(offset),
+                    )
+                })
+            })
+    }
+
+    /// Resolve initial placement for a preview that may have saved, session, or fallback position.
+    pub fn resolve_initial_thumbnail_position(
+        &self,
+        runtime_settings: Option<&CharacterSettings>,
+        profile_settings: Option<&CharacterSettings>,
+        session_position: Option<Position>,
+        source_position: Option<Position>,
+    ) -> Option<Position> {
+        runtime_settings
+            .map(CharacterSettings::position)
+            .or_else(|| profile_settings.map(CharacterSettings::position))
+            .or(session_position)
+            .or_else(|| self.fallback_new_thumbnail_position(source_position))
+    }
+
     /// Build DisplayConfig from current settings
     pub fn build_display_config(&self) -> DisplayConfig {
         let active_border_color = HexColor::parse(&self.profile.thumbnail_active_border_color)
@@ -82,16 +130,15 @@ impl DaemonConfig {
 
         let opacity = Opacity::from_percent(self.profile.thumbnail_opacity).to_argb32();
 
-        let mut character_settings = self.profile.character_thumbnails.clone();
+        let character_settings = self.profile.character_thumbnails.clone();
 
-        // 1. Merge saved custom source thumbnails (positions/modes)
-        character_settings.extend(self.profile.custom_source_thumbnails.clone());
+        let mut custom_source_settings = self.profile.custom_source_thumbnails.clone();
 
-        // 2. Apply Custom Window Rules as default overrides
+        // Apply Custom Window Rules as default overrides
         // If a custom source has a rule, we ensure its overrides are applied to the settings map.
         // This handles cases where a custom source hasn't been "saved" (moved) yet but has config rule overrides.
         for rule in &self.profile.custom_windows {
-            character_settings
+            custom_source_settings
                 .entry(rule.alias.clone())
                 .and_modify(|settings| {
                     // Update existing settings with rule overrides if present (Rule takes precedence or fills gaps?)
@@ -158,6 +205,7 @@ impl DaemonConfig {
             ),
             text_color,
             hide_when_no_focus: self.profile.thumbnail_hide_not_focused,
+            show_logged_out_character_name: self.profile.thumbnail_show_logged_out_character_name,
             inactive_border_enabled: self.profile.thumbnail_inactive_border,
             inactive_border_color,
             inactive_border_size: if self.profile.thumbnail_inactive_border {
@@ -167,6 +215,7 @@ impl DaemonConfig {
             },
             minimized_overlay_enabled: self.profile.client_minimize_show_overlay,
             character_settings,
+            custom_source_settings,
         }
     }
 
@@ -209,7 +258,7 @@ impl DaemonConfig {
         // NOTE: Refresh overrides from disk to respect external Manager changes (e.g. static mode).
         // Memory holds the authoritative window position, but disk holds the authoritative user config.
         if !new_name.is_empty()
-            && let Ok(disk_config) = crate::config::profile::Config::load()
+            && let Ok(disk_config) = crate::config::profile::Config::read()
         {
             let pd_name = &self.profile.profile_name;
             if let Some(disk_profile) = disk_config
@@ -280,6 +329,8 @@ mod tests {
                 profile_description: String::new(),
                 thumbnail_default_width: 480,
                 thumbnail_default_height: 270,
+                thumbnail_default_position_enabled: false,
+                thumbnail_default_position: Position::default(),
                 thumbnail_opacity: opacity_percent,
                 thumbnail_active_border: border_size > 0, // In tests, valid size > 0 implies enabled
                 thumbnail_active_border_size: border_size,
@@ -296,9 +347,14 @@ mod tests {
                 thumbnail_snap_threshold: snap_threshold,
                 thumbnail_hide_not_focused: hide_when_no_focus,
                 thumbnail_preserve_position_on_swap: false,
+                thumbnail_show_logged_out_character_name: false,
                 client_minimize_on_switch: false,
                 hotkey_input_device: None,
                 hotkey_logged_out_cycle: false,
+                hotkey_logged_out_unidentified_cycle_mode:
+                    crate::config::profile::LoggedOutUnidentifiedCycleMode::SeparateHotkeys,
+                hotkey_logged_out_unidentified_cycle_forward: None,
+                hotkey_logged_out_unidentified_cycle_backward: None,
                 hotkey_require_eve_focus: true,
                 hotkey_cycle_reset_index: false,
                 cycle_groups: vec![crate::config::profile::CycleGroup::default_group()],
@@ -317,6 +373,49 @@ mod tests {
             custom_source_thumbnails: HashMap::new(),
             profile_hotkeys: HashMap::new(),
             runtime_hidden: false,
+        }
+    }
+
+    #[test]
+    fn color_regression_display_config_preserves_zero_alpha_and_fallbacks() {
+        for (input, expected) in [
+            ("#00000000", 0x00000000u32),
+            ("#00FF0000", 0x00FF0000),
+            ("#01123456", 0x01123456),
+            ("#7F123456", 0x7F123456),
+            ("#FF123456", 0xFF123456),
+            ("#123456", 0xFF123456),
+        ] {
+            let mut state = test_config(100, 3, input, 0, 0, input, false, 20);
+            state.profile.thumbnail_inactive_border_color = input.into();
+            let config = state.build_display_config();
+            assert_eq!(config.text_color, expected, "{input}");
+            assert_eq!(
+                config.active_border_color.alpha,
+                ((expected >> 24) * 257) as u16,
+                "{input}"
+            );
+            assert_eq!(
+                config.inactive_border_color.alpha,
+                ((expected >> 24) * 257) as u16,
+                "{input}"
+            );
+        }
+        for input in ["#€ABC", "#€ABCDE", "##123456", "not-a-color", "12345"] {
+            let mut state = test_config(100, 3, input, 0, 0, input, false, 20);
+            state.profile.thumbnail_inactive_border_color = input.into();
+            let config = state.build_display_config();
+            let active = config.active_border_color;
+            assert_eq!(
+                [active.alpha, active.red, active.green, active.blue],
+                [65535, 65535, 0, 0]
+            );
+            assert_eq!(config.text_color, 0xFFFFFFFF);
+            let inactive = config.inactive_border_color;
+            assert_eq!(
+                [inactive.alpha, inactive.red, inactive.green, inactive.blue],
+                [0; 4]
+            );
         }
     }
 
@@ -420,6 +519,93 @@ mod tests {
         if let Ok(new_pos) = result {
             assert_eq!(new_pos, None);
         }
+    }
+
+    #[test]
+    fn test_default_position_uses_fixed_coordinate() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let position = state.fallback_new_thumbnail_position(Some(Position::new(1000, 2000)));
+
+        assert_eq!(position, Some(Position::new(42, 84)));
+    }
+
+    #[test]
+    fn test_default_position_falls_back_to_source_offset() {
+        let state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+
+        let position = state.fallback_new_thumbnail_position(Some(Position::new(100, 200)));
+
+        assert_eq!(position, Some(Position::new(120, 220)));
+    }
+
+    #[test]
+    fn test_disabled_default_position_falls_back_to_source_offset() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = false;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let position = state.fallback_new_thumbnail_position(Some(Position::new(100, 200)));
+
+        assert_eq!(position, Some(Position::new(120, 220)));
+    }
+
+    #[test]
+    fn test_resolve_initial_position_saved_overrides_default() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+        let saved = CharacterSettings::new(500, 600, 240, 135);
+
+        let position = state.resolve_initial_thumbnail_position(
+            Some(&saved),
+            None,
+            Some(Position::new(300, 400)),
+            Some(Position::new(100, 200)),
+        );
+
+        assert_eq!(position, Some(Position::new(500, 600)));
+    }
+
+    #[test]
+    fn test_resolve_initial_position_session_overrides_default() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let position = state.resolve_initial_thumbnail_position(
+            None,
+            None,
+            Some(Position::new(300, 400)),
+            Some(Position::new(100, 200)),
+        );
+
+        assert_eq!(position, Some(Position::new(300, 400)));
+    }
+
+    #[test]
+    fn test_multiple_new_previews_use_same_fixed_position() {
+        let mut state = test_config(75, 3, "#FF00FF00", 10, 20, "#FFFFFFFF", false, 15);
+        state.profile.thumbnail_default_position_enabled = true;
+        state.profile.thumbnail_default_position = Position::new(42, 84);
+
+        let first = state.resolve_initial_thumbnail_position(
+            None,
+            None,
+            None,
+            Some(Position::new(100, 200)),
+        );
+        let second = state.resolve_initial_thumbnail_position(
+            None,
+            None,
+            None,
+            Some(Position::new(900, 1000)),
+        );
+
+        assert_eq!(first, Some(Position::new(42, 84)));
+        assert_eq!(second, Some(Position::new(42, 84)));
     }
 
     #[test]

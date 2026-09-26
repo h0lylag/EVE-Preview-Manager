@@ -10,32 +10,24 @@ use x11rb::protocol::xproto::{ConnectionExt as XprotoExt, Font as X11Font};
 
 use super::discovery::{find_font_path, select_best_default_font};
 
-/// Rendered text as BGRA bitmap (optimized for X11)
+/// Rendered text as a premultiplied BGRA bitmap (optimized for X11)
 pub struct RenderedText {
     pub width: usize,
     pub height: usize,
-    /// Little-endian ARGB (BGRA in memory): Blue, Green, Red, Alpha
+    /// Premultiplied little-endian ARGB (BGRA in memory): Blue, Green, Red, Alpha
     pub data: Vec<u8>,
 }
 
 /// Font renderer with TrueType (fontdue) or X11 core font fallback
 #[derive(Debug)]
 pub enum FontRenderer {
-    Fontdue {
-        font: Font,
-        font_name: String,
-        size: f32,
-    },
-    X11Fallback {
-        font_id: X11Font,
-        font_name: String,
-        size: f32,
-    },
+    Fontdue { font: Font, size: f32 },
+    X11Fallback { font_id: X11Font, size: f32 },
 }
 
 impl FontRenderer {
     /// Load a TrueType font from a file path
-    pub fn from_path(path: PathBuf, font_name: String, size: f32) -> Result<Self> {
+    pub fn from_path(path: PathBuf, size: f32) -> Result<Self> {
         debug!(path = %path.display(), size = size, "Attempting to load font from path");
 
         let font_data = fs::read(&path).with_context(|| {
@@ -53,11 +45,7 @@ impl FontRenderer {
             ))?;
 
         debug!(path = %path.display(), "Successfully loaded font from path");
-        Ok(Self::Fontdue {
-            font,
-            font_name,
-            size,
-        })
+        Ok(Self::Fontdue { font, size })
     }
 
     /// Load font from a font name via fontconfig
@@ -75,7 +63,7 @@ impl FontRenderer {
         debug!(font_name = %font_name, resolved_path = %font_path.display(), "Resolved font name to path via fontconfig");
 
         let path_display = font_path.display().to_string();
-        Self::from_path(font_path, font_name.to_string(), size).with_context(|| {
+        Self::from_path(font_path, size).with_context(|| {
             format!(
                 "Failed to load font '{}' from path '{}'. \
                  Font file may be corrupt or in an unsupported format.",
@@ -91,7 +79,7 @@ impl FontRenderer {
         match select_best_default_font() {
             Ok((name, path)) => {
                 debug!(font = %name, "Using TrueType font via fontdue");
-                Self::from_path(path, name, size)
+                Self::from_path(path, size)
             }
             Err(e) => {
                 warn!(error = %e, "No TrueType fonts available, falling back to X11 core fonts");
@@ -103,11 +91,7 @@ impl FontRenderer {
                     .context("Failed to open X11 'fixed' font")?;
 
                 info!("Using X11 core font 'fixed' (basic rendering)");
-                Ok(Self::X11Fallback {
-                    font_id,
-                    font_name: String::new(),
-                    size,
-                })
+                Ok(Self::X11Fallback { font_id, size })
             }
         }
     }
@@ -160,24 +144,7 @@ impl FontRenderer {
         }
     }
 
-    /// Check if this renderer matches the given font configuration
-    /// Returns true if font name and size are the same (no rebuild needed)
-    pub fn matches_config(&self, font_name: &str, font_size: f32) -> bool {
-        match self {
-            Self::Fontdue {
-                font_name: current,
-                size,
-                ..
-            }
-            | Self::X11Fallback {
-                font_name: current,
-                size,
-                ..
-            } => current == font_name && (*size - font_size).abs() < 0.01,
-        }
-    }
-
-    /// Render text to a BGRA bitmap (X11 optimized)
+    /// Render straight-alpha ARGB text to a premultiplied BGRA bitmap (X11 optimized)
     pub fn render_text(&self, text: &str, fg_color: u32) -> Result<RenderedText> {
         match self {
             Self::Fontdue { font, size, .. } => {
@@ -218,7 +185,9 @@ impl FontRenderer {
                 // Allocate buffer for BGRA data (4 bytes per pixel)
                 let mut data = vec![0u8; width * height * 4];
 
-                // Pre-calculate color components
+                // Premultiply once, then apply glyph coverage to every channel.
+                let fg_color =
+                    crate::common::color::HexColor::from_argb32(fg_color).to_premultiplied_argb32();
                 let fg_a = (fg_color >> 24) & 0xFF;
                 let fg_r = (fg_color >> 16) & 0xFF;
                 let fg_g = (fg_color >> 8) & 0xFF;

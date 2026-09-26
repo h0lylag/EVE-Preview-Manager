@@ -18,6 +18,10 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
+use x11rb::connection::Connection;
+use x11rb::protocol::{Event, xproto::*};
+use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 use crate::common::constants::{input, paths, permissions};
 use crate::input::backend::{
@@ -27,6 +31,80 @@ use crate::input::device_detection;
 use crate::input::listener::{CycleCommand, TimestampedCommand};
 
 pub struct EvdevBackend;
+
+/// Samples server time without consuming the daemon's X11 events.
+/// Each device listener owns one connection and samples serially. Its unmapped
+/// InputOnly window is not drawable and is destroyed on connection close under
+/// X11's default DestroyAll close-down mode.
+/// See X11 CreateWindow and Connection Close:
+/// <https://www.x.org/releases/X11R7.7/doc/xproto/x11protocol.html>.
+struct XTimestampSource {
+    conn: RustConnection,
+    window: Window,
+    atom: Atom,
+}
+
+impl XTimestampSource {
+    fn new() -> Result<Self> {
+        let (conn, screen_number) =
+            x11rb::connect(None).context("Failed to connect to X11 for evdev timestamps")?;
+        let root = conn.setup().roots[screen_number].root;
+        let window = conn.generate_id()?;
+        conn.create_window(
+            0,
+            window,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )?
+        .check()
+        .context("Failed to create evdev timestamp window")?;
+        let atom = conn
+            .intern_atom(false, b"_EPM_INPUT_TIMESTAMP")?
+            .reply()
+            .context("Failed to intern evdev timestamp atom")?
+            .atom;
+        Ok(Self { conn, window, atom })
+    }
+
+    fn timestamp(&self) -> Result<u32> {
+        // ICCCM 2.1 documents this timestamp acquisition technique:
+        // https://www.x.org/releases/X11R7.7/doc/xorg-docs/icccm/icccm.html
+        // X11 PropertyNotify guarantees NewValue even for a zero-length append.
+        // Checking the request also flushes it and prevents waiting for a notification
+        // that will never arrive after a protocol error (e.g. a destroyed window).
+        // Verified in pinned x11rb 0.14, src/rust_connection/mod.rs:
+        // RustConnection::check_for_raw_error flushes and queues unrelated events.
+        self.conn
+            .change_property8(
+                PropMode::APPEND,
+                self.window,
+                self.atom,
+                AtomEnum::STRING,
+                &[],
+            )?
+            .check()
+            .context("Failed to request evdev X11 timestamp")?;
+        loop {
+            if let Event::PropertyNotify(event) = self
+                .conn
+                .wait_for_event()
+                .context("Failed to read evdev X11 timestamp")?
+                && event.window == self.window
+                && event.atom == self.atom
+                && event.state == Property::NEW_VALUE
+            {
+                return Ok(event.time);
+            }
+        }
+    }
+}
 
 impl HotkeyBackend for EvdevBackend {
     fn spawn(
@@ -218,6 +296,7 @@ fn listen_for_hotkeys(
     config: HotkeyConfiguration,
     all_device_paths: Arc<Vec<std::path::PathBuf>>,
 ) -> Result<()> {
+    let timestamp_source = XTimestampSource::new()?;
     loop {
         let events = device.fetch_events().context("Failed to fetch events")?;
 
@@ -263,19 +342,13 @@ fn listen_for_hotkeys(
                     || is_skip_key
                     || is_toggle_previews_key
                 {
-                    // Capture timestamp from the event
-                    let timestamp = event.timestamp();
-                    let millis = timestamp
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u32;
-                    potential_hotkey_presses.push((key_code, millis));
+                    potential_hotkey_presses.push(key_code);
                 }
             }
         }
 
         // For each potential hotkey, query current modifier state from ALL devices
-        for (key_code, timestamp) in potential_hotkey_presses {
+        for key_code in potential_hotkey_presses {
             // Query modifier state across all devices to handle cross-device hotkeys
             // (e.g., Shift held on keyboard + Mouse Button pressed on mouse)
             let mut ctrl_pressed = false;
@@ -398,6 +471,11 @@ fn listen_for_hotkeys(
             }
 
             if let Some(command) = command_to_send {
+                // Raw evdev timestamps are not in the X server's clock domain.
+                // Sample when handling the hotkey; this is not the original time
+                // of an input event that was delayed before reaching this listener.
+                let timestamp = timestamp_source.timestamp()?;
+                debug!(command = ?command, timestamp, "Sending hotkey with X server timestamp");
                 let timestamped_command = TimestampedCommand { command, timestamp };
                 sender
                     .blocking_send(timestamped_command)
@@ -471,4 +549,214 @@ pub fn list_input_devices() -> Result<Vec<(String, String)>> {
     devices.sort_by(|a, b| a.1.cmp(&b.1));
 
     Ok(devices)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Run on an isolated display, never the user's desktop:
+    //! ```sh
+    //! xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp -noreset" \
+    //!   env EPM_X11_TESTS=1 timeout 60s \
+    //!   cargo test --locked --all-features input::evdev_backend::tests -- --ignored --test-threads=1
+    //! ```
+    use super::*;
+    use crate::common::constants::x11;
+    use crate::x11::{CachedAtoms, activate_window, refresh_pointer_state};
+
+    fn timestamp_source() -> XTimestampSource {
+        assert_eq!(
+            std::env::var("EPM_X11_TESTS").as_deref(),
+            Ok("1"),
+            "run display tests with EPM_X11_TESTS=1 under isolated Xvfb"
+        );
+        XTimestampSource::new().unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn server_timestamps_transfer_focus_and_survive_activation_and_motion() {
+        let source = timestamp_source();
+        let (observer, screen_number) = x11rb::connect(None).unwrap();
+        let screen = &observer.setup().roots[screen_number];
+        let atoms = CachedAtoms::new(&observer).unwrap();
+        let target = observer.generate_id().unwrap();
+        observer
+            .create_window(
+                0,
+                target,
+                screen.root,
+                0,
+                0,
+                100,
+                100,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::POINTER_MOTION),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        observer.map_window(target).unwrap().check().unwrap();
+        observer
+            .change_window_attributes(
+                screen.root,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let mut timestamp = 0;
+        for _ in 0..3 {
+            // Let server time advance so reusing a previous sample fails the
+            // last-focus-change check, rather than passing within one millisecond.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            observer
+                .set_input_focus(InputFocus::PARENT, screen.root, x11rb::CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+            timestamp = source.timestamp().unwrap();
+            assert_ne!(timestamp, x11rb::CURRENT_TIME);
+            assert_eq!(
+                observer.get_input_focus().unwrap().reply().unwrap().focus,
+                screen.root
+            );
+            observer
+                .set_input_focus(InputFocus::PARENT, target, timestamp)
+                .unwrap()
+                .check()
+                .unwrap();
+            assert_eq!(
+                observer.get_input_focus().unwrap().reply().unwrap().focus,
+                target
+            );
+        }
+        assert_eq!(
+            source
+                .conn
+                .get_window_attributes(source.window)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .map_state,
+            MapState::UNMAPPED
+        );
+
+        activate_window(&source.conn, screen, &atoms, target, timestamp).unwrap();
+        refresh_pointer_state(&source.conn, target, timestamp).unwrap();
+        // Round trips fence both connections before draining the observer's events.
+        source.conn.get_input_focus().unwrap().reply().unwrap();
+        observer.get_input_focus().unwrap().reply().unwrap();
+        let mut saw_activation = false;
+        let mut saw_motion = false;
+        while let Some(event) = observer.poll_for_event().unwrap() {
+            match event {
+                Event::ClientMessage(event) if event.type_ == atoms.net_active_window => {
+                    assert_eq!(event.window, target);
+                    assert_eq!(event.format, 32);
+                    assert_eq!(
+                        event.data.as_data32(),
+                        [x11::ACTIVE_WINDOW_SOURCE_PAGER, timestamp, 0, 0, 0]
+                    );
+                    saw_activation = true;
+                }
+                Event::MotionNotify(event) if event.response_type & 0x80 != 0 => {
+                    assert_eq!(event.event, target);
+                    assert_eq!(event.time, timestamp);
+                    saw_motion = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_activation, "activation message was not delivered");
+        assert!(saw_motion, "synthetic pointer refresh was not delivered");
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn timestamp_filters_unrelated_events_and_cleans_up_its_window() {
+        let source = timestamp_source();
+        let (observer, _) = x11rb::connect(None).unwrap();
+        observer
+            .change_window_attributes(
+                source.window,
+                &ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE | EventMask::STRUCTURE_NOTIFY),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        let noise = source
+            .conn
+            .intern_atom(false, b"_EPM_TEST_TIMESTAMP_NOISE")
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom;
+        // Queue a wrong-atom NewValue and a correct-atom Deleted event. Neither
+        // may supply the timestamp for the next request.
+        source
+            .conn
+            .change_property8(
+                PropMode::REPLACE,
+                source.window,
+                noise,
+                AtomEnum::STRING,
+                b"noise",
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        source.timestamp().unwrap();
+        source
+            .conn
+            .delete_property(source.window, source.atom)
+            .unwrap()
+            .check()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let timestamp = source.timestamp().unwrap();
+        let property = observer
+            .get_property(false, source.window, source.atom, AtomEnum::STRING, 0, 1)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(property.value_len, 0);
+        let mut last_timestamp = None;
+        let mut saw_noise = false;
+        while let Some(event) = observer.poll_for_event().unwrap() {
+            if let Event::PropertyNotify(event) = event {
+                saw_noise |= event.atom == noise;
+                if event.atom == source.atom && event.state == Property::NEW_VALUE {
+                    last_timestamp = Some(event.time);
+                }
+            }
+        }
+        assert!(
+            saw_noise,
+            "sampling must not drain another connection's events"
+        );
+        assert_eq!(last_timestamp, Some(timestamp));
+        let helper = source.window;
+        drop(source);
+        let Event::DestroyNotify(event) = observer.wait_for_event().unwrap() else {
+            panic!("closing timestamp connection must destroy its helper window");
+        };
+        assert_eq!(event.window, helper);
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn destroyed_timestamp_window_returns_error_without_waiting_for_an_event() {
+        let source = timestamp_source();
+        source
+            .conn
+            .destroy_window(source.window)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(source.timestamp().is_err());
+    }
 }

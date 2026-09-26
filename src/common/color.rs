@@ -1,7 +1,7 @@
 //! Color type conversions and utilities
 //!
 //! Provides type-safe color handling with conversions between:
-//! - Hex strings (#AARRGGBB format)
+//! - Hex strings (#RRGGBB or #AARRGGBB format)
 //! - ARGB32 values (u32)
 //! - X11 render Colors (16-bit per channel)
 //! - Premultiplied ARGB32 (for text rendering)
@@ -13,23 +13,20 @@ use x11rb::protocol::render::Color;
 pub struct HexColor(u32);
 
 impl HexColor {
-    /// Parse hex color string supporting multiple formats:
-    /// - 6 digits: RRGGBB (full opacity assumed, becomes FFRRGGBB)
-    /// - 8 digits: AARRGGBB (explicit alpha)
-    /// - Optional '#' prefix supported but not required
+    /// Parse exactly six (RRGGBB) or eight (AARRGGBB) ASCII hex digits,
+    /// with one optional '#' prefix. RGB implies full opacity; ARGB preserves
+    /// explicit alpha, including zero. Whitespace and other syntax are rejected.
     pub fn parse(hex: &str) -> Option<Self> {
         let hex = hex.strip_prefix('#').unwrap_or(hex);
+        if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
         let value = u32::from_str_radix(hex, 16).ok()?;
-
-        // If 6 digits (RRGGBB), prepend full opacity (FF)
-        // Check if value fits in 24 bits (max 0xFFFFFF)
-        let argb = if value <= 0xFF_FF_FF {
-            0xFF_00_00_00 | value // Prepend FF for full opacity
+        Some(Self(if hex.len() == 6 {
+            0xFF_00_00_00 | value
         } else {
-            value // Already has alpha channel
-        };
-
-        Some(Self(argb))
+            value
+        }))
     }
 
     /// Create from ARGB32 value
@@ -42,7 +39,14 @@ impl HexColor {
         self.0
     }
 
-    /// Convert to X11 Color (16-bit per channel, 0-65535 range)
+    /// Convert straight-alpha ARGB to premultiplied pixels for XRender compositing.
+    pub fn to_premultiplied_argb32(self) -> u32 {
+        let alpha = self.0 >> 24;
+        let premultiply = |shift: u32| (((self.0 >> shift) & 0xFF) * alpha + 127) / 255;
+        (alpha << 24) | (premultiply(16) << 16) | (premultiply(8) << 8) | premultiply(0)
+    }
+
+    /// Convert straight-alpha ARGB to premultiplied XRender channels (0-65535).
     pub fn to_x11_color(self) -> Color {
         let a = (self.0 >> 24) & 0xFF;
         let r = (self.0 >> 16) & 0xFF;
@@ -51,32 +55,15 @@ impl HexColor {
 
         // Scale from 8-bit (0-255) to 16-bit (0-65535)
         let scale = |v: u32| (v << 8 | v) as u16;
+        let premultiply = |v: u32| ((v * 257 * a + 127) / 255) as u16;
 
         Color {
-            red: scale(r),
-            green: scale(g),
-            blue: scale(b),
+            red: premultiply(r),
+            green: premultiply(g),
+            blue: premultiply(b),
             alpha: scale(a),
         }
     }
-}
-
-/// Convert HEX string to egui::Color32
-pub fn hex_to_color32(hex: &str) -> Option<egui::Color32> {
-    let color = HexColor::parse(hex)?;
-    let a = (color.0 >> 24) & 0xFF;
-    let r = (color.0 >> 16) & 0xFF;
-    let g = (color.0 >> 8) & 0xFF;
-    let b = color.0 & 0xFF;
-    Some(egui::Color32::from_rgba_premultiplied(
-        r as u8, g as u8, b as u8, a as u8,
-    ))
-}
-
-/// Convert egui::Color32 to HEX string (#AARRGGBB)
-pub fn color32_to_hex(color: egui::Color32) -> String {
-    let [r, g, b, a] = color.to_array();
-    format!("#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
 }
 
 /// Opacity as percentage (0-100)
@@ -115,6 +102,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn color_regression_explicit_alpha_is_selected_by_digit_count() {
+        for (input, expected) in [
+            ("000000", 0xFF000000),
+            ("123aBc", 0xFF123ABC),
+            ("00000000", 0x00000000),
+            ("00FF0000", 0x00FF0000),
+            ("01123aBc", 0x01123ABC),
+            ("7f123aBc", 0x7F123ABC),
+            ("FF123aBc", 0xFF123ABC),
+        ] {
+            for prefix in ["", "#"] {
+                let color = HexColor::parse(&format!("{prefix}{input}")).unwrap();
+                assert_eq!(color.argb32(), expected, "{prefix}{input}");
+                assert_eq!(color.to_x11_color().alpha, ((expected >> 24) * 257) as u16);
+            }
+        }
+    }
+
+    #[test]
+    fn color_regression_rejects_unsupported_syntax() {
+        for input in [
+            "#€ABC",
+            "#€ABCDE",
+            "é1234",
+            "é123456",
+            "😀12",
+            "😀1234",
+            "",
+            "#",
+            "##123456",
+            "##12345678",
+            "12345G",
+            "G0123456",
+            " 123456",
+            "123456 ",
+            "#123456\n",
+            "+12345",
+            "+1234567",
+            "-12345",
+            "0x123456",
+            "0",
+            "FFF",
+            "12345",
+            "1234567",
+            "000000000",
+            "0000000000",
+        ] {
+            assert_eq!(HexColor::parse(input), None, "{input:?}");
+        }
+    }
+
+    #[test]
     fn test_hex_color_parsing() {
         // 8-digit format (AARRGGBB)
         assert_eq!(HexColor::parse("#7FFF0000"), Some(HexColor(0x7FFF0000)));
@@ -130,6 +169,46 @@ mod tests {
         // Invalid
         assert_eq!(HexColor::parse("invalid"), None);
         assert_eq!(HexColor::parse(""), None);
+    }
+
+    #[test]
+    fn text_pixels_premultiply_rgb_and_preserve_alpha() {
+        for (argb, expected) in [
+            (0x00FF8040, 0x00000000),
+            (0x80FF8040, 0x80804020),
+            (0xFFFF8040, 0xFFFF8040),
+            (0x01FF8040, 0x01010100),
+        ] {
+            assert_eq!(
+                HexColor::from_argb32(argb).to_premultiplied_argb32(),
+                expected
+            );
+        }
+        for alpha in 0..=255 {
+            for channel in 0..=255 {
+                let argb = (alpha << 24) | (channel << 16) | (channel << 8) | channel;
+                let pixel = HexColor::from_argb32(argb).to_premultiplied_argb32();
+                assert_eq!(pixel >> 24, alpha);
+                for shift in [0, 8, 16] {
+                    assert!((pixel >> shift) & 255 <= alpha);
+                }
+                if alpha == 255 {
+                    assert_eq!(pixel, argb);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xrender_colors_premultiply_rgb_without_changing_alpha() {
+        for (argb, expected) in [
+            (0x00FF8040, [0, 0, 0, 0]),
+            (0x80FF8040, [32896, 16513, 8256, 32896]),
+            (0xFFFF8040, [65535, 32896, 16448, 65535]),
+        ] {
+            let color = HexColor::from_argb32(argb).to_x11_color();
+            assert_eq!([color.red, color.green, color.blue, color.alpha], expected);
+        }
     }
 
     #[test]

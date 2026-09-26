@@ -1,6 +1,7 @@
 use super::CharactersState;
 use crate::common::constants::manager_ui::*;
 use crate::config::profile::Profile;
+use crate::manager::components::color_edit;
 use crate::manager::components::hotkey_settings::HotkeySettingsState;
 use eframe::egui;
 
@@ -267,23 +268,12 @@ pub fn render_overrides_section(
                 // Color
                 ui.horizontal(|ui| {
                     ui.label("Color:");
-                    let mut color_str = settings
+                    let mut color = settings
                         .override_active_border_color
                         .clone()
-                        .unwrap_or_default();
-                    let text_edit = egui::TextEdit::singleline(&mut color_str).desired_width(100.0);
-
-                    if ui.add(text_edit).changed() {
-                        settings.override_active_border_color = Some(color_str.clone());
-                        *changed = true;
-                    }
-
-                    // Color picker button
-                    if let Ok(mut color) = crate::manager::utils::parse_hex_color(&color_str)
-                        && ui.color_edit_button_srgba(&mut color).changed()
-                    {
-                        let new_hex = crate::manager::utils::format_hex_color(color);
-                        settings.override_active_border_color = Some(new_hex);
+                        .unwrap_or_else(|| defaults.active_border_color.clone());
+                    if color_edit::ui(ui, &mut color) {
+                        settings.override_active_border_color = Some(color);
                         *changed = true;
                     }
                 });
@@ -341,22 +331,12 @@ pub fn render_overrides_section(
                 // Color
                 ui.horizontal(|ui| {
                     ui.label("Color:");
-                    let mut color_str = settings
+                    let mut color = settings
                         .override_inactive_border_color
                         .clone()
-                        .unwrap_or_default();
-                    let text_edit = egui::TextEdit::singleline(&mut color_str).desired_width(100.0);
-
-                    if ui.add(text_edit).changed() {
-                        settings.override_inactive_border_color = Some(color_str.clone());
-                        *changed = true;
-                    }
-
-                    if let Ok(mut color) = crate::manager::utils::parse_hex_color(&color_str)
-                        && ui.color_edit_button_srgba(&mut color).changed()
-                    {
-                        let new_hex = crate::manager::utils::format_hex_color(color);
-                        settings.override_inactive_border_color = Some(new_hex);
+                        .unwrap_or_else(|| defaults.inactive_border_color.clone());
+                    if color_edit::ui(ui, &mut color) {
+                        settings.override_inactive_border_color = Some(color);
                         *changed = true;
                     }
                 });
@@ -397,25 +377,11 @@ pub fn render_overrides_section(
         });
 
         // Text Color Settings (Indented)
-        if settings.override_text_color.is_some() {
+        if let Some(color) = &mut settings.override_text_color {
             ui.indent("text_color_details", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Color:");
-                    let mut color_str = settings.override_text_color.clone().unwrap_or_default();
-                    let text_edit = egui::TextEdit::singleline(&mut color_str).desired_width(100.0);
-
-                    if ui.add(text_edit).changed() {
-                        settings.override_text_color = Some(color_str.clone());
-                        *changed = true;
-                    }
-
-                    if let Ok(mut color) = crate::manager::utils::parse_hex_color(&color_str)
-                        && ui.color_edit_button_srgba(&mut color).changed()
-                    {
-                        let new_hex = crate::manager::utils::format_hex_color(color);
-                        settings.override_text_color = Some(new_hex);
-                        *changed = true;
-                    }
+                    *changed |= color_edit::ui(ui, color);
                 });
             });
         }
@@ -447,21 +413,7 @@ pub fn render_overrides_section(
             ui.indent("static_mode_details", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Color:");
-                    let mut color_str = color.clone();
-                    let text_edit = egui::TextEdit::singleline(&mut color_str).desired_width(100.0);
-
-                    if ui.add(text_edit).changed() {
-                        *color = color_str.clone();
-                        *changed = true;
-                    }
-
-                    if let Ok(mut c) = crate::manager::utils::parse_hex_color(&color_str)
-                        && ui.color_edit_button_srgba(&mut c).changed()
-                    {
-                        let new_hex = crate::manager::utils::format_hex_color(c);
-                        *color = new_hex;
-                        *changed = true;
-                    }
+                    *changed |= color_edit::ui(ui, color);
                 });
             });
         }
@@ -524,4 +476,50 @@ pub fn render_overrides_section(
     });
 
     ui.add_space(ITEM_SPACING);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_only_overrides_display_inherited_colors_without_creating_color_overrides() {
+        let ctx = egui::Context::default();
+        let mut settings = crate::common::types::CharacterSettings::new(0, 0, 250, 140);
+        settings.override_active_border_size = Some(3);
+        settings.override_inactive_border_size = Some(2);
+        let before = serde_json::to_value(&settings).unwrap();
+        let defaults = ThemeDefaults {
+            active_border_color: "#801234AB".into(),
+            inactive_border_color: "#00654321".into(),
+            active_border_size: 1,
+            inactive_border_size: 1,
+            text_color: "#FFFFFF".into(),
+        };
+        let mut state = CharactersState::default();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut changed = false;
+                render_overrides_section(
+                    ui,
+                    "Test",
+                    &mut settings,
+                    &defaults,
+                    &mut state,
+                    &mut changed,
+                );
+                assert!(!changed);
+            });
+            output.textures_delta.clear();
+            for expected in [
+                &defaults.active_border_color,
+                &defaults.inactive_border_color,
+            ] {
+                assert!(output.shapes.iter().any(|shape| {
+                    matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.text() == expected)
+                }), "missing inherited color {expected}");
+            }
+            assert_eq!(serde_json::to_value(&settings).unwrap(), before);
+        }
+    }
 }

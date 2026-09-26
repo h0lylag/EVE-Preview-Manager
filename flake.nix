@@ -37,5 +37,8 @@
         {
           default = pkgs.callPackage ./shell.nix { inherit rustToolchain; };
         });
+      checks = forAllSystems (system: {
+        default = self.packages.${system}.default;
+      });
     };
 }

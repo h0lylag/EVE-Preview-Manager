@@ -20,12 +20,6 @@ pub mod x11 {
     /// _NET_WM_STATE action: add/set property (1)
     pub const NET_WM_STATE_ADD: u32 = 1;
 
-    /// _NET_WM_STATE action: remove property (0)
-    pub const NET_WM_STATE_REMOVE: u32 = 0;
-
-    /// WM_CHANGE_STATE normal value (requests the WM to restore/deiconify)
-    pub const NORMAL_STATE: u32 = 1;
-
     /// WM_CHANGE_STATE iconic value (requests the WM to minimize)
     pub const ICONIC_STATE: u32 = 3;
 }
@@ -236,10 +230,10 @@ pub mod defaults {
         /// Minimize other clients when switching via hotkey
         pub const MINIMIZE_CLIENTS_ON_SWITCH: bool = false;
 
-        /// Require EVE window focus for hotkey activation
+        /// Require a tracked source window to be focused for hotkey activation
         pub const HOTKEY_REQUIRE_EVE_FOCUS: bool = true;
 
-        /// Hide thumbnails when EVE window loses focus
+        /// Hide thumbnails when tracked source windows lose focus
         pub const HIDE_WHEN_NO_FOCUS: bool = false;
     }
 }

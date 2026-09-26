@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use tracing::debug;
-use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
@@ -161,30 +160,6 @@ pub fn is_window_minimized(
     Ok(false)
 }
 
-pub fn get_active_eve_window(
-    conn: &RustConnection,
-    screen: &Screen,
-    atoms: &CachedAtoms,
-) -> Result<Option<Window>> {
-    let active_window = get_active_window(conn, screen, atoms)?;
-
-    if let Some(active_window) = active_window {
-        if is_window_eve(conn, active_window, atoms)
-            .context(format!(
-                "Failed to check if active window {} is EVE client",
-                active_window
-            ))?
-            .is_some()
-        {
-            Ok(Some(active_window))
-        } else {
-            Ok(None)
-        }
-    } else {
-        Ok(None)
-    }
-}
-
 /// Get the currently focused window ID, if any
 pub fn get_active_window(
     conn: &RustConnection,
@@ -290,12 +265,16 @@ pub fn is_normal_window(
     }
 }
 
-/// Get the list of client windows from _NET_CLIENT_LIST property on root window
-pub fn get_client_list(conn: &RustConnection, atoms: &CachedAtoms) -> Result<Vec<Window>> {
+/// Get the client windows advertised on the selected screen's root window
+pub fn get_client_list(
+    conn: &RustConnection,
+    screen: &Screen,
+    atoms: &CachedAtoms,
+) -> Result<Vec<Window>> {
     let prop = conn
         .get_property(
             false,
-            conn.setup().roots[0].root,
+            screen.root,
             atoms.net_client_list,
             AtomEnum::WINDOW,
             0,

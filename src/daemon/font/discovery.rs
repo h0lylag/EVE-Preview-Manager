@@ -70,8 +70,9 @@ fn parse_font_name(font_name: &str) -> (&str, Option<&str>) {
 pub fn list_fonts() -> Result<Vec<String>> {
     debug!("Loading available fonts from fontconfig...");
     let fc = Fontconfig::new().context("Failed to initialize fontconfig")?;
-    let pattern = Pattern::new(&fc);
-    let font_set = fontconfig::list_fonts(&pattern, None);
+    let pattern = Pattern::new(&fc).context("Failed to create fontconfig pattern")?;
+    let font_set =
+        fontconfig::list_fonts(&pattern, None).context("Failed to list fontconfig fonts")?;
 
     let mut fonts = BTreeSet::new();
     for font_pattern in font_set.iter() {
@@ -79,7 +80,7 @@ pub fn list_fonts() -> Result<Vec<String>> {
             .get_string(fontconfig::FC_FAMILY)
             .unwrap_or("Unknown");
 
-        let font_name = if let Some(style_str) = font_pattern.get_string(fontconfig::FC_STYLE) {
+        let font_name = if let Ok(style_str) = font_pattern.get_string(fontconfig::FC_STYLE) {
             if style_str == "Regular" {
                 family.to_string()
             } else {
@@ -114,20 +115,24 @@ pub fn find_font_path(font_name: &str) -> Result<PathBuf> {
         );
     }
 
-    let mut pattern = Pattern::new(&fc);
+    let mut pattern = Pattern::new(&fc).context("Failed to create fontconfig pattern")?;
     let family_cstr = CString::new(family_name)
         .with_context(|| format!("Invalid family name: {}", family_name))?;
-    pattern.add_string(fontconfig::FC_FAMILY, &family_cstr);
+    pattern
+        .add_string(fontconfig::FC_FAMILY, &family_cstr)
+        .context("Failed to add font family to fontconfig pattern")?;
 
     if let Some(style) = style_name {
         let style_cstr =
             CString::new(style).with_context(|| format!("Invalid style name: {}", style))?;
-        pattern.add_string(fontconfig::FC_STYLE, &style_cstr);
+        pattern
+            .add_string(fontconfig::FC_STYLE, &style_cstr)
+            .context("Failed to add font style to fontconfig pattern")?;
     }
 
-    let matched = pattern.font_match();
+    let matched = pattern.font_match().context("Failed to match font")?;
 
-    if let Some(matched_family) = matched.get_string(fontconfig::FC_FAMILY)
+    if let Ok(matched_family) = matched.get_string(fontconfig::FC_FAMILY)
         && !matched_family.eq_ignore_ascii_case(family_name)
     {
         warn!(
@@ -188,17 +193,20 @@ pub fn select_best_default_font() -> Result<(String, PathBuf)> {
 
     debug!("Specific fonts not found, querying for any monospace font");
     let fc = Fontconfig::new().context("Failed to initialize fontconfig")?;
-    let mut pattern = Pattern::new(&fc);
-    pattern.add_integer(fontconfig::FC_SPACING, 100);
+    let mut pattern = Pattern::new(&fc).context("Failed to create fontconfig pattern")?;
+    pattern
+        .add_integer(fontconfig::FC_SPACING, 100)
+        .context("Failed to set monospace fontconfig pattern")?;
 
-    let font_set = fontconfig::list_fonts(&pattern, None);
+    let font_set =
+        fontconfig::list_fonts(&pattern, None).context("Failed to list monospace fonts")?;
 
     for font_pattern in font_set.iter() {
         let family = font_pattern
             .get_string(fontconfig::FC_FAMILY)
             .unwrap_or("Unknown");
 
-        if let Some(style) = font_pattern.get_string(fontconfig::FC_STYLE) {
+        if let Ok(style) = font_pattern.get_string(fontconfig::FC_STYLE) {
             let style_lower = style.to_lowercase();
             if style_lower.contains("bold")
                 || style_lower.contains("italic")
@@ -208,7 +216,7 @@ pub fn select_best_default_font() -> Result<(String, PathBuf)> {
             }
         }
 
-        if let Some(file_path) = font_pattern.filename() {
+        if let Ok(file_path) = font_pattern.filename() {
             let path = PathBuf::from(file_path);
             if path.exists() {
                 info!(font = family, path = %path.display(), "Selected first available monospace font");

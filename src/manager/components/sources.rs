@@ -1,7 +1,24 @@
+use super::color_edit;
 use crate::config::profile::CustomWindowRule;
 use crate::manager::x11_utils::{WindowInfo, get_running_applications};
 use egui::{ScrollArea, Ui};
 use std::collections::HashSet;
+
+fn edit_source_alias(ui: &mut Ui, id: egui::Id, alias: &str) -> Option<String> {
+    let mut draft = ui
+        .data_mut(|data| data.get_temp::<String>(id))
+        .unwrap_or_else(|| alias.to_string());
+    let mut submitted = false;
+    ui.horizontal(|ui| {
+        let response = ui.add(egui::TextEdit::singleline(&mut draft).id(id));
+        submitted = (response.lost_focus()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+            || ui.button("Rename").clicked();
+    });
+    // Keep unfinished text intact; canonicalization happens only on submission.
+    ui.data_mut(|data| data.insert_temp(id, draft.clone()));
+    submitted.then_some(draft)
+}
 
 pub struct SourcesTab {
     // Component state
@@ -60,6 +77,12 @@ impl SourcesTab {
                 .weak()
                 .small(),
         );
+        if let Err(err) = profile.validate_custom_source_aliases() {
+            ui.colored_label(egui::Color32::RED, err);
+        }
+        if let Some(err) = &self.error_msg {
+            ui.colored_label(egui::Color32::RED, err);
+        }
         ui.add_space(10.0);
 
         // -- Rules List (Expandable) --
@@ -78,6 +101,7 @@ impl SourcesTab {
                 }
 
                 let mut remove_idx = None;
+                let mut pending_alias_rename = None;
 
                 for (idx, rule) in profile.custom_windows.iter_mut().enumerate() {
                     let is_expanded = self.expanded_rows.contains(&idx);
@@ -127,8 +151,9 @@ impl SourcesTab {
                                 .show(ui, |ui| {
                                     // Alias
                                     ui.label("Display Name:");
-                                    if ui.text_edit_singleline(&mut rule.alias).changed() {
-                                        changed = true;
+                                    let id = egui::Id::new(("source_alias", &profile.profile_name, idx, &rule.alias));
+                                    if let Some(alias_text) = edit_source_alias(ui, id, &rule.alias) {
+                                        pending_alias_rename = Some((idx, alias_text));
                                     }
                                     ui.end_row();
 
@@ -187,7 +212,7 @@ impl SourcesTab {
                                         }
 
                                         let bind_text =
-                                            if hotkey_state.is_capturing_custom_rule(&rule.alias) {
+                                            if hotkey_state.is_capturing_custom_rule(idx) {
                                                 "Capturing..."
                                             } else {
                                                 "⌨ Bind"
@@ -195,7 +220,7 @@ impl SourcesTab {
 
                                         if ui.button(bind_text).clicked() {
                                             hotkey_state.start_key_capture_for_custom_rule(
-                                                rule.alias.clone(),
+                                                idx,
                                                 profile.hotkey_backend,
                                             );
                                         }
@@ -233,28 +258,10 @@ impl SourcesTab {
                                             ui.indent("active_border_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let color = rule
-                                                        .active_border_color
-                                                        .clone()
-                                                        .unwrap_or_else(|| {
-                                                            profile
-                                                                .thumbnail_active_border_color
-                                                                .clone()
-                                                        });
-                                                    let mut egui_color =
-                                                        crate::common::color::hex_to_color32(
-                                                            &color,
-                                                        )
-                                                        .unwrap_or(egui::Color32::WHITE);
-                                                    if ui
-                                                        .color_edit_button_srgba(&mut egui_color)
-                                                        .changed()
-                                                    {
-                                                        rule.active_border_color = Some(
-                                                            crate::common::color::color32_to_hex(
-                                                                egui_color,
-                                                            ),
-                                                        );
+                                                    let mut color = rule.active_border_color.clone()
+                                                        .unwrap_or_else(|| profile.thumbnail_active_border_color.clone());
+                                                    if color_edit::ui(ui, &mut color) {
+                                                        rule.active_border_color = Some(color);
                                                         changed = true;
                                                     }
                                                 });
@@ -306,28 +313,10 @@ impl SourcesTab {
                                             ui.indent("inactive_border_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let color = rule
-                                                        .inactive_border_color
-                                                        .clone()
-                                                        .unwrap_or_else(|| {
-                                                            profile
-                                                                .thumbnail_inactive_border_color
-                                                                .clone()
-                                                        });
-                                                    let mut egui_color =
-                                                        crate::common::color::hex_to_color32(
-                                                            &color,
-                                                        )
-                                                        .unwrap_or(egui::Color32::WHITE);
-                                                    if ui
-                                                        .color_edit_button_srgba(&mut egui_color)
-                                                        .changed()
-                                                    {
-                                                        rule.inactive_border_color = Some(
-                                                            crate::common::color::color32_to_hex(
-                                                                egui_color,
-                                                            ),
-                                                        );
+                                                    let mut color = rule.inactive_border_color.clone()
+                                                        .unwrap_or_else(|| profile.thumbnail_inactive_border_color.clone());
+                                                    if color_edit::ui(ui, &mut color) {
+                                                        rule.inactive_border_color = Some(color);
                                                         changed = true;
                                                     }
                                                 });
@@ -369,21 +358,7 @@ impl SourcesTab {
                                             ui.indent("text_color_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let mut egui_color =
-                                                        crate::common::color::hex_to_color32(
-                                                            color_hex,
-                                                        )
-                                                        .unwrap_or(egui::Color32::WHITE);
-                                                    if ui
-                                                        .color_edit_button_srgba(&mut egui_color)
-                                                        .changed()
-                                                    {
-                                                        *color_hex =
-                                                            crate::common::color::color32_to_hex(
-                                                                egui_color,
-                                                            );
-                                                        changed = true;
-                                                    }
+                                                    changed |= color_edit::ui(ui, color_hex);
                                                 });
                                             });
                                         }
@@ -422,31 +397,7 @@ impl SourcesTab {
                                             ui.indent("static_mode_details", |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label("Color:");
-                                                    let mut color_str = color.clone();
-                                                    let text_edit =
-                                                        egui::TextEdit::singleline(&mut color_str)
-                                                            .desired_width(100.0);
-
-                                                    if ui.add(text_edit).changed() {
-                                                        *color = color_str.clone();
-                                                        changed = true;
-                                                    }
-
-                                                    if let Ok(mut c) =
-                                                        crate::manager::utils::parse_hex_color(
-                                                            &color_str,
-                                                        )
-                                                        && ui
-                                                            .color_edit_button_srgba(&mut c)
-                                                            .changed()
-                                                    {
-                                                        let new_hex =
-                                                            crate::manager::utils::format_hex_color(
-                                                                c,
-                                                            );
-                                                        *color = new_hex;
-                                                        changed = true;
-                                                    }
+                                                    changed |= color_edit::ui(ui, color);
                                                 });
                                             });
                                         }
@@ -661,8 +612,24 @@ impl SourcesTab {
                     ui.separator();
                 }
 
+                if let Some((idx, alias)) = pending_alias_rename {
+                    let id = egui::Id::new(("source_alias", &profile.profile_name, idx, &profile.custom_windows[idx].alias));
+                    match profile.rename_custom_source_alias(idx, &alias) {
+                        Ok(alias_changed) => {
+                            ui.data_mut(|data| data.remove::<String>(id));
+                            if alias_changed {
+                                changed = true;
+                            }
+                            self.error_msg = None;
+                        }
+                        Err(err) => {
+                            self.error_msg = Some(err);
+                        }
+                    }
+                }
+
                 if let Some(idx) = remove_idx {
-                    profile.custom_windows.remove(idx);
+                    profile.remove_custom_source_rule(idx);
                     self.expanded_rows.remove(&idx);
                     changed = true;
                 }
@@ -804,13 +771,34 @@ impl SourcesTab {
 
             ui.add_space(10.0);
 
-            let is_valid = !self.new_rule.alias.is_empty()
+            let alias_validation = profile
+                .validate_custom_source_alias_for_rule(
+                    profile.custom_windows.len(),
+                    &self.new_rule.alias,
+                )
+                .ok();
+            if alias_validation.is_none() && !self.new_rule.alias.trim().is_empty() {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    profile
+                        .validate_custom_source_alias_for_rule(
+                            profile.custom_windows.len(),
+                            &self.new_rule.alias,
+                        )
+                        .unwrap_err(),
+                );
+            }
+
+            let is_valid = alias_validation.is_some()
                 && (self.new_rule.class_pattern.is_some() || self.new_rule.title_pattern.is_some());
 
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(is_valid, |ui| {
                     if ui.button("Add Source").clicked() {
                         // Inherit global defaults for dimensions
+                        if let Some(alias) = alias_validation.clone() {
+                            self.new_rule.alias = alias;
+                        }
                         self.new_rule.default_width = profile.thumbnail_default_width;
                         self.new_rule.default_height = profile.thumbnail_default_height;
 
@@ -849,5 +837,76 @@ impl SourcesTab {
         }
 
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::profile::{CycleSlot, Profile};
+    use crate::manager::components::hotkey_settings::HotkeySettingsState;
+    use egui::{Context, Event, Key, Modifiers, RawInput};
+
+    fn key(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn source_alias_keeps_spaces_and_validates_only_on_submission() {
+        let ctx = Context::default();
+        let mut tab = SourcesTab::default();
+        let mut profile = Profile::default();
+        let mut rule = tab.new_rule.clone();
+        rule.alias = "Browser".to_string();
+        rule.class_pattern = Some("firefox".to_string());
+        profile.custom_windows.push(rule.clone());
+        rule.alias = "Browser Tools".to_string();
+        profile.custom_windows.push(rule);
+        profile.cycle_groups[0].cycle_list = vec![CycleSlot::Source("Browser".to_string())];
+        tab.expanded_rows.insert(0);
+        let mut hotkeys = HotkeySettingsState::new();
+        let id = egui::Id::new(("source_alias", &profile.profile_name, 0_usize, "Browser"));
+        let mut frame = |events| {
+            let input = RawInput {
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                tab.ui(ui, &mut profile, &mut hotkeys);
+            });
+            // Headless tests have no renderer to consume texture updates.
+            output.textures_delta.clear();
+            profile.custom_windows[0].alias.clone()
+        };
+        frame(Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        assert_eq!(
+            frame(vec![key(Key::End), Event::Text(" ".to_string())]),
+            "Browser"
+        );
+        assert_eq!(frame(vec![Event::Text("Tools".to_string())]), "Browser");
+        // A duplicate is rejected without replacing the name or losing the draft.
+        assert_eq!(frame(vec![key(Key::Enter)]), "Browser");
+        assert_eq!(
+            ctx.data(|data| data.get_temp::<String>(id)).as_deref(),
+            Some("Browser Tools")
+        );
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        assert_eq!(
+            frame(vec![key(Key::End), Event::Text(" Two".to_string())]),
+            "Browser"
+        );
+        assert_eq!(frame(vec![key(Key::Enter)]), "Browser Tools Two");
+        assert!(tab.error_msg.is_none());
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Source("Browser Tools Two".to_string())]
+        );
     }
 }

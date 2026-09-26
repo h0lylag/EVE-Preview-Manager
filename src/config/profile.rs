@@ -1,7 +1,7 @@
 //! Profile-based configuration for the Manager
 //!
 //! Supports multiple profiles, each containing visual settings (opacity, border, text),
-//! hotkey bindings, and per-character thumbnail positions.
+//! hotkey bindings, and per-source thumbnail positions.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -10,9 +10,9 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::common::types::CharacterSettings;
+use crate::common::types::{CharacterSettings, Dimensions, Position, SourceIdentity};
 
-/// A named group of characters for cycling
+/// A named group of typed sources for cycling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CycleGroup {
     pub name: String,
@@ -29,7 +29,7 @@ pub struct CycleGroup {
     pub hotkey_backward: Option<crate::config::HotkeyBinding>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum CycleSlot {
     #[serde(rename = "eve")]
     Eve(String),
@@ -105,7 +105,7 @@ pub struct CustomWindowRule {
     pub title_pattern: Option<String>,
     /// Pattern to match window class/process (optional)
     pub class_pattern: Option<String>,
-    /// Display name used as the identifier ("Character Name")
+    /// Display name used as the custom-source identity key.
     pub alias: String,
 
     // --- Layout Overrides ---
@@ -156,6 +156,16 @@ pub enum HotkeyBackendType {
     Evdev,
 }
 
+/// Group participation for unidentified clients; dedicated hotkeys work in either mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoggedOutUnidentifiedCycleMode {
+    /// Use only dedicated hotkeys for unidentified logged-out clients.
+    SeparateHotkeys,
+    /// Append unidentified logged-out clients after configured cycle group entries.
+    AppendToGroups,
+}
+
 /// Top-level configuration with profile support
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -187,7 +197,6 @@ pub struct GlobalSettings {
 }
 
 /// Profile - A complete set of visual and behavioral settings
-/// Profile - A complete set of visual and behavioral settings
 #[derive(Debug, Clone, Serialize)]
 pub struct Profile {
     pub profile_name: String,
@@ -198,6 +207,10 @@ pub struct Profile {
     pub thumbnail_default_width: u16,
     /// Default thumbnail height for new characters
     pub thumbnail_default_height: u16,
+    /// Whether new previews with no saved coordinates should use a fixed top-left screen position
+    pub thumbnail_default_position_enabled: bool,
+    /// Stored fixed top-left screen position for new previews with no saved coordinates
+    pub thumbnail_default_position: Position,
 
     // Thumbnail visual settings
     /// Enable/disable thumbnail rendering entirely (daemon still runs for hotkeys)
@@ -224,10 +237,11 @@ pub struct Profile {
     /// When a new character logs in without saved coordinates, inherit the previous character's thumbnail position
     /// This keeps thumbnails in place when swapping characters on the same EVE client
     pub thumbnail_preserve_position_on_swap: bool,
+    /// When an EVE client logs out, keep showing the last known character name in its thumbnail label
+    pub thumbnail_show_logged_out_character_name: bool,
 
     // Client behavior settings
     pub client_minimize_on_switch: bool,
-    /// When minimized, show "MINIMIZED" text overlay
     /// When minimized, show "MINIMIZED" text overlay
     pub client_minimize_show_overlay: bool,
 
@@ -241,14 +255,19 @@ pub struct Profile {
 
     // REMOVED LEGACY FIELDS in favor of cycle_groups
     // hotkey_cycle_forward, hotkey_cycle_backward, hotkey_cycle_group are now inside CycleGroup
-    /// Multiple cycle groups, each with its own character list and hotkeys
-    /// Multiple cycle groups, each with its own character list and hotkeys
+    /// Multiple cycle groups, each with its own source list and hotkeys.
     pub cycle_groups: Vec<CycleGroup>,
 
     /// Include logged-out characters in hotkey cycle if they were previously logged in during this session
     pub hotkey_logged_out_cycle: bool,
+    /// Whether unidentified clients also participate in normal cycle groups
+    pub hotkey_logged_out_unidentified_cycle_mode: LoggedOutUnidentifiedCycleMode,
+    /// Dedicated forward hotkey for unidentified logged-out clients
+    pub hotkey_logged_out_unidentified_cycle_forward: Option<crate::config::HotkeyBinding>,
+    /// Dedicated backward hotkey for unidentified logged-out clients
+    pub hotkey_logged_out_unidentified_cycle_backward: Option<crate::config::HotkeyBinding>,
 
-    /// Require EVE window focused for hotkeys to work
+    /// Require a tracked source window to be focused for hotkeys to work.
     pub hotkey_require_eve_focus: bool,
 
     /// Reset cycle index to the beginning when switching between cycle groups
@@ -257,15 +276,14 @@ pub struct Profile {
     /// Hotkey to switch to this profile (global)
     pub hotkey_profile_switch: Option<crate::config::HotkeyBinding>,
 
-    /// Hotkey to temporarily skip the current character in the cycle
+    /// Hotkey to temporarily skip the current source in the cycle.
     pub hotkey_toggle_skip: Option<crate::config::HotkeyBinding>,
 
     /// Hotkey to toggle visibility of all thumbnails (ephemeral)
     pub hotkey_toggle_previews: Option<crate::config::HotkeyBinding>,
 
-    /// Per-character hotkey assignments (character_name -> optional binding)
-    /// Allows direct switching to specific characters with dedicated hotkeys
-    /// Display order follows hotkey_cycle_group
+    /// EVE character hotkey assignments (character_name -> binding).
+    /// Custom source hotkeys live on their CustomWindowRule entries.
     pub character_hotkeys: HashMap<String, crate::config::HotkeyBinding>,
 
     // Per-profile character positions and dimensions
@@ -279,7 +297,6 @@ pub struct Profile {
 }
 
 // Default value functions
-// Default value functions
 pub(crate) fn default_border_size() -> u16 {
     crate::common::constants::defaults::border::SIZE
 }
@@ -290,6 +307,10 @@ pub(crate) fn default_profile_name() -> String {
 
 pub(crate) fn default_hotkey_backend() -> HotkeyBackendType {
     HotkeyBackendType::X11
+}
+
+pub(crate) fn default_logged_out_unidentified_cycle_mode() -> LoggedOutUnidentifiedCycleMode {
+    LoggedOutUnidentifiedCycleMode::SeparateHotkeys
 }
 
 pub(crate) fn default_backup_enabled() -> bool {
@@ -318,6 +339,10 @@ pub(crate) fn default_snap_threshold() -> u16 {
 
 pub(crate) fn default_preserve_thumbnail_position_on_swap() -> bool {
     crate::common::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
+}
+
+pub(crate) fn default_show_logged_out_character_name() -> bool {
+    false
 }
 
 pub(crate) fn default_thumbnail_width() -> u16 {
@@ -370,6 +395,8 @@ fn default_profiles() -> Vec<Profile> {
             .to_string(),
         thumbnail_default_width: default_thumbnail_width(),
         thumbnail_default_height: default_thumbnail_height(),
+        thumbnail_default_position_enabled: false,
+        thumbnail_default_position: Position::default(),
         thumbnail_enabled: default_thumbnail_enabled(),
         thumbnail_opacity: crate::common::constants::defaults::thumbnail::OPACITY_PERCENT,
         thumbnail_active_border: crate::common::constants::defaults::border::ENABLED,
@@ -389,12 +416,16 @@ fn default_profiles() -> Vec<Profile> {
         thumbnail_hide_not_focused:
             crate::common::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS,
         thumbnail_preserve_position_on_swap: default_preserve_thumbnail_position_on_swap(),
+        thumbnail_show_logged_out_character_name: default_show_logged_out_character_name(),
         client_minimize_on_switch:
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH,
         client_minimize_show_overlay: false, // Default: off (clean minimized look)
         hotkey_backend: default_hotkey_backend(), // Default: X11 (secure, no permissions)
         hotkey_input_device: None, // Default: no device selected (only used by evdev backend)
         hotkey_logged_out_cycle: false, // Default: off
+        hotkey_logged_out_unidentified_cycle_mode: default_logged_out_unidentified_cycle_mode(),
+        hotkey_logged_out_unidentified_cycle_forward: None,
+        hotkey_logged_out_unidentified_cycle_backward: None,
         hotkey_require_eve_focus:
             crate::common::constants::defaults::behavior::HOTKEY_REQUIRE_EVE_FOCUS,
         hotkey_cycle_reset_index: false,
@@ -433,48 +464,274 @@ impl Profile {
         profile
     }
 
+    /// Restore saved geometry for matching identities, retaining current settings and map keys.
+    /// New identities without saved geometry keep their current position and dimensions.
+    pub(crate) fn restore_saved_thumbnail_spatial(&mut self, saved: &Self) {
+        for (current, saved) in [
+            (&mut self.character_thumbnails, &saved.character_thumbnails),
+            (
+                &mut self.custom_source_thumbnails,
+                &saved.custom_source_thumbnails,
+            ),
+        ] {
+            for (name, settings) in current {
+                if let Some(saved) = saved.get(name) {
+                    settings.x = saved.x;
+                    settings.y = saved.y;
+                    settings.dimensions = saved.dimensions;
+                }
+            }
+        }
+    }
+
     /// Update thumbnail position/dimensions if changed.
     /// Returns true if the configuration was modified, false otherwise.
-    pub fn update_thumbnail_position(
+    pub fn update_thumbnail_spatial(
         &mut self,
-        name: &str,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-        is_custom: bool,
+        source: &SourceIdentity,
+        position: Position,
+        dimensions: Dimensions,
     ) -> bool {
-        let map = if is_custom {
+        let map = if source.kind.is_custom() {
             &mut self.custom_source_thumbnails
         } else {
             &mut self.character_thumbnails
         };
 
-        if let Some(existing) = map.get_mut(name) {
+        if let Some(existing) = map.get_mut(&source.name) {
             // Check if anything actually changed
-            if existing.x == x
-                && existing.y == y
-                && existing.dimensions.width == width
-                && existing.dimensions.height == height
+            if existing.x == position.x
+                && existing.y == position.y
+                && existing.dimensions == dimensions
             {
                 // No change
                 return false;
             }
 
             // Update existing entry
-            existing.x = x;
-            existing.y = y;
-            existing.dimensions.width = width;
-            existing.dimensions.height = height;
+            existing.x = position.x;
+            existing.y = position.y;
+            existing.dimensions = dimensions;
             true
         } else {
             // New entry - always a change
             map.insert(
-                name.to_string(),
-                CharacterSettings::new(x, y, width, height),
+                source.name.clone(),
+                CharacterSettings::new(position.x, position.y, dimensions.width, dimensions.height),
             );
             true
         }
+    }
+
+    /// Validate saved names without normalizing or repairing the configuration.
+    pub fn validate_cycle_group_names(&self) -> std::result::Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for group in &self.cycle_groups {
+            let name = group.name.trim();
+            let reason = if name.is_empty() {
+                Some("cannot be empty")
+            } else if name != group.name {
+                Some("has leading or trailing whitespace")
+            } else if !seen.insert(name.to_lowercase()) {
+                Some("duplicates another cycle group name")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(format!(
+                    "Profile '{}': cycle group name '{}' {}",
+                    self.profile_name, group.name, reason
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Commit a trimmed, nonblank name only when no other group uses it.
+    pub fn rename_cycle_group(
+        &mut self,
+        index: usize,
+        candidate: &str,
+    ) -> std::result::Result<bool, String> {
+        let Some(group) = self.cycle_groups.get(index) else {
+            return Err("Cycle group no longer exists".to_string());
+        };
+        let name = candidate.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "Profile '{}': cycle group name cannot be empty",
+                self.profile_name
+            ));
+        }
+        let normalized = name.to_lowercase();
+        if self
+            .cycle_groups
+            .iter()
+            .enumerate()
+            .any(|(other, group)| other != index && group.name.trim().to_lowercase() == normalized)
+        {
+            return Err(format!(
+                "Profile '{}': another cycle group already uses '{}'",
+                self.profile_name, name
+            ));
+        }
+        if group.name == name {
+            return Ok(false);
+        }
+        self.cycle_groups[index].name = name.to_string();
+        Ok(true)
+    }
+
+    /// Generate a display name using the same collision policy as renaming.
+    pub fn unused_cycle_group_name(&self, base: &str) -> String {
+        let base = base.trim();
+        let base = if base.is_empty() { "New Group" } else { base };
+        let used: std::collections::HashSet<_> = self
+            .cycle_groups
+            .iter()
+            .map(|group| group.name.trim().to_lowercase())
+            .collect();
+        let mut name = base.to_string();
+        let mut suffix = 2;
+        while used.contains(&name.to_lowercase()) {
+            name = format!("{base} {suffix}");
+            suffix += 1;
+        }
+        name
+    }
+
+    pub fn validate_custom_source_aliases(&self) -> std::result::Result<(), String> {
+        let mut seen: HashMap<String, String> = HashMap::new();
+
+        for rule in &self.custom_windows {
+            let trimmed = rule.alias.trim();
+            if trimmed.is_empty() {
+                return Err("Custom source display names cannot be empty".to_string());
+            }
+
+            let normalized = trimmed.to_lowercase();
+            if let Some(existing) = seen.get(&normalized) {
+                return Err(format!(
+                    "Duplicate custom source display name '{}'",
+                    existing
+                ));
+            }
+            seen.insert(normalized, trimmed.to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_custom_source_alias_for_rule(
+        &self,
+        rule_idx: usize,
+        alias: &str,
+    ) -> std::result::Result<String, String> {
+        let trimmed = alias.trim();
+        if trimmed.is_empty() {
+            return Err("Custom source display name cannot be empty".to_string());
+        }
+
+        let normalized = trimmed.to_lowercase();
+        if self
+            .custom_windows
+            .iter()
+            .enumerate()
+            .any(|(idx, rule)| idx != rule_idx && rule.alias.trim().to_lowercase() == normalized)
+        {
+            return Err(format!("Another custom source already uses '{}'", trimmed));
+        }
+
+        Ok(trimmed.to_string())
+    }
+
+    pub fn rename_custom_source_alias(
+        &mut self,
+        rule_idx: usize,
+        new_alias: &str,
+    ) -> std::result::Result<bool, String> {
+        let new_alias = self.validate_custom_source_alias_for_rule(rule_idx, new_alias)?;
+        let Some(rule) = self.custom_windows.get(rule_idx) else {
+            return Err("Custom source rule no longer exists".to_string());
+        };
+
+        let old_alias = rule.alias.clone();
+        if old_alias == new_alias {
+            return Ok(false);
+        }
+
+        let old_alias_normalized = old_alias.trim().to_lowercase();
+        let old_alias_count = self
+            .custom_windows
+            .iter()
+            .filter(|rule| rule.alias.trim().to_lowercase() == old_alias_normalized)
+            .count();
+
+        self.custom_windows[rule_idx].alias = new_alias.clone();
+
+        let old_settings_key = self
+            .custom_source_thumbnails
+            .keys()
+            .find(|key| key.trim().to_lowercase() == old_alias_normalized)
+            .cloned();
+
+        if let Some(settings_key) = old_settings_key
+            && let Some(settings) = self.custom_source_thumbnails.get(&settings_key).cloned()
+        {
+            if old_alias_count > 1 {
+                self.custom_source_thumbnails
+                    .entry(new_alias.clone())
+                    .or_insert(settings);
+            } else if let Some(settings) = self.custom_source_thumbnails.remove(&settings_key) {
+                self.custom_source_thumbnails
+                    .insert(new_alias.clone(), settings);
+            }
+        }
+
+        if old_alias_count == 1 {
+            for group in &mut self.cycle_groups {
+                for slot in &mut group.cycle_list {
+                    if let CycleSlot::Source(name) = slot
+                        && name.trim().to_lowercase() == old_alias_normalized
+                    {
+                        *name = new_alias.clone();
+                    }
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    pub fn remove_custom_source_rule(&mut self, rule_idx: usize) -> bool {
+        if rule_idx >= self.custom_windows.len() {
+            return false;
+        }
+
+        let alias = self.custom_windows.remove(rule_idx).alias;
+        let normalized = alias.trim().to_lowercase();
+        if !self
+            .custom_windows
+            .iter()
+            .any(|rule| rule.alias.trim().to_lowercase() == normalized)
+        {
+            if let Some(settings_key) = self
+                .custom_source_thumbnails
+                .keys()
+                .find(|key| key.trim().to_lowercase() == normalized)
+                .cloned()
+            {
+                self.custom_source_thumbnails.remove(&settings_key);
+            }
+            for group in &mut self.cycle_groups {
+                group.cycle_list.retain(|slot| match slot {
+                    CycleSlot::Eve(_) => true,
+                    CycleSlot::Source(name) => name.trim().to_lowercase() != normalized,
+                });
+            }
+        }
+
+        true
     }
 }
 
@@ -485,6 +742,58 @@ impl Default for Profile {
 }
 
 impl Config {
+    pub fn validate_profile_name(
+        &self,
+        excluded_idx: Option<usize>,
+        candidate: &str,
+    ) -> std::result::Result<String, String> {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            return Err("Profile name cannot be empty".to_string());
+        }
+
+        let normalized = trimmed.to_lowercase();
+        if self.profiles.iter().enumerate().any(|(idx, profile)| {
+            Some(idx) != excluded_idx && profile.profile_name.trim().to_lowercase() == normalized
+        }) {
+            return Err(format!("Another profile already uses '{}'", trimmed));
+        }
+
+        Ok(trimmed.to_string())
+    }
+
+    pub fn validate_profile_names(&self) -> std::result::Result<(), String> {
+        let mut seen: HashMap<String, String> = HashMap::new();
+
+        for profile in &self.profiles {
+            let trimmed = profile.profile_name.trim();
+            if trimmed.is_empty() {
+                return Err("Profile name cannot be empty".to_string());
+            }
+            if profile.profile_name != trimmed {
+                return Err(format!(
+                    "Profile name '{}' has leading or trailing whitespace",
+                    trimmed
+                ));
+            }
+
+            let normalized = trimmed.to_lowercase();
+            if let Some(existing) = seen.get(&normalized) {
+                return Err(format!("Duplicate profile name '{}'", existing));
+            }
+            seen.insert(normalized, trimmed.to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_cycle_group_names(&self) -> std::result::Result<(), String> {
+        for profile in &self.profiles {
+            profile.validate_cycle_group_names()?;
+        }
+        Ok(())
+    }
+
     pub fn path() -> PathBuf {
         // Allow overriding config directory via env var (for testing isolation)
         if let Ok(dir) = std::env::var("EVE_PREVIEW_MANAGER_CONFIG_DIR") {
@@ -510,16 +819,30 @@ impl Config {
 
     /// Load configuration from a specific path
     pub fn load_from(config_path: &std::path::Path) -> Result<Self> {
-        if !config_path.exists() {
-            info!(
-                "Config file not found, creating default config at {:?}",
-                config_path
-            );
-            let config = Config::default();
-            config.save_to(config_path)?;
-            return Ok(config);
+        match fs::symlink_metadata(config_path) {
+            Ok(_) => Self::read_from(config_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                info!(
+                    "Config file not found, creating default config at {:?}",
+                    config_path
+                );
+                let config = Self::default();
+                config.save_to(config_path)?;
+                Ok(config)
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("Failed to inspect config at {:?}", config_path))
+            }
         }
+    }
 
+    /// Read existing configuration without creating or replacing any files.
+    pub fn read() -> Result<Self> {
+        Self::read_from(&Self::path())
+    }
+
+    /// Read existing configuration at a specific path, including on reload.
+    pub fn read_from(config_path: &std::path::Path) -> Result<Self> {
         let contents = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
 
@@ -542,26 +865,19 @@ impl Config {
             .find(|p| p.profile_name == self.global.selected_profile)
     }
 
-    /// Save configuration to JSON file.
-    ///
-    /// Writes the current in-memory state directly to config.json.
-    /// The Manager maintains authoritative state via IPC synchronization.
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&Self::path())
-    }
-
-    /// Save configuration to a specific path
+    /// Atomically save configuration to a specific path.
+    /// Structural changes take effect when the Manager restarts the daemon.
     pub fn save_to(&self, config_path: &std::path::Path) -> Result<()> {
-        // Ensure config directory exists
-        if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory {:?}", parent))?;
-        }
+        self.validate_profile_names()
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("Configuration has invalid profile names")?;
 
-        let json_string =
-            serde_json::to_string_pretty(self).context("Failed to serialize config to JSON")?;
+        self.validate_cycle_group_names()
+            .map_err(|err| anyhow::anyhow!(err))?;
 
-        fs::write(config_path, json_string)
+        let json = serde_json::to_vec_pretty(self).context("Failed to serialize config to JSON")?;
+
+        crate::config::write_atomically(config_path, &json)
             .with_context(|| format!("Failed to write config to {:?}", config_path))?;
 
         info!(path = ?config_path, "Saved config");
@@ -580,7 +896,177 @@ impl Default for Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cycle_group_names_validate_and_rename_without_losing_contents() {
+        use super::{CycleGroup, CycleSlot, Profile};
+        let mut profile = Profile::default_with_name("Mining".into(), String::new());
+        profile.cycle_groups[0].name = "Fleet".into();
+        profile.cycle_groups[0].cycle_list = vec![CycleSlot::Eve("Alice".into())];
+        profile.cycle_groups.push(CycleGroup {
+            name: "Other".into(),
+            ..CycleGroup::default_group()
+        });
+        for bad in ["", "  ", "Other", " other ", "OTHER"] {
+            assert!(profile.rename_cycle_group(0, bad).is_err());
+            assert_eq!(profile.cycle_groups[0].name, "Fleet");
+        }
+        assert!(!profile.rename_cycle_group(0, " Fleet ").unwrap());
+        assert!(profile.rename_cycle_group(0, "  Main  Fleet  ").unwrap());
+        assert_eq!(profile.cycle_groups[0].name, "Main  Fleet");
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("Alice".into())]
+        );
+        assert!(profile.rename_cycle_group(99, "Lost").is_err());
+        for bad in ["Main  Fleet", "MAIN  FLEET", "", " ", " Padded", "Padded "] {
+            profile.cycle_groups[1].name = bad.into();
+            let error = profile.validate_cycle_group_names().unwrap_err();
+            assert!(error.contains("Mining"));
+            assert!(error.contains(bad));
+        }
+    }
+
+    #[test]
+    fn cycle_group_names_protect_existing_files_and_allow_reuse_across_profiles() {
+        use super::{Config, CycleGroup, Profile};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config
+            .profiles
+            .push(Profile::default_with_name("Other".into(), String::new()));
+        config.save_to(&path).unwrap(); // Both profiles may contain Default.
+        config.profiles[1]
+            .cycle_groups
+            .push(CycleGroup::default_group());
+        let bytes = serde_json::to_vec_pretty(&config).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(loaded.validate_cycle_group_names().is_err());
+        assert!(loaded.save_to(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(Config::read_from(&path).is_ok());
+    }
+
+    #[test]
+    fn cycle_group_unused_names_respect_normalized_collisions() {
+        use super::{CycleGroup, Profile};
+        let profile = Profile {
+            cycle_groups: [
+                "new group",
+                " New Group 2 ",
+                "Fleet (Copy)",
+                "FLEET (COPY) 2",
+                "Fleet (Copy) 4",
+            ]
+            .into_iter()
+            .map(|name| CycleGroup {
+                name: name.into(),
+                ..CycleGroup::default_group()
+            })
+            .collect(),
+            ..Profile::default()
+        };
+        assert_eq!(
+            profile.unused_cycle_group_name(" New Group "),
+            "New Group 3"
+        );
+        assert_eq!(
+            profile.unused_cycle_group_name("Fleet (Copy)"),
+            "Fleet (Copy) 3"
+        );
+        assert_eq!(profile.unused_cycle_group_name("Other"), "Other");
+    }
+
+    #[test]
+    fn load_errors_preserve_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        for bytes in [b"{broken".as_slice(), &[0xff, 0xfe]] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(super::Config::load_from(&path).is_err());
+            assert!(super::Config::read_from(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let marker = path.join("marker");
+        std::fs::write(&marker, b"keep").unwrap();
+        assert!(super::Config::load_from(&path).is_err());
+        assert_eq!(std::fs::read(marker).unwrap(), b"keep");
+        // A non-directory parent is an inspection error, not first-run absence.
+        let parent = dir.path().join("file");
+        std::fs::write(&parent, b"keep").unwrap();
+        assert!(super::Config::load_from(&parent.join("config.json")).is_err());
+        assert_eq!(std::fs::read(parent).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn read_missing_config_does_not_initialize_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/config.json");
+        assert!(super::Config::read_from(&path).is_err());
+        assert!(!path.parent().unwrap().exists());
+        super::Config::load_from(&path).unwrap();
+        assert!(super::Config::read_from(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_does_not_replace_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::os::unix::fs::symlink("missing.json", &path).unwrap();
+        assert!(super::Config::load_from(&path).is_err());
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            std::path::Path::new("missing.json")
+        );
+        assert!(!dir.path().join("missing.json").exists());
+    }
+
     use super::*;
+    use crate::common::types::CharacterSettings;
+
+    fn test_custom_rule(alias: &str) -> CustomWindowRule {
+        CustomWindowRule {
+            title_pattern: Some(alias.to_string()),
+            class_pattern: None,
+            alias: alias.to_string(),
+            default_width: default_thumbnail_width(),
+            default_height: default_thumbnail_height(),
+            limit: false,
+            active_border_color: None,
+            inactive_border_color: None,
+            active_border_size: None,
+            inactive_border_size: None,
+            text_color: None,
+            text_size: None,
+            text_x: None,
+            text_y: None,
+            preview_mode: None,
+            exempt_from_minimize: false,
+            override_render_preview: None,
+            hotkey: None,
+        }
+    }
+
+    fn config_with_profile_names(names: &[&str]) -> Config {
+        let mut config = Config::default();
+        let template = config.profiles[0].clone();
+        config.profiles = names
+            .iter()
+            .map(|name| {
+                let mut profile = template.clone();
+                profile.profile_name = (*name).to_string();
+                profile
+            })
+            .collect();
+        if let Some(name) = names.first() {
+            config.global.selected_profile = (*name).to_string();
+        }
+        config
+    }
 
     #[test]
     fn test_profile_default_with_name() {
@@ -599,6 +1085,310 @@ mod tests {
         );
         assert!(profile.character_thumbnails.is_empty());
         assert!(profile.custom_source_thumbnails.is_empty());
+    }
+
+    #[test]
+    fn profile_name_validation_returns_trimmed_name() {
+        let config = config_with_profile_names(&["Mining"]);
+
+        assert_eq!(
+            config.validate_profile_name(None, "  PvP  "),
+            Ok("PvP".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_empty_names() {
+        let config = Config::default();
+
+        for candidate in ["", " \t\n"] {
+            assert_eq!(
+                config.validate_profile_name(None, candidate),
+                Err("Profile name cannot be empty".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_case_insensitive_trimmed_duplicates() {
+        let config = config_with_profile_names(&["Mining"]);
+
+        for candidate in [" mining ", "MINING"] {
+            assert_eq!(
+                config.validate_profile_name(None, candidate),
+                Err(format!(
+                    "Another profile already uses '{}'",
+                    candidate.trim()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn profile_name_validation_excludes_profile_being_edited() {
+        let config = config_with_profile_names(&["Mining", "PvP"]);
+
+        assert_eq!(
+            config.validate_profile_name(Some(0), " MINING "),
+            Ok("MINING".to_string())
+        );
+        assert_eq!(
+            config.validate_profile_name(Some(0), "pvp"),
+            Err("Another profile already uses 'pvp'".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_names_validation_rejects_noncanonical_names() {
+        let blank = config_with_profile_names(&[" \t"]);
+        assert_eq!(
+            blank.validate_profile_names(),
+            Err("Profile name cannot be empty".to_string())
+        );
+
+        let padded = config_with_profile_names(&[" Mining "]);
+        assert_eq!(
+            padded.validate_profile_names(),
+            Err("Profile name 'Mining' has leading or trailing whitespace".to_string())
+        );
+    }
+
+    #[test]
+    fn profile_names_validation_rejects_case_insensitive_duplicates() {
+        let config = config_with_profile_names(&["Mining", "MINING"]);
+
+        assert_eq!(
+            config.validate_profile_names(),
+            Err("Duplicate profile name 'Mining'".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_profile_names_do_not_replace_saved_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let valid = config_with_profile_names(&["Mining"]);
+        valid.save_to(&config_path).unwrap();
+        let saved = fs::read(&config_path).unwrap();
+
+        let invalid = config_with_profile_names(&["Mining", "MINING"]);
+        assert!(invalid.save_to(&config_path).is_err());
+        assert_eq!(fs::read(&config_path).unwrap(), saved);
+    }
+
+    #[test]
+    fn invalid_profile_names_load_for_repair() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let invalid = config_with_profile_names(&["Mining", "MINING"]);
+        fs::write(&config_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
+
+        let loaded = Config::load_from(&config_path).unwrap();
+        assert_eq!(loaded.profiles.len(), 2);
+        assert_eq!(
+            loaded.validate_profile_names(),
+            Err("Duplicate profile name 'Mining'".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_source_alias_validation_allows_eve_name_collision() {
+        let mut profile = Profile::default();
+        profile.character_thumbnails.insert(
+            "h0ly lag".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.custom_windows.push(test_custom_rule("h0ly lag"));
+
+        assert!(profile.validate_custom_source_aliases().is_ok());
+    }
+
+    #[test]
+    fn custom_source_alias_validation_rejects_duplicate_sources_case_insensitively() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Browser"));
+        profile.custom_windows.push(test_custom_rule(" browser "));
+
+        assert!(profile.validate_custom_source_aliases().is_err());
+    }
+
+    #[test]
+    fn rename_custom_source_alias_migrates_source_state_only() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile
+            .custom_source_thumbnails
+            .insert("Old".to_string(), CharacterSettings::new(10, 20, 300, 200));
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("Old".to_string()),
+            CycleSlot::Eve("Old".to_string()),
+        ];
+
+        assert_eq!(profile.rename_custom_source_alias(0, "New"), Ok(true));
+
+        assert!(!profile.custom_source_thumbnails.contains_key("Old"));
+        assert!(profile.custom_source_thumbnails.contains_key("New"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![
+                CycleSlot::Source("New".to_string()),
+                CycleSlot::Eve("Old".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_custom_source_alias_migrates_normalized_source_slots() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule(" Old "));
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("old".to_string()),
+            CycleSlot::Eve("old".to_string()),
+        ];
+
+        assert_eq!(profile.rename_custom_source_alias(0, "New"), Ok(true));
+
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![
+                CycleSlot::Source("New".to_string()),
+                CycleSlot::Eve("old".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_legacy_duplicate_custom_source_copies_shared_settings() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile
+            .custom_source_thumbnails
+            .insert("Old".to_string(), CharacterSettings::new(10, 20, 300, 200));
+        profile.cycle_groups[0]
+            .cycle_list
+            .push(CycleSlot::Source("Old".to_string()));
+
+        assert_eq!(profile.rename_custom_source_alias(1, "New"), Ok(true));
+
+        assert!(profile.custom_source_thumbnails.contains_key("Old"));
+        assert_eq!(
+            profile.custom_source_thumbnails.get("New"),
+            profile.custom_source_thumbnails.get("Old")
+        );
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Source("Old".to_string())]
+        );
+    }
+
+    #[test]
+    fn rename_legacy_duplicate_custom_source_finds_shared_settings_case_insensitively() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Old"));
+        profile.custom_windows.push(test_custom_rule(" old "));
+        profile
+            .custom_source_thumbnails
+            .insert("Old".to_string(), CharacterSettings::new(10, 20, 300, 200));
+
+        assert_eq!(profile.rename_custom_source_alias(1, "New"), Ok(true));
+
+        assert!(profile.custom_source_thumbnails.contains_key("Old"));
+        assert_eq!(
+            profile.custom_source_thumbnails.get("New"),
+            profile.custom_source_thumbnails.get("Old")
+        );
+    }
+
+    #[test]
+    fn remove_custom_source_rule_cleans_source_state_only_when_alias_is_unused() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Shared"));
+        profile.custom_source_thumbnails.insert(
+            "Shared".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("Shared".to_string()),
+            CycleSlot::Eve("Shared".to_string()),
+        ];
+
+        assert!(profile.remove_custom_source_rule(0));
+
+        assert!(!profile.custom_source_thumbnails.contains_key("Shared"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("Shared".to_string())]
+        );
+    }
+
+    #[test]
+    fn remove_custom_source_rule_preserves_state_for_remaining_normalized_duplicate() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule("Shared"));
+        profile.custom_windows.push(test_custom_rule(" shared "));
+        profile.custom_source_thumbnails.insert(
+            "Shared".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.cycle_groups[0]
+            .cycle_list
+            .push(CycleSlot::Source("Shared".to_string()));
+
+        assert!(profile.remove_custom_source_rule(0));
+
+        assert!(profile.custom_source_thumbnails.contains_key("Shared"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Source("Shared".to_string())]
+        );
+    }
+
+    #[test]
+    fn remove_custom_source_rule_cleans_normalized_settings_when_alias_is_unused() {
+        let mut profile = Profile::default();
+        profile.custom_windows.push(test_custom_rule(" Shared "));
+        profile.custom_source_thumbnails.insert(
+            "shared".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.cycle_groups[0].cycle_list = vec![
+            CycleSlot::Source("shared".to_string()),
+            CycleSlot::Eve("shared".to_string()),
+        ];
+
+        assert!(profile.remove_custom_source_rule(0));
+
+        assert!(profile.custom_source_thumbnails.is_empty());
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("shared".to_string())]
+        );
+    }
+
+    #[test]
+    fn json_deserialization_preserves_same_name_eve_entries() {
+        let mut config = Config::default();
+        let profile = &mut config.profiles[0];
+        profile.character_thumbnails.insert(
+            "h0ly lag".to_string(),
+            CharacterSettings::new(10, 20, 300, 200),
+        );
+        profile.custom_windows.push(test_custom_rule("h0ly lag"));
+        profile.cycle_groups[0]
+            .cycle_list
+            .push(CycleSlot::Eve("h0ly lag".to_string()));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
+        let profile = &deserialized.profiles[0];
+
+        assert!(profile.character_thumbnails.contains_key("h0ly lag"));
+        assert!(profile.custom_source_thumbnails.contains_key("h0ly lag"));
+        assert_eq!(
+            profile.cycle_groups[0].cycle_list,
+            vec![CycleSlot::Eve("h0ly lag".to_string())]
+        );
     }
 
     #[test]
@@ -623,6 +1413,8 @@ mod tests {
     #[test]
     fn test_profile_serialization() {
         let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.thumbnail_default_position_enabled = true;
+        profile.thumbnail_default_position = Position::new(321, 654);
         profile.character_thumbnails.insert(
             "TestChar".to_string(),
             CharacterSettings::new(100, 200, 480, 270),
@@ -632,8 +1424,50 @@ mod tests {
         let deserialized: Profile = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.profile_name, "Test");
+        assert!(deserialized.thumbnail_default_position_enabled);
+        assert_eq!(
+            deserialized.thumbnail_default_position,
+            Position::new(321, 654)
+        );
         assert_eq!(deserialized.character_thumbnails.len(), 1);
         assert!(deserialized.character_thumbnails.contains_key("TestChar"));
+    }
+
+    #[test]
+    fn test_disabled_default_position_retains_coordinates() {
+        let mut profile = Profile::default_with_name("Test".to_string(), String::new());
+        profile.thumbnail_default_position_enabled = false;
+        profile.thumbnail_default_position = Position::new(321, 654);
+
+        let json = serde_json::to_string(&profile).unwrap();
+        let deserialized: Profile = serde_json::from_str(&json).unwrap();
+
+        assert!(!deserialized.thumbnail_default_position_enabled);
+        assert_eq!(
+            deserialized.thumbnail_default_position,
+            Position::new(321, 654)
+        );
+    }
+
+    #[test]
+    fn test_legacy_default_position_option_enables_setting() {
+        let profile = Profile::default_with_name("Legacy Position".to_string(), String::new());
+        let mut json_value = serde_json::to_value(&profile).unwrap();
+
+        if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("thumbnail_default_position_enabled");
+            obj.insert(
+                "thumbnail_default_position".to_string(),
+                serde_json::json!({ "x": 321, "y": 654 }),
+            );
+        }
+
+        let deserialized: Profile = serde_json::from_value(json_value).unwrap();
+        assert!(deserialized.thumbnail_default_position_enabled);
+        assert_eq!(
+            deserialized.thumbnail_default_position,
+            Position::new(321, 654)
+        );
     }
 
     #[test]
@@ -696,6 +1530,21 @@ mod tests {
             profile.thumbnail_preserve_position_on_swap,
             crate::common::constants::defaults::behavior::PRESERVE_POSITION_ON_SWAP
         );
+        assert!(!profile.thumbnail_show_logged_out_character_name);
+        assert_eq!(
+            profile.hotkey_logged_out_unidentified_cycle_mode,
+            LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+        );
+        assert!(
+            profile
+                .hotkey_logged_out_unidentified_cycle_forward
+                .is_none()
+        );
+        assert!(
+            profile
+                .hotkey_logged_out_unidentified_cycle_backward
+                .is_none()
+        );
         assert_eq!(
             profile.thumbnail_default_width,
             crate::common::constants::defaults::thumbnail::WIDTH
@@ -704,6 +1553,8 @@ mod tests {
             profile.thumbnail_default_height,
             crate::common::constants::defaults::thumbnail::HEIGHT
         );
+        assert!(!profile.thumbnail_default_position_enabled);
+        assert_eq!(profile.thumbnail_default_position, Position::default());
         assert_eq!(
             profile.client_minimize_on_switch,
             crate::common::constants::defaults::behavior::MINIMIZE_CLIENTS_ON_SWITCH
@@ -737,6 +1588,70 @@ mod tests {
         assert_eq!(
             deserialized.cycle_groups[0].hotkey_backward,
             profile.cycle_groups[0].hotkey_backward
+        );
+    }
+
+    #[test]
+    fn test_logged_out_unidentified_cycle_mode_serialization() {
+        let mut profile =
+            Profile::default_with_name("Unidentified Test".to_string(), String::new());
+        profile.hotkey_logged_out_unidentified_cycle_mode =
+            LoggedOutUnidentifiedCycleMode::AppendToGroups;
+        profile.hotkey_logged_out_unidentified_cycle_forward = Some(
+            crate::config::HotkeyBinding::new(16, false, false, false, false),
+        );
+        profile.hotkey_logged_out_unidentified_cycle_backward = Some(
+            crate::config::HotkeyBinding::new(17, false, false, false, false),
+        );
+
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("append_to_groups"));
+
+        let deserialized: Profile = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_mode,
+            LoggedOutUnidentifiedCycleMode::AppendToGroups
+        );
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_forward,
+            profile.hotkey_logged_out_unidentified_cycle_forward
+        );
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_backward,
+            profile.hotkey_logged_out_unidentified_cycle_backward
+        );
+    }
+
+    #[test]
+    fn test_logged_out_unidentified_cycle_missing_fields_default() {
+        let profile = Profile::default_with_name("Missing Fields".to_string(), String::new());
+        let mut json_value = serde_json::to_value(&profile).unwrap();
+
+        if let Some(obj) = json_value.as_object_mut() {
+            obj.remove("thumbnail_default_position_enabled");
+            obj.remove("thumbnail_default_position");
+            obj.remove("hotkey_logged_out_unidentified_cycle");
+            obj.remove("hotkey_logged_out_unidentified_cycle_mode");
+            obj.remove("hotkey_logged_out_unidentified_cycle_forward");
+            obj.remove("hotkey_logged_out_unidentified_cycle_backward");
+        }
+
+        let deserialized: Profile = serde_json::from_value(json_value).unwrap();
+        assert!(!deserialized.thumbnail_default_position_enabled);
+        assert_eq!(deserialized.thumbnail_default_position, Position::default());
+        assert_eq!(
+            deserialized.hotkey_logged_out_unidentified_cycle_mode,
+            LoggedOutUnidentifiedCycleMode::SeparateHotkeys
+        );
+        assert!(
+            deserialized
+                .hotkey_logged_out_unidentified_cycle_forward
+                .is_none()
+        );
+        assert!(
+            deserialized
+                .hotkey_logged_out_unidentified_cycle_backward
+                .is_none()
         );
     }
 
@@ -810,6 +1725,14 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let config_path = temp_dir.path().join("config.json");
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(&config_path, b"{}").expect("Failed to create existing config");
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640))
+                .expect("Failed to set config permissions");
+        }
+
         let mut config = Config::default();
         config.global.selected_profile = "filesystem_test".to_string();
 
@@ -819,15 +1742,79 @@ mod tests {
             .expect("Failed to save config to temp path");
         assert!(config_path.exists());
 
+        let saved = fs::read(&config_path).expect("Failed to read saved config");
+        let saved_config: Config =
+            serde_json::from_slice(&saved).expect("Saved config was not complete JSON");
+        assert_eq!(saved_config.global.selected_profile, "filesystem_test");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+
+        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
+
         // Load from isolated path
         let loaded = Config::load_from(&config_path).expect("Failed to load config from temp path");
         assert_eq!(loaded.global.selected_profile, "filesystem_test");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn save_atomically_replaces_existing_file() {
+        use std::io::{Read, Seek};
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config_path = temp_dir.path().join("config.json");
+
+        let mut old_config = Config::default();
+        old_config.global.selected_profile = "old".to_string();
+        old_config.save_to(&config_path).unwrap();
+        let old_contents = fs::read(&config_path).unwrap();
+        let mut old_handle = fs::File::open(&config_path).unwrap();
+
+        let mut new_config = old_config;
+        new_config.global.selected_profile = "new".to_string();
+        new_config.save_to(&config_path).unwrap();
+
+        old_handle.rewind().unwrap();
+        let mut contents_from_old_handle = Vec::new();
+        old_handle
+            .read_to_end(&mut contents_from_old_handle)
+            .unwrap();
+        assert_eq!(contents_from_old_handle, old_contents);
+
+        let loaded = Config::load_from(&config_path).unwrap();
+        assert_eq!(loaded.global.selected_profile, "new");
+        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn save_cleans_temporary_file_after_failed_replacement() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let config_path = temp_dir.path().join("config.json");
+        fs::create_dir(&config_path).unwrap();
+        fs::write(config_path.join("marker"), b"unchanged").unwrap();
+
+        Config::default()
+            .save_to(&config_path)
+            .expect_err("Replacing a non-empty directory must fail");
+
+        assert_eq!(fs::read(config_path.join("marker")).unwrap(), b"unchanged");
+        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn test_default_config_creation() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let config_path = temp_dir.path().join("non_existent_config.json");
+        let config_path = temp_dir
+            .path()
+            .join("nested")
+            .join("non_existent_config.json");
 
         assert!(!config_path.exists());
 
@@ -839,5 +1826,14 @@ mod tests {
             loaded.global.selected_profile,
             crate::common::constants::defaults::behavior::PROFILE_NAME
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 }

@@ -9,11 +9,13 @@ use std::sync::mpsc::Receiver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CaptureTarget {
-    ToggleSkip,         // Hotkey to temporarily skip current character
-    TogglePreviews,     // Hotkey to toggle thumbnail visibility
-    Profile,            // Hotkey to switch to this profile
-    Character(String),  // Character name for per-character hotkey
-    CustomRule(String), // Custom Window Rule alias (Custom Source Hotkey)
+    ToggleSkip,
+    TogglePreviews,
+    LoggedOutUnidentifiedForward,
+    LoggedOutUnidentifiedBackward,
+    Profile,
+    Character(String),
+    CustomRule(usize),
 }
 
 /// State for hotkey settings Manager
@@ -34,6 +36,24 @@ pub struct HotkeySettingsState {
 }
 
 impl HotkeySettingsState {
+    #[cfg(test)]
+    pub(crate) fn pending_capture_for_test(custom_rule: bool) -> (Self, Receiver<()>) {
+        let mut state = Self::new();
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+        state.cancel_capture_tx = Some(cancel_tx);
+        state.show_key_capture_dialog = true;
+        state.capture_target = Some(if custom_rule {
+            CaptureTarget::CustomRule(0)
+        } else {
+            CaptureTarget::Character("GROUP:0:FWD".into())
+        });
+        // Model a completed capture awaiting Accept, without grabbing desktop input.
+        state.capture_result = Some(CaptureResult::Captured(crate::config::HotkeyBinding::new(
+            59, false, false, false, false,
+        )));
+        (state, cancel_rx)
+    }
+
     pub fn new() -> Self {
         // Load available input devices at Manager startup
         let (available_devices, device_load_error) = match crate::daemon::list_input_devices() {
@@ -86,7 +106,7 @@ impl HotkeySettingsState {
     }
 
     /// Cancel ongoing key capture
-    fn cancel_capture(&mut self) {
+    pub(crate) fn cancel_capture(&mut self) {
         if let Some(tx) = self.cancel_capture_tx.take() {
             let _ = tx.send(());
         }
@@ -96,10 +116,11 @@ impl HotkeySettingsState {
         self.capture_result_rx = None;
         self.current_capture_state = None;
         self.capture_result = None;
+        self.capture_error = None;
     }
 
-    /// Public method for starting character-specific hotkey capture
-    /// Used by cycle_order_settings component's per-character hotkeys tab
+    /// Public method for starting EVE character-specific hotkey capture.
+    /// Used by the character/cycle hotkey UI.
     pub fn start_key_capture_for_character(
         &mut self,
         character_name: String,
@@ -111,10 +132,10 @@ impl HotkeySettingsState {
     /// Public method for starting custom rule hotkey capture
     pub fn start_key_capture_for_custom_rule(
         &mut self,
-        rule_alias: String,
+        rule_idx: usize,
         backend: crate::config::HotkeyBackendType,
     ) {
-        self.start_key_capture(CaptureTarget::CustomRule(rule_alias), backend);
+        self.start_key_capture(CaptureTarget::CustomRule(rule_idx), backend);
     }
 
     pub fn is_capturing_for(&self, character_name: &str) -> bool {
@@ -125,9 +146,9 @@ impl HotkeySettingsState {
         }
     }
 
-    pub fn is_capturing_custom_rule(&self, alias: &str) -> bool {
-        if let Some(CaptureTarget::CustomRule(ref target)) = self.capture_target {
-            target == alias && self.show_key_capture_dialog
+    pub fn is_capturing_custom_rule(&self, rule_idx: usize) -> bool {
+        if let Some(CaptureTarget::CustomRule(target)) = &self.capture_target {
+            *target == rule_idx && self.show_key_capture_dialog
         } else {
             false
         }
@@ -264,33 +285,116 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
             };
 
             ui.add_enabled_ui(device_selected, |ui| {
-                // Require EVE focus checkbox
-                if ui.checkbox(&mut profile.hotkey_require_eve_focus, "Require EVE window focus").changed() {
+                // Require tracked source focus checkbox
+                if ui.checkbox(&mut profile.hotkey_require_eve_focus, "Require source window focus").changed() {
                     changed = true;
                 }
-                ui.label(egui::RichText::new("Cycle hotkeys only work when an EVE window is focused").small().weak());
-
-                ui.add_space(ITEM_SPACING);
-
-                // Logged-out cycling checkbox
-                if ui.checkbox(&mut profile.hotkey_logged_out_cycle, "Include logged-out characters").changed() {
-                    changed = true;
-                }
-                ui.label(egui::RichText::new("Characters that log out will remain in the cycle").small().weak());
+                ui.label(egui::RichText::new("Cycle hotkeys only work when an EVE client or custom source is focused").small().weak());
             });
         });
 
-        // --- Column 2: Profile Settings ---
+        let device_selected = match profile.hotkey_backend {
+            HotkeyBackendType::X11 => true,
+            HotkeyBackendType::Evdev => profile.hotkey_input_device.is_some(),
+        };
+
+        columns[0].add_space(ITEM_SPACING);
+        columns[0].group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new("Cycle Group Hotkeys").strong());
+            ui.add_space(ITEM_SPACING);
+            ui.label("Set cycle group hotkeys in the Characters tab.");
+
+            ui.add_enabled_ui(device_selected, |ui| {
+                ui.add_space(ITEM_SPACING);
+                ui.separator();
+                ui.add_space(ITEM_SPACING);
+
+                ui.label("Unidentified Login-Screen Clients:");
+                ui.add_space(ITEM_SPACING / 2.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Forward:");
+                    let binding_text = profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .as_ref()
+                        .map(|b| b.display_name())
+                        .unwrap_or_else(|| "Not set".to_string());
+
+                    let color = if profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .is_none()
+                    {
+                        ui.style().visuals.weak_text_color()
+                    } else {
+                        ui.style().visuals.text_color()
+                    };
+
+                    ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                    if ui.button("⌨ Bind").clicked() {
+                        state.start_key_capture(
+                            CaptureTarget::LoggedOutUnidentifiedForward,
+                            profile.hotkey_backend,
+                        );
+                    }
+
+                    if profile
+                        .hotkey_logged_out_unidentified_cycle_forward
+                        .is_some()
+                        && ui.small_button("✖").on_hover_text("Clear binding").clicked()
+                    {
+                        profile.hotkey_logged_out_unidentified_cycle_forward = None;
+                        changed = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Backward:");
+                    let binding_text = profile
+                        .hotkey_logged_out_unidentified_cycle_backward
+                        .as_ref()
+                        .map(|b| b.display_name())
+                        .unwrap_or_else(|| "Not set".to_string());
+
+                    let color = if profile
+                        .hotkey_logged_out_unidentified_cycle_backward
+                        .is_none()
+                    {
+                        ui.style().visuals.weak_text_color()
+                    } else {
+                        ui.style().visuals.text_color()
+                    };
+
+                    ui.label(egui::RichText::new(binding_text).strong().color(color));
+
+                    if ui.button("⌨ Bind").clicked() {
+                        state.start_key_capture(
+                            CaptureTarget::LoggedOutUnidentifiedBackward,
+                            profile.hotkey_backend,
+                        );
+                    }
+
+                    if profile
+                        .hotkey_logged_out_unidentified_cycle_backward
+                        .is_some()
+                        && ui.small_button("✖").on_hover_text("Clear binding").clicked()
+                    {
+                        profile.hotkey_logged_out_unidentified_cycle_backward = None;
+                        changed = true;
+                    }
+                });
+
+                ui.add_space(ITEM_SPACING);
+                ui.label(egui::RichText::new("Cycle login-screen clients with no remembered character. Available whether or not they are appended to cycle groups.").weak().small());
+            });
+        });
+
+        // --- Column 2: Other Hotkeys ---
         columns[1].group(|ui| {
             ui.set_min_width(ui.available_width());
             ui.label(egui::RichText::new("Other Hotkeys").strong());
             ui.add_space(ITEM_SPACING);
-
-            // For X11 backend, device selection is not applicable (duplicated logic for right column enabled state)
-            let device_selected = match profile.hotkey_backend {
-                HotkeyBackendType::X11 => true,
-                HotkeyBackendType::Evdev => profile.hotkey_input_device.is_some(),
-            };
 
             ui.add_enabled_ui(device_selected, |ui| {
                  ui.label("Load Profile Hotkey:");
@@ -354,7 +458,7 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                     }
                  });
                  ui.add_space(ITEM_SPACING);
-                 ui.label(egui::RichText::new("Temporarily skip the current character from cycling.").weak().small());
+                 ui.label(egui::RichText::new("Temporarily skip the current source from cycling.").weak().small());
 
                  ui.add_space(ITEM_SPACING);
                  ui.separator();
@@ -388,7 +492,6 @@ pub fn ui(ui: &mut egui::Ui, profile: &mut Profile, state: &mut HotkeySettingsSt
                  });
                  ui.add_space(ITEM_SPACING);
                  ui.label(egui::RichText::new("Show/Hide all thumbnails (resets to visible on restart).").weak().small());
-
 
                  if profile.hotkey_backend == HotkeyBackendType::Evdev {
                       ui.add_space(ITEM_SPACING);
@@ -458,9 +561,19 @@ pub fn render_key_capture_modal(
             let target_name = match state.capture_target {
                 Some(CaptureTarget::ToggleSkip) => "Toggle Skip".to_string(),
                 Some(CaptureTarget::TogglePreviews) => "Toggle Previews".to_string(),
+                Some(CaptureTarget::LoggedOutUnidentifiedForward) => {
+                    "Unidentified Login-Screen Client Forward".to_string()
+                }
+                Some(CaptureTarget::LoggedOutUnidentifiedBackward) => {
+                    "Unidentified Login-Screen Client Backward".to_string()
+                }
                 Some(CaptureTarget::Profile) => "Switch to Profile".to_string(),
                 Some(CaptureTarget::Character(ref name)) => format!("Character: {}", name),
-                Some(CaptureTarget::CustomRule(ref alias)) => format!("Custom Source: {}", alias),
+                Some(CaptureTarget::CustomRule(rule_idx)) => profile
+                    .custom_windows
+                    .get(rule_idx)
+                    .map(|rule| format!("Custom Source: {}", rule.alias))
+                    .unwrap_or_else(|| "Custom Source".to_string()),
                 None => "Unknown".to_string(),
             };
 
@@ -574,6 +687,16 @@ pub fn render_key_capture_modal(
                                     profile.hotkey_toggle_previews = Some(binding_clone);
                                     changed = true;
                                 }
+                                Some(CaptureTarget::LoggedOutUnidentifiedForward) => {
+                                    profile.hotkey_logged_out_unidentified_cycle_forward =
+                                        Some(binding_clone);
+                                    changed = true;
+                                }
+                                Some(CaptureTarget::LoggedOutUnidentifiedBackward) => {
+                                    profile.hotkey_logged_out_unidentified_cycle_backward =
+                                        Some(binding_clone);
+                                    changed = true;
+                                }
                                 Some(CaptureTarget::Profile) => {
                                     profile.hotkey_profile_switch = Some(binding_clone);
                                     changed = true;
@@ -612,13 +735,8 @@ pub fn render_key_capture_modal(
                                     }
                                 }
 
-                                Some(CaptureTarget::CustomRule(ref alias)) => {
-                                    // Find rule and update hotkey
-                                    if let Some(rule) = profile
-                                        .custom_windows
-                                        .iter_mut()
-                                        .find(|r| r.alias == *alias)
-                                    {
+                                Some(CaptureTarget::CustomRule(rule_idx)) => {
+                                    if let Some(rule) = profile.custom_windows.get_mut(rule_idx) {
                                         rule.hotkey = Some(binding_clone);
                                         changed = true;
                                     }

@@ -1,6 +1,6 @@
 //! Thumbnail window management
 //!
-//! Creates and manages X11 overlay windows that display scaled previews of EVE clients.
+//! Creates and manages X11 overlay windows that display scaled previews of tracked sources.
 //! High-level logic that delegates rendering to `renderer::ThumbnailRenderer`.
 
 use anyhow::{Context, Result};
@@ -9,13 +9,43 @@ use x11rb::protocol::damage::Damage;
 use x11rb::protocol::xproto::{ConnectionExt, Window};
 
 use crate::common::constants::positioning;
-use crate::common::types::{Dimensions, Position, ThumbnailState};
+use crate::common::types::{Dimensions, Position, SourceIdentity, SourceKind, ThumbnailState};
 use crate::config::DisplayConfig;
 use crate::x11::AppContext;
 
 use super::font::FontRenderer;
+use super::overlay::OverlayIdentity;
 use super::renderer::ThumbnailRenderer;
 use super::snapping::Rect;
+
+fn effective_character_name_from<'a>(
+    live_name: &'a str,
+    remembered_name: Option<&'a str>,
+) -> &'a str {
+    if !live_name.is_empty() {
+        live_name
+    } else {
+        remembered_name.unwrap_or("")
+    }
+}
+
+fn display_character_name_from<'a>(
+    live_name: &'a str,
+    remembered_name: Option<&'a str>,
+    show_logged_out_character_name: bool,
+) -> &'a str {
+    if !live_name.is_empty() {
+        live_name
+    } else if show_logged_out_character_name {
+        remembered_name.unwrap_or("")
+    } else {
+        ""
+    }
+}
+
+fn preview_visible(enabled: bool, render_override: Option<bool>, blocked: bool) -> bool {
+    render_override.unwrap_or(enabled) && !blocked
+}
 
 #[derive(Debug, Default)]
 pub struct InputState {
@@ -35,14 +65,17 @@ pub struct InputState {
 ///
 /// It delegates actual X11 operations (rendering, window management) to `ThumbnailRenderer`.
 pub struct Thumbnail<'a> {
-    // === Application State (public, frequently accessed) ===
+    // === Application state ===
+    source_kind: SourceKind,
     pub character_name: String,
+    remembered_character_name: Option<String>,
     pub state: ThumbnailState,
-    pub hidden: bool, // Tracks if hidden by "hide_when_no_focus"
+    hidden: bool,            // Cached X11 mapping state.
+    externally_hidden: bool, // Combined preview-toggle and focus block.
     pub input_state: InputState,
     pub preview_mode: crate::common::types::PreviewMode,
 
-    // === Geometry (public, immutable after creation) ===
+    // === Current geometry ===
     pub dimensions: Dimensions,
 
     pub current_position: Position, // Cached position for hit testing
@@ -58,21 +91,26 @@ impl<'a> Thumbnail<'a> {
     ///
     /// # Arguments
     /// * `ctx` - Application context.
-    /// * `character_name` - Name of the character.
-    /// * `src` - Source EVE window ID.
+    /// * `character_name` - Live name reported by the source window.
+    /// * `remembered_character_name` - Last known EVE character for a logged-out client.
+    /// * `src` - Source window ID.
     /// * `font_renderer` - Renderer for shared font resources.
     /// * `position` - Optional initial position (if loaded from config).
     /// * `dimensions` - Initial size.
+    /// * `externally_hidden` - Combined preview-toggle and focus block at creation.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
+        source_kind: SourceKind,
         character_name: String,
+        remembered_character_name: Option<String>,
         src: Window,
         display_config: &crate::config::DisplayConfig,
         font_renderer: &FontRenderer,
         position: Option<Position>,
         dimensions: Dimensions,
         preview_mode: crate::common::types::PreviewMode,
+        externally_hidden: bool,
     ) -> Result<Self> {
         // Validate dimensions are non-zero
         if dimensions.width == 0 || dimensions.height == 0 {
@@ -88,22 +126,32 @@ impl<'a> Thumbnail<'a> {
         let src_geom = ctx
             .conn
             .get_geometry(src)
-            .context("Failed to send geometry query for source EVE window")?
+            .context("Failed to send geometry query for source window")?
             .reply()
             .context(format!(
                 "Failed to get geometry for source window {} (character: '{}')",
                 src, character_name
             ))?;
 
-        // Use saved position OR top-left of EVE window with 20px padding
+        // Use saved position OR top-left of the source window with the standard padding.
         let Position { x, y } = position.unwrap_or_else(|| {
             Position::new(
                 src_geom.x + positioning::DEFAULT_SPAWN_OFFSET,
                 src_geom.y + positioning::DEFAULT_SPAWN_OFFSET,
             )
         });
+        let remembered_character_name = remembered_character_name.filter(|name| !name.is_empty());
+        let style_character_name =
+            effective_character_name_from(&character_name, remembered_character_name.as_deref());
+        let display_character_name = display_character_name_from(
+            &character_name,
+            remembered_character_name.as_deref(),
+            display_config.show_logged_out_character_name,
+        );
+
         debug!(
             character = %character_name,
+            remembered_character = %remembered_character_name.as_deref().unwrap_or(""),
             x = x,
             y = y,
             width = dimensions.width,
@@ -113,7 +161,9 @@ impl<'a> Thumbnail<'a> {
 
         let renderer = ThumbnailRenderer::new(
             ctx,
-            &character_name,
+            source_kind,
+            style_character_name,
+            display_character_name,
             src,
             src_geom.depth,
             display_config,
@@ -123,26 +173,77 @@ impl<'a> Thumbnail<'a> {
             dimensions,
         )?;
 
-        Ok(Self {
+        let mut thumbnail = Self {
+            source_kind,
             character_name,
+            remembered_character_name,
             state: ThumbnailState::default(),
-            hidden: false,
+            hidden: true,
+            externally_hidden,
             input_state: InputState::default(),
             preview_mode,
             dimensions,
             current_position: Position::new(x, y),
             renderer,
-        })
+        };
+        thumbnail.reconcile_visibility(display_config)?;
+        Ok(thumbnail)
     }
 
     // Accessors
+
+    /// Returns the live display name reported by the source window.
+    pub fn live_character_name(&self) -> &str {
+        &self.character_name
+    }
+
+    pub fn source_kind(&self) -> SourceKind {
+        self.source_kind
+    }
+
+    /// Returns the remembered session identity synchronized from SessionState.
+    pub fn remembered_character_name(&self) -> Option<&str> {
+        self.remembered_character_name.as_deref()
+    }
+
+    /// Update the cached remembered identity from authoritative SessionState.
+    pub fn sync_remembered_character_name(&mut self, remembered_character_name: Option<String>) {
+        self.remembered_character_name = remembered_character_name.filter(|name| !name.is_empty());
+    }
+
+    /// Returns the name used for behavior and per-source settings.
+    pub fn effective_character_name(&self) -> &str {
+        effective_character_name_from(self.live_character_name(), self.remembered_character_name())
+    }
+
+    pub fn effective_source_identity(&self) -> Option<SourceIdentity> {
+        let name = self.effective_character_name();
+        (!name.is_empty()).then(|| SourceIdentity::new(self.source_kind, name.to_string()))
+    }
+
+    /// Returns the label that should be shown on the thumbnail.
+    pub fn display_character_name<'b>(&'b self, display_config: &DisplayConfig) -> &'b str {
+        display_character_name_from(
+            self.live_character_name(),
+            self.remembered_character_name(),
+            display_config.show_logged_out_character_name,
+        )
+    }
+
+    fn overlay_identity<'b>(&'b self, display_config: &DisplayConfig) -> OverlayIdentity<'b> {
+        OverlayIdentity {
+            kind: self.source_kind,
+            style: self.effective_character_name(),
+            display: self.display_character_name(display_config),
+        }
+    }
 
     /// Returns the underlying X11 window ID of the thumbnail.
     pub fn window(&self) -> Window {
         self.renderer.window
     }
 
-    /// Returns the source EVE window ID.
+    /// Returns the source application window ID.
     pub fn src(&self) -> Window {
         self.renderer.src
     }
@@ -169,26 +270,25 @@ impl<'a> Thumbnail<'a> {
 
     /// Sets the visibility of the thumbnail.
     ///
-    /// Manages X11 mapping/unmapping and upgrades internal `hidden` state.
+    /// Manages X11 mapping/unmapping and updates cached state after a successful request.
     /// Does NOT modify the logical `state` (Normal/Minimized).
-    pub fn visibility(&mut self, visible: bool) -> Result<()> {
+    fn visibility(&mut self, visible: bool) -> Result<()> {
         if self.is_visible() == visible {
             return Ok(());
         }
 
         if visible {
-            self.hidden = false;
             self.renderer.map().context(format!(
                 "Failed to map window for '{}'",
                 self.character_name
             ))?;
         } else {
-            self.hidden = true;
             self.renderer.unmap().context(format!(
                 "Failed to unmap window for '{}'",
                 self.character_name
             ))?;
         }
+        self.hidden = !visible;
         Ok(())
     }
 
@@ -204,12 +304,23 @@ impl<'a> Thumbnail<'a> {
         // No-op
     }
 
-    /// Moves the thumbnail to a new position updates the cached state.
+    /// Moves the thumbnail to a new position and updates the cached state.
     pub fn reposition(&mut self, x: i16, y: i16) -> Result<()> {
-        self.renderer.reposition(&self.character_name, x, y)?;
+        self.renderer.reposition(x, y)?;
         // Update cached position
         self.current_position = Position::new(x, y);
         Ok(())
+    }
+
+    /// Queues a move without flushing or changing the cached position.
+    pub(super) fn queue_reposition(&self, x: i16, y: i16) -> Result<()> {
+        self.renderer.queue_reposition(x, y)?;
+        Ok(())
+    }
+
+    /// Records a queued position after its shared X11 flush succeeds.
+    pub(super) fn confirm_reposition(&mut self, position: Position) {
+        self.current_position = position;
     }
 
     /// Resizes the thumbnail.
@@ -230,7 +341,9 @@ impl<'a> Thumbnail<'a> {
         }
 
         self.dimensions = crate::common::types::Dimensions::new(width, height);
-        self.renderer.resize(&self.character_name, width, height)?;
+        let effective_character_name = self.effective_character_name().to_string();
+        self.renderer
+            .resize(&effective_character_name, width, height)?;
         Ok(())
     }
 
@@ -244,7 +357,7 @@ impl<'a> Thumbnail<'a> {
     ) -> Result<()> {
         self.renderer.border(
             display_config,
-            &self.character_name,
+            self.overlay_identity(display_config),
             self.dimensions,
             focused,
             skipped,
@@ -264,7 +377,7 @@ impl<'a> Thumbnail<'a> {
         if self.is_visible() {
             self.renderer.minimized(
                 display_config,
-                &self.character_name,
+                self.overlay_identity(display_config),
                 self.dimensions,
                 font_renderer,
             )?;
@@ -272,46 +385,65 @@ impl<'a> Thumbnail<'a> {
         Ok(())
     }
 
-    /// Triggers a repaint of the thumbnail content and overlay.
+    /// Update global/focus blocking independently of the current source's render override.
+    pub fn set_visibility_blocked(
+        &mut self,
+        blocked: bool,
+        display_config: &DisplayConfig,
+        font_renderer: &FontRenderer,
+    ) -> Result<()> {
+        let was_visible = self.is_visible();
+        self.externally_hidden = blocked;
+        self.reconcile_visibility(display_config)?;
+        // Focus events often leave visibility unchanged; only revelation needs a full repaint.
+        if !was_visible && self.is_visible() {
+            self.update(display_config, font_renderer)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_visibility(&mut self, display_config: &DisplayConfig) -> Result<()> {
+        let render_override = display_config
+            .settings_for(self.source_kind, self.effective_character_name())
+            .and_then(|settings| settings.override_render_preview);
+        self.visibility(preview_visible(
+            display_config.enabled,
+            render_override,
+            self.externally_hidden,
+        ))
+    }
+
+    /// Reconciles visibility and repaints permitted thumbnail content and overlay.
     pub fn update(
         &mut self,
         display_config: &DisplayConfig,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
-        // Resolve per-character preview visibility override against the global setting.
-        // override_render_preview: None = use global, Some(true) = force on, Some(false) = force off
-        let should_render = display_config
-            .character_settings
-            .get(&self.character_name)
-            .and_then(|s| s.override_render_preview)
-            .unwrap_or(display_config.enabled);
-
-        if !should_render {
-            // Unmap the entire thumbnail window so it fully disappears
-            self.visibility(false)?;
-            return Ok(());
-        }
-
+        self.reconcile_visibility(display_config)?;
         if !self.is_visible() {
             return Ok(());
         }
+
+        let preview_mode = display_config
+            .settings_for(self.source_kind, self.effective_character_name())
+            .map(|settings| &settings.preview_mode)
+            .unwrap_or(&self.preview_mode);
 
         match self.state {
             ThumbnailState::Minimized => {
                 self.renderer.minimized(
                     display_config,
-                    &self.character_name,
+                    self.overlay_identity(display_config),
                     self.dimensions,
                     font_renderer,
                 )?;
             }
-            _ => match &self.preview_mode {
+            _ => match preview_mode {
                 crate::common::types::PreviewMode::Live => {
                     self.renderer
-                        .update(&self.character_name, self.dimensions)?;
+                        .update(self.effective_character_name(), self.dimensions)?;
                 }
                 crate::common::types::PreviewMode::Static { color } => {
-                    // ... color parsing ...
                     let color_u32 = crate::manager::utils::parse_hex_color(color)
                         .map_err(|_| anyhow::anyhow!("Invalid hex color: {}", color))?;
 
@@ -322,15 +454,16 @@ impl<'a> Thumbnail<'a> {
                         alpha: (color_u32.a() as u16) * 257,
                     };
 
-                    self.renderer
-                        .update_static(&self.character_name, self.dimensions, x_color)?;
+                    self.renderer.update_static(
+                        self.effective_character_name(),
+                        self.dimensions,
+                        x_color,
+                    )?;
                 }
             },
         }
         Ok(())
     }
-
-    // focus, reposition, resize unchanged
 
     /// Called when character name changes (e.g. login detection update).
     pub fn set_character_name(
@@ -341,6 +474,9 @@ impl<'a> Thumbnail<'a> {
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.character_name = new_name;
+        if !self.character_name.is_empty() {
+            self.remembered_character_name = Some(self.character_name.clone());
+        }
 
         // NOTE: Resize must precede update_name because it regenerates the overlay pixmap.
 
@@ -363,7 +499,7 @@ impl<'a> Thumbnail<'a> {
         self.renderer
             .update_name(
                 display_config,
-                &self.character_name,
+                self.overlay_identity(display_config),
                 self.dimensions,
                 font_renderer,
             )
@@ -387,5 +523,68 @@ impl<'a> Thumbnail<'a> {
             && x <= self.current_position.x + self.dimensions.width as i16
             && y >= self.current_position.y
             && y <= self.current_position.y + self.dimensions.height as i16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_character_name_from, effective_character_name_from, preview_visible};
+
+    #[test]
+    fn effective_name_prefers_live_character() {
+        assert_eq!(
+            effective_character_name_from("Live", Some("Remembered")),
+            "Live"
+        );
+    }
+
+    #[test]
+    fn effective_name_uses_remembered_logged_out_identity() {
+        assert_eq!(
+            effective_character_name_from("", Some("Remembered")),
+            "Remembered"
+        );
+    }
+
+    #[test]
+    fn effective_name_is_empty_for_unidentified_logged_out_identity() {
+        assert_eq!(effective_character_name_from("", None), "");
+    }
+
+    #[test]
+    fn display_name_keeps_live_character_even_when_logged_out_display_is_disabled() {
+        assert_eq!(
+            display_character_name_from("Live", Some("Remembered"), false),
+            "Live"
+        );
+    }
+
+    #[test]
+    fn display_name_hides_remembered_logged_out_identity_when_disabled() {
+        assert_eq!(
+            display_character_name_from("", Some("Remembered"), false),
+            ""
+        );
+    }
+
+    #[test]
+    fn display_name_shows_remembered_logged_out_identity_when_enabled() {
+        assert_eq!(
+            display_character_name_from("", Some("Remembered"), true),
+            "Remembered"
+        );
+    }
+
+    #[test]
+    fn source_override_cannot_bypass_external_hiding() {
+        for enabled in [false, true] {
+            for render_override in [None, Some(false), Some(true)] {
+                assert!(!preview_visible(enabled, render_override, true));
+                assert_eq!(
+                    preview_visible(enabled, render_override, false),
+                    render_override.unwrap_or(enabled)
+                );
+            }
+        }
     }
 }

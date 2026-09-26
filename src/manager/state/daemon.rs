@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use ipc_channel::ipc::IpcOneShotServer;
+use std::process::{Child, ExitStatus};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::common::constants::manager_ui::*;
-use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
+use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage, ThumbnailSpatialUpdate};
 
 use super::core::SaveMode;
 use crate::manager::utils::spawn_daemon;
@@ -13,9 +14,56 @@ use crate::manager::utils::spawn_daemon;
 use super::DaemonStatus;
 use super::SharedState;
 
+const GRACEFUL_DAEMON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("Failed to query daemon status while stopping")?
+        {
+            return Ok(Some(status));
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+
+        std::thread::sleep((deadline - now).min(DAEMON_SHUTDOWN_POLL_INTERVAL));
+    }
+}
+
 impl SharedState {
+    fn clear_daemon_ipc_state(&mut self) {
+        self.ipc_config_tx = None;
+        self.ipc_status_rx = None;
+        self.bootstrap_rx = None;
+        self.daemon_status_rx = None;
+        self.ipc_healthy = false;
+        self.missed_heartbeats = 0;
+    }
+
     pub fn start_daemon(&mut self) -> Result<()> {
         if self.daemon.is_some() {
+            return Ok(());
+        }
+
+        if let Err(err) = self.validate_config() {
+            warn!(error = ?err, "Daemon start blocked by invalid configuration");
+            self.daemon_status = DaemonStatus::Stopped;
+            self.status_message = Some(super::types::StatusMessage {
+                text: format!("Daemon not started: {err:#}"),
+                color: STATUS_STOPPED,
+            });
+            self.config_status_message = Some(super::types::StatusMessage {
+                text: "Fix profile, cycle-group, or custom source names before applying"
+                    .to_string(),
+                color: COLOR_ERROR,
+            });
             return Ok(());
         }
 
@@ -52,42 +100,86 @@ impl SharedState {
 
     pub fn stop_daemon(&mut self) -> Result<()> {
         if let Some(mut child) = self.daemon.take() {
-            info!(pid = child.id(), "Stopping daemon process");
+            let pid = child.id();
+            info!(pid, "Stopping daemon process");
 
-            if let Err(e) = child.kill() {
-                error!(pid = child.id(), error = %e, "Failed to send SIGKILL to daemon");
+            let had_ipc_channel = if let Some(tx) = self.ipc_config_tx.take() {
+                match tx.send(ConfigMessage::Shutdown) {
+                    Ok(()) => {
+                        debug!(pid, "Sent graceful shutdown request to daemon");
+                    }
+                    Err(e) => {
+                        warn!(
+                            pid,
+                            error = %e,
+                            "Failed to send graceful shutdown request; waiting for daemon anyway"
+                        );
+                    }
+                }
+                true
             } else {
-                debug!(pid = child.id(), "SIGKILL sent successfully");
-            }
+                false
+            };
 
-            match child.wait() {
-                Ok(status) => {
-                    info!(pid = child.id(), status = ?status, "Daemon exited");
-                    self.daemon_status = if status.success() {
-                        DaemonStatus::Stopped
-                    } else {
-                        DaemonStatus::Crashed(status.code())
-                    };
+            let status = if had_ipc_channel {
+                match wait_for_child_exit(&mut child, GRACEFUL_DAEMON_SHUTDOWN_TIMEOUT)? {
+                    Some(status) => status,
+                    None => {
+                        warn!(
+                            pid,
+                            timeout_ms = GRACEFUL_DAEMON_SHUTDOWN_TIMEOUT.as_millis(),
+                            "Daemon did not exit gracefully in time; sending SIGKILL"
+                        );
+                        if let Err(e) = child.kill() {
+                            error!(pid, error = %e, "Failed to send SIGKILL to daemon");
+                        } else {
+                            debug!(pid, "SIGKILL sent successfully");
+                        }
+                        child
+                            .wait()
+                            .context("Failed to wait for daemon after SIGKILL")?
+                    }
                 }
-                Err(e) => {
-                    error!(pid = child.id(), error = %e, "Failed to wait for daemon exit");
-                    self.daemon_status = DaemonStatus::Crashed(None);
+            } else {
+                warn!(pid, "No daemon IPC channel available; sending SIGKILL");
+                if let Err(e) = child.kill() {
+                    error!(pid, error = %e, "Failed to send SIGKILL to daemon");
+                } else {
+                    debug!(pid, "SIGKILL sent successfully");
                 }
-            }
-            // Clear IPC channels immediately to prevent "Broken pipe" errors if save_config is called (e.g. on exit)
-            self.ipc_config_tx = None;
-            self.ipc_status_rx = None;
-            self.daemon_status_rx = None;
+                child
+                    .wait()
+                    .context("Failed to wait for daemon after SIGKILL")?
+            };
+
+            info!(pid, status = ?status, "Daemon exited");
+            self.daemon_status = if status.success() {
+                DaemonStatus::Stopped
+            } else {
+                DaemonStatus::Crashed(status.code())
+            };
+
+            // Clear IPC channels immediately to prevent later sends to a stopped daemon.
+            self.clear_daemon_ipc_state();
         }
         Ok(())
     }
 
     pub fn restart_daemon(&mut self) {
+        if let Err(err) = self.validate_config() {
+            self.status_message = Some(super::types::StatusMessage {
+                text: format!(
+                    "Restart blocked: {err:#}. Repair configuration names before retrying."
+                ),
+                color: COLOR_ERROR,
+            });
+            return;
+        }
         info!("Restart requested");
         if let Err(err) = self.stop_daemon().and_then(|_| self.start_daemon()) {
             error!(error = ?err, "Failed to restart daemon");
             self.status_message = Some(super::types::StatusMessage {
-                text: format!("Restart failed: {err}"),
+                text: format!("Restart failed: {err:#}"),
                 color: STATUS_STOPPED,
             });
         }
@@ -96,6 +188,47 @@ impl SharedState {
     pub fn reload_daemon_config(&mut self) {
         info!("Config reload requested - restarting daemon");
         self.restart_daemon();
+    }
+
+    fn apply_thumbnail_positions(&mut self, updates: &[ThumbnailSpatialUpdate]) -> bool {
+        let Some(profile) = self.config.get_active_profile_mut() else {
+            return false;
+        };
+
+        let mut changed = false;
+        for update in updates {
+            changed |= profile.update_thumbnail_spatial(
+                &update.source,
+                update.position,
+                update.dimensions,
+            );
+        }
+        changed
+    }
+
+    fn position_save_due(&self) -> bool {
+        self.pending_position_save
+            && self.last_save_attempt.elapsed() >= Duration::from_millis(AUTO_SAVE_DELAY_MS)
+    }
+
+    fn flush_pending_position_save(&mut self) {
+        self.pending_position_save = self.has_automatic_position_changes();
+        if !self.position_save_due() {
+            return;
+        }
+
+        self.last_save_attempt = Instant::now();
+        if let Err(error) = self.persist_config(SaveMode::AutoPositions) {
+            error!(error = %error, "Failed to auto-save thumbnail positions");
+            self.pending_position_save = true;
+            self.config_status_message = Some(super::StatusMessage {
+                text: format!("Position save failed: {error:#}"),
+                color: crate::common::constants::manager_ui::COLOR_ERROR,
+            });
+        } else {
+            self.config_status_message = None;
+            debug!("Deferred thumbnail position auto-save completed");
+        }
     }
 
     pub fn poll_daemon(&mut self) {
@@ -119,16 +252,40 @@ impl SharedState {
                 }
             });
 
-            // Sync config to daemon
-            let _ = self.sync_to_daemon();
-
             self.bootstrap_rx = None; // Done
-            self.daemon_status = DaemonStatus::Running;
 
-            // initialize heartbeats
-            self.ipc_healthy = true;
-            self.last_heartbeat = Instant::now();
-            self.missed_heartbeats = 0;
+            // InitialConfig transmission completes the bootstrap contract. Do not report the
+            // daemon as running until the required startup snapshot has been sent.
+            match self.send_initial_config_to_daemon() {
+                Ok(()) => {
+                    self.daemon_status = DaemonStatus::Running;
+                    self.ipc_healthy = true;
+                    self.last_heartbeat = Instant::now();
+                    self.missed_heartbeats = 0;
+                    self.status_message = None;
+                }
+                Err(err) => {
+                    error!(error = ?err, "Failed to send initial config to daemon");
+                    let cleanup_error = self.stop_daemon().err();
+                    self.clear_daemon_ipc_state();
+
+                    let text = if let Some(cleanup_error) = cleanup_error {
+                        error!(error = ?cleanup_error, "Failed to clean up daemon after bootstrap failure");
+                        self.daemon_status = DaemonStatus::Crashed(None);
+                        format!("Initial config failed: {err:#}; cleanup failed: {cleanup_error}")
+                    } else {
+                        if self.daemon_status == DaemonStatus::Starting {
+                            self.daemon_status = DaemonStatus::Stopped;
+                        }
+                        format!("Initial config failed: {err:#}")
+                    };
+                    self.status_message = Some(super::types::StatusMessage {
+                        text,
+                        color: STATUS_STOPPED,
+                    });
+                    return;
+                }
+            }
         }
 
         // 2. Poll Status Messages
@@ -160,20 +317,8 @@ impl SharedState {
                         color: crate::common::constants::manager_ui::STATUS_RUNNING,
                     });
                 }
-                DaemonMessage::PositionChanged {
-                    name,
-                    x,
-                    y,
-                    width,
-                    height,
-                    is_custom,
-                } => {
-                    let mut changed = false;
-                    if let Some(profile) = self.config.get_active_profile_mut() {
-                        changed = profile
-                            .update_thumbnail_position(&name, x, y, width, height, is_custom);
-                    }
-
+                DaemonMessage::PositionsChanged { updates } => {
+                    let changed = self.apply_thumbnail_positions(&updates);
                     if !changed {
                         continue;
                     }
@@ -185,33 +330,20 @@ impl SharedState {
                         .unwrap_or(false);
 
                     debug!("Position changed: auto_save={}", auto_save);
+                    self.spatial_dirty_profiles
+                        .insert(self.config.global.selected_profile.clone());
+                    self.config_status_message = None;
 
                     if auto_save {
-                        // Debounce save: only write to disk if it's been at least 1 second since last attempt
-                        if self.last_save_attempt.elapsed()
-                            > Duration::from_millis(AUTO_SAVE_DELAY_MS)
+                        // Confirm the complete batch. The daemon will skip its own coordinates
+                        // through the existing idempotency check.
+                        if let Some(ref tx) = self.ipc_config_tx
+                            && let Err(error) = tx.send(ConfigMessage::ThumbnailMoves { updates })
                         {
-                            // Save to disk only (Daemon already has the correct position)
-                            let _ = self.save_config_no_sync(SaveMode::Explicit);
-
-                            // Send lightweight delta to confirm the position
-                            // Daemon will perform idempotency check and skip redundant X11 operations
-                            if let Some(ref tx) = self.ipc_config_tx {
-                                let _ = tx.send(ConfigMessage::ThumbnailMove {
-                                    name: name.clone(),
-                                    is_custom,
-                                    x,
-                                    y,
-                                    width,
-                                    height,
-                                });
-                            }
-
-                            self.last_save_attempt = Instant::now();
-                            debug!("Debounced auto-save triggered with ThumbnailMove delta");
-                        } else {
-                            self.settings_changed = true; // Mark as dirty for final save
+                            warn!(error = %error, "Failed to acknowledge thumbnail position batch");
                         }
+                        self.pending_position_save = true;
+                        self.flush_pending_position_save();
                     }
                 }
                 DaemonMessage::CharacterDetected { name, is_custom } => {
@@ -245,6 +377,8 @@ impl SharedState {
                 warn!("Requested profile '{}' not found", name);
             }
         }
+
+        self.flush_pending_position_save();
 
         // IPC Health Check
         // If connected but no heartbeat for 15s (5s grace * 3), assume hung process
@@ -283,9 +417,7 @@ impl SharedState {
                     } else {
                         DaemonStatus::Crashed(status.code())
                     };
-                    self.ipc_config_tx = None;
-                    self.ipc_status_rx = None;
-                    self.daemon_status_rx = None;
+                    self.clear_daemon_ipc_state();
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -293,5 +425,406 @@ impl SharedState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::types::{Dimensions, Position, SourceIdentity};
+    use crate::config::profile::Config;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn invalid_cycle_groups_leave_running_daemon_and_ipc_intact() {
+        let mut state = SharedState::new(Config::default(), false);
+        state.config.profiles[0]
+            .cycle_groups
+            .push(crate::config::profile::CycleGroup::default_group());
+        let child = spawn_shell("exec sleep 30");
+        let pid = child.id();
+        state.daemon = Some(child);
+        state.daemon_status = DaemonStatus::Running;
+        state.ipc_healthy = true;
+        let (tx, rx) = ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        state.ipc_config_tx = Some(tx);
+        state.reload_daemon_config();
+        let retained_pid = state.daemon.as_ref().map(Child::id);
+        let still_running = state
+            .daemon
+            .as_mut()
+            .is_some_and(|child| child.try_wait().unwrap().is_none());
+        // Reap the fixture even if the preservation assertions fail.
+        if let Some(mut child) = state.daemon.take() {
+            let _ = child.kill();
+            child.wait().unwrap();
+        }
+        assert_eq!(retained_pid, Some(pid));
+        assert!(still_running);
+        assert_eq!(state.daemon_status, DaemonStatus::Running);
+        assert!(state.ipc_healthy && state.ipc_config_tx.is_some());
+        assert!(rx.try_recv().is_err());
+        assert!(
+            state
+                .status_message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("Default")
+        );
+    }
+
+    fn spawn_shell(script: &str) -> Child {
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn shell child for daemon wait test")
+    }
+
+    fn sample_spatial_update() -> ThumbnailSpatialUpdate {
+        ThumbnailSpatialUpdate::new(
+            SourceIdentity::eve("Character"),
+            Position::new(10, 20),
+            Dimensions::new(300, 200),
+        )
+    }
+
+    fn deliver_positions(state: &mut SharedState, updates: Vec<ThumbnailSpatialUpdate>) {
+        let (sender, receiver) = mpsc::channel();
+        state.daemon_status_rx = Some(receiver);
+        sender
+            .send(DaemonMessage::PositionsChanged { updates })
+            .expect("position batch should enter the manager queue");
+        state.poll_daemon();
+    }
+
+    fn queue_bootstrap(state: &mut SharedState, bootstrap: BootstrapMessage) {
+        let (sender, receiver) = mpsc::channel();
+        state.bootstrap_rx = Some(receiver);
+        sender
+            .send(bootstrap)
+            .expect("bootstrap message should enter the Manager queue");
+    }
+
+    #[test]
+    fn wait_for_child_exit_returns_completed_status() {
+        let mut child = spawn_shell("exit 0");
+
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(1))
+            .expect("wait helper should not error")
+            .expect("child should exit before timeout");
+
+        assert!(status.success());
+    }
+
+    #[test]
+    fn wait_for_child_exit_returns_none_on_timeout() {
+        let mut child = spawn_shell("sleep 5");
+
+        let status = wait_for_child_exit(&mut child, Duration::from_millis(10))
+            .expect("wait helper should not error");
+
+        assert!(status.is_none());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn successful_bootstrap_sends_initial_config_and_marks_daemon_running() {
+        let mut state = SharedState::new(Config::default(), false);
+        state.daemon_status = DaemonStatus::Starting;
+        state.missed_heartbeats = 3;
+        state.status_message = Some(crate::manager::state::StatusMessage {
+            text: "Initial config failed: previous attempt".to_string(),
+            color: STATUS_STOPPED,
+        });
+
+        let (config_sender, config_receiver) =
+            ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        let (status_sender, status_receiver) =
+            ipc_channel::ipc::channel::<DaemonMessage>().unwrap();
+        queue_bootstrap(&mut state, (config_sender, status_receiver));
+
+        state.poll_daemon();
+
+        assert!(matches!(
+            config_receiver.recv().unwrap(),
+            ConfigMessage::InitialConfig(_)
+        ));
+        assert_eq!(state.daemon_status, DaemonStatus::Running);
+        assert!(state.ipc_healthy);
+        assert_eq!(state.missed_heartbeats, 0);
+        assert!(state.status_message.is_none());
+        assert!(state.bootstrap_rx.is_none());
+        assert!(state.ipc_config_tx.is_some());
+        assert!(state.daemon_status_rx.is_some());
+
+        drop(status_sender);
+    }
+
+    #[test]
+    fn failed_bootstrap_cleans_up_without_marking_daemon_running() {
+        let mut state = SharedState::new(Config::default(), false);
+        state.daemon = Some(spawn_shell("exit 0"));
+        state.daemon_status = DaemonStatus::Starting;
+        state.ipc_healthy = true;
+        state.missed_heartbeats = 3;
+
+        let (config_sender, config_receiver) =
+            ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        drop(config_receiver);
+        let (status_sender, status_receiver) =
+            ipc_channel::ipc::channel::<DaemonMessage>().unwrap();
+        let (_legacy_status_sender, legacy_status_receiver) =
+            ipc_channel::ipc::channel::<DaemonMessage>().unwrap();
+        state.ipc_status_rx = Some(legacy_status_receiver);
+        queue_bootstrap(&mut state, (config_sender, status_receiver));
+
+        state.poll_daemon();
+
+        assert_eq!(state.daemon_status, DaemonStatus::Stopped);
+        assert!(state.daemon.is_none());
+        assert!(!state.ipc_healthy);
+        assert_eq!(state.missed_heartbeats, 0);
+        assert!(state.ipc_config_tx.is_none());
+        assert!(state.ipc_status_rx.is_none());
+        assert!(state.bootstrap_rx.is_none());
+        assert!(state.daemon_status_rx.is_none());
+        assert!(
+            state
+                .status_message
+                .as_ref()
+                .is_some_and(|message| message.text.starts_with("Initial config failed:"))
+        );
+
+        drop(status_sender);
+    }
+
+    #[test]
+    fn applies_entire_spatial_batch_before_reporting_change() {
+        let mut state = SharedState::new(Config::default(), false);
+        let updates = vec![
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::eve("Shared Name"),
+                Position::new(10, 20),
+                Dimensions::new(300, 200),
+            ),
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::custom("Shared Name"),
+                Position::new(40, 50),
+                Dimensions::new(640, 360),
+            ),
+        ];
+
+        assert!(state.apply_thumbnail_positions(&updates));
+        let profile = state
+            .config
+            .get_active_profile()
+            .expect("default config should have an active profile");
+        assert_eq!(profile.character_thumbnails["Shared Name"].x, 10);
+        assert_eq!(profile.character_thumbnails["Shared Name"].y, 20);
+        assert_eq!(
+            profile.character_thumbnails["Shared Name"].dimensions,
+            Dimensions::new(300, 200)
+        );
+        assert_eq!(profile.custom_source_thumbnails["Shared Name"].x, 40);
+        assert_eq!(profile.custom_source_thumbnails["Shared Name"].y, 50);
+        assert_eq!(
+            profile.custom_source_thumbnails["Shared Name"].dimensions,
+            Dimensions::new(640, 360)
+        );
+        assert!(!state.apply_thumbnail_positions(&updates));
+    }
+
+    #[test]
+    fn pending_position_save_becomes_due_after_debounce() {
+        let mut state = SharedState::new(Config::default(), false);
+
+        state.pending_position_save = true;
+        assert!(!state.position_save_due());
+
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+        assert!(state.position_save_due());
+    }
+
+    #[test]
+    fn auto_save_off_keeps_position_changes_pending_for_manual_save() {
+        let mut state = SharedState::new(Config::default(), false);
+        state
+            .config
+            .get_active_profile_mut()
+            .expect("default config should have an active profile")
+            .thumbnail_auto_save_position = false;
+
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+
+        assert!(!state.settings_changed);
+        assert!(state.has_unsaved_changes());
+        assert!(!state.pending_position_save);
+    }
+
+    #[test]
+    fn auto_save_on_schedules_a_deferred_position_save() {
+        let mut state = SharedState::new(Config::default(), false);
+        state
+            .config
+            .get_active_profile_mut()
+            .expect("default config should have an active profile")
+            .thumbnail_auto_save_position = true;
+        state.last_save_attempt = Instant::now();
+
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+
+        assert!(!state.settings_changed);
+        assert!(state.has_unsaved_changes());
+        assert!(state.pending_position_save);
+        assert!(!state.position_save_due());
+    }
+
+    #[test]
+    fn position_auto_save_preserves_unreadable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"{broken").unwrap();
+        let mut state = SharedState::at_path(Config::default(), &path);
+        state.config.profiles[0].thumbnail_auto_save_position = true;
+        state
+            .spatial_dirty_profiles
+            .insert(state.config.global.selected_profile.clone());
+        state.pending_position_save = true;
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+
+        state.flush_pending_position_save();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+        assert!(state.config_load_error.is_some());
+        assert!(state.pending_position_save);
+        Config::default().save_to(&path).unwrap();
+        let repaired = std::fs::read(&path).unwrap();
+        state.config.global.window_width = 999;
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+        state.flush_pending_position_save();
+        assert_eq!(std::fs::read(&path).unwrap(), repaired);
+        assert!(state.pending_position_save);
+    }
+
+    fn position_test_state(auto_save: bool) -> (tempfile::TempDir, SharedState) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = Config::default();
+        config.profiles[0].thumbnail_auto_save_position = auto_save;
+        config.profiles[0].thumbnail_opacity = 75;
+        config.save_to(&path).unwrap();
+        (dir, SharedState::at_path(config, &path))
+    }
+
+    fn flush_positions(state: &mut SharedState) {
+        state.last_save_attempt = Instant::now() - Duration::from_millis(AUTO_SAVE_DELAY_MS);
+        state.poll_daemon();
+    }
+
+    #[test]
+    fn position_saves_preserve_unapplied_edits() {
+        for automatic in [true, false] {
+            let (_dir, mut state) = position_test_state(automatic);
+            state.config.profiles[0].thumbnail_opacity = 42;
+            state.settings_changed = true;
+            deliver_positions(&mut state, vec![sample_spatial_update()]);
+            if automatic {
+                flush_positions(&mut state);
+            } else {
+                state.save_thumbnail_positions().unwrap();
+            }
+            let disk = Config::read_from(&state.config_path).unwrap();
+            assert_eq!(disk.profiles[0].thumbnail_opacity, 75);
+            assert_eq!(disk.profiles[0].character_thumbnails["Character"].x, 10);
+            assert_eq!(state.config.profiles[0].thumbnail_opacity, 42);
+            assert!(state.settings_changed && state.has_unsaved_changes());
+            assert!(state.spatial_dirty_profiles.is_empty());
+            assert!(!state.pending_position_save);
+            state.discard_changes().unwrap();
+            assert_eq!(state.config.profiles[0].thumbnail_opacity, 75);
+            assert_eq!(
+                state.config.profiles[0].character_thumbnails["Character"].x,
+                10
+            );
+            assert!(!state.has_unsaved_changes());
+
+            state.config.profiles[0].thumbnail_opacity = 42;
+            state.settings_changed = true;
+            state.save_config(SaveMode::Explicit).unwrap();
+            assert_eq!(
+                Config::read_from(&state.config_path).unwrap().profiles[0].thumbnail_opacity,
+                42
+            );
+            assert!(!state.has_unsaved_changes());
+        }
+    }
+
+    #[test]
+    fn deferred_position_batches_save_latest_geometry_without_daemon_restart() {
+        let (_dir, mut state) = position_test_state(true);
+        let (tx, rx) = ipc_channel::ipc::channel::<ConfigMessage>().unwrap();
+        state.ipc_config_tx = Some(tx);
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+        let updates = vec![
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::eve("Character"),
+                Position::new(50, 60),
+                Dimensions::new(400, 300),
+            ),
+            ThumbnailSpatialUpdate::new(
+                SourceIdentity::eve("Other"),
+                Position::new(70, 80),
+                Dimensions::new(200, 100),
+            ),
+        ];
+        deliver_positions(&mut state, updates.clone());
+        assert!(
+            Config::read_from(&state.config_path).unwrap().profiles[0]
+                .character_thumbnails
+                .is_empty()
+        );
+        assert!(state.has_unsaved_changes());
+        flush_positions(&mut state);
+        let disk = Config::read_from(&state.config_path).unwrap();
+        assert_eq!(disk.profiles[0].character_thumbnails["Character"].x, 50);
+        assert_eq!(disk.profiles[0].character_thumbnails["Other"].y, 80);
+        assert!(!state.has_unsaved_changes());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ConfigMessage::ThumbnailMoves { .. }
+        ));
+        assert!(
+            matches!(rx.try_recv().unwrap(), ConfigMessage::ThumbnailMoves { updates: batch } if batch == updates)
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(state.ipc_config_tx.is_some());
+    }
+
+    #[test]
+    fn disabling_auto_save_keeps_geometry_for_manual_save() {
+        let (_dir, mut state) = position_test_state(true);
+        deliver_positions(&mut state, vec![sample_spatial_update()]);
+        state.config.profiles[0].thumbnail_auto_save_position = false;
+        state.settings_changed = true;
+        flush_positions(&mut state);
+        assert!(!state.pending_position_save);
+        assert!(state.has_unsaved_changes());
+        assert!(
+            Config::read_from(&state.config_path).unwrap().profiles[0]
+                .character_thumbnails
+                .is_empty()
+        );
+        state.save_thumbnail_positions().unwrap();
+        let disk = Config::read_from(&state.config_path).unwrap();
+        assert!(disk.profiles[0].thumbnail_auto_save_position);
+        assert_eq!(disk.profiles[0].character_thumbnails["Character"].x, 10);
+        assert!(state.settings_changed);
+        assert!(state.spatial_dirty_profiles.is_empty());
     }
 }
