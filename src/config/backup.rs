@@ -77,13 +77,17 @@ impl BackupManager {
                 config_file_path.display()
             )
         })?;
-        let tar_gz = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&backup_path)
-            .context("Failed to create backup file")?;
+        let config_metadata = config_file
+            .metadata()
+            .context("Failed to read config file metadata for backup")?;
+        if !config_metadata.is_file() {
+            anyhow::bail!(
+                "Config path is not a regular file: {}",
+                config_file_path.display()
+            );
+        }
 
-        let archive_result = (|| -> Result<()> {
+        Self::write_new_file_or_remove(&backup_path, |tar_gz| {
             let enc = GzEncoder::new(tar_gz, Compression::default());
             let mut tar = tar::Builder::new(enc);
 
@@ -97,21 +101,35 @@ impl BackupManager {
             enc.finish()
                 .context("Failed to finish backup compression")?;
             Ok(())
-        })();
+        })?;
 
-        if let Err(archive_error) = archive_result {
-            if let Err(cleanup_error) = fs::remove_file(&backup_path) {
+        info!(path = ?backup_path, "Created backup");
+        Ok(backup_path)
+    }
+
+    /// Create `path` without overwriting an existing file, pass it to `write`,
+    /// and remove the incomplete output if writing fails.
+    fn write_new_file_or_remove(
+        path: &Path,
+        write: impl FnOnce(fs::File) -> Result<()>,
+    ) -> Result<()> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .context("Failed to create backup file")?;
+
+        if let Err(write_error) = write(file) {
+            if let Err(cleanup_error) = fs::remove_file(path) {
                 error!(
-                    path = ?backup_path,
+                    path = ?path,
                     error = %cleanup_error,
                     "Failed to remove incomplete backup"
                 );
             }
-            return Err(archive_error);
+            return Err(write_error);
         }
-
-        info!(path = ?backup_path, "Created backup");
-        Ok(backup_path)
+        Ok(())
     }
 
     /// List regular `.tar.gz` backup candidates, sorted newest first.
@@ -786,18 +804,34 @@ mod tests {
     }
 
     #[test]
-    fn create_backup_removes_incomplete_archive_after_write_failure() {
+    fn create_backup_rejects_non_regular_config_without_leaving_archive() {
         let temp_dir = tempfile::tempdir().unwrap();
         let app_dir = temp_dir.path().join("eve-preview-manager");
         fs::create_dir_all(&app_dir).unwrap();
         let config_path = app_dir.join(crate::common::constants::config::FILENAME);
         fs::create_dir(&config_path).unwrap();
 
-        BackupManager::create_backup(true, Some(&config_path))
+        let err = BackupManager::create_backup(true, Some(&config_path))
             .expect_err("a directory cannot be archived as the config file");
 
+        assert!(err.to_string().contains("not a regular file"));
         let backups = BackupManager::list_backups(Some(&config_path)).unwrap();
         assert!(backups.is_empty());
+    }
+
+    #[test]
+    fn write_new_file_or_remove_deletes_incomplete_output_after_write_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("manual_backup_partial.tar.gz");
+
+        let err = BackupManager::write_new_file_or_remove(&path, |mut file| {
+            file.write_all(b"partial archive").unwrap();
+            anyhow::bail!("simulated archive failure")
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("simulated archive failure"));
+        assert!(!path.exists());
     }
 
     #[test]
