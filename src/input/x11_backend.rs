@@ -264,13 +264,18 @@ fn listen_for_hotkeys(
                                 // (e.g. FocusProxy -> ... -> RuneLite -> Root)
                                 // 5 levels is arbitrary but should cover most cases (Proxy -> Window -> Frame -> WM -> Root)
                                 for _ in 0..5 {
-                                    if allowed_set.contains(&current) {
-                                        is_allowed = true;
+                                    // Reject sentinels and every screen root before allowed-set lookup.
+                                    if current <= 1
+                                        || conn
+                                            .setup()
+                                            .roots
+                                            .iter()
+                                            .any(|screen| screen.root == current)
+                                    {
                                         break;
                                     }
-
-                                    // Stop if we hit root or invalid
-                                    if current == root || current == 0 {
+                                    if allowed_set.contains(&current) {
+                                        is_allowed = true;
                                         break;
                                     }
 
@@ -755,6 +760,8 @@ mod tests {
                 .unwrap()
                 .focus;
             let allowed_windows = AllowedWindows::default();
+            // Stale/poisoned sets must never authorize unrelated windows through root.
+            allowed_windows.write().unwrap().extend([0, 1, test.root]);
             if allowed {
                 allowed_windows.write().unwrap().insert(focus);
             }

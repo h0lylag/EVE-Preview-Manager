@@ -1583,6 +1583,13 @@ mod tests {
     }
 
     fn focus_in(events: &mut EventContext<'_, '_>, src: Window) {
+        events
+            .app_ctx
+            .conn
+            .set_input_focus(InputFocus::PARENT, src, 0u32)
+            .unwrap()
+            .check()
+            .unwrap();
         handle_event(
             events,
             Event::FocusIn(FocusInEvent {
@@ -1645,6 +1652,11 @@ mod tests {
                 focus_in(events, src);
                 toggle_previews(events);
                 assert_visible(ctx, events, src, false);
+                ctx.conn
+                    .set_input_focus(InputFocus::PARENT, ctx.screen.root, 0u32)
+                    .unwrap()
+                    .check()
+                    .unwrap();
                 handle_event(
                     events,
                     Event::FocusOut(FocusOutEvent {
@@ -1665,6 +1677,8 @@ mod tests {
                 toggle_previews(events);
                 assert!(!events.daemon_config.runtime_hidden);
                 assert_visible(ctx, events, src, false);
+                // Model real minimization: the focused source is unmapped by the WM.
+                ctx.conn.unmap_window(src).unwrap().check().unwrap();
                 events
                     .eve_clients
                     .get_mut(&src)
@@ -1824,13 +1838,7 @@ mod tests {
                         events.session_state.focus_loss_deadline = Some(std::time::Instant::now());
                         // Activation can precede event subscription; no FocusIn is delivered.
                         ctx.conn
-                            .change_property32(
-                                PropMode::REPLACE,
-                                ctx.screen.root,
-                                ctx.atoms.net_active_window,
-                                AtomEnum::WINDOW,
-                                &[src],
-                            )
+                            .set_input_focus(InputFocus::PARENT, src, 0u32)
                             .unwrap()
                             .check()
                             .unwrap();
@@ -1874,6 +1882,57 @@ mod tests {
                 );
                 after.reply().unwrap();
             })
+        });
+    }
+    #[test]
+    #[ignore = "requires isolated Xvfb; see test module for command"]
+    fn visibility_detection_uses_input_focus_even_when_wm_property_disagrees() {
+        with_x11(|ctx| {
+            with_config(ctx, visibility_config(), |events, _| {
+                let src = window(ctx, "EVE - Bob", "eve");
+                let outside = window(ctx, "Outside", "untracked");
+                ctx.conn
+                    .set_input_focus(InputFocus::PARENT, outside, 0u32)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                ctx.conn
+                    .change_property32(
+                        PropMode::REPLACE,
+                        ctx.screen.root,
+                        ctx.atoms.net_active_window,
+                        AtomEnum::WINDOW,
+                        &[src],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                crate::daemon::handlers::state::hide_after_focus_loss(events);
+                handle_event(events, create_event(ctx, src)).unwrap();
+                assert!(events.session_state.focus_hidden);
+                assert_visible(ctx, events, src, false);
+                assert_eq!(events.cycle_state.get_current_window(), None);
+                ctx.conn
+                    .set_input_focus(InputFocus::PARENT, src, 0u32)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                ctx.conn
+                    .change_property32(
+                        PropMode::REPLACE,
+                        ctx.screen.root,
+                        ctx.atoms.net_active_window,
+                        AtomEnum::WINDOW,
+                        &[outside],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                handle_event(events, create_event(ctx, src)).unwrap();
+                assert!(!events.session_state.focus_hidden);
+                assert_visible(ctx, events, src, true);
+                assert_eq!(events.cycle_state.get_current_window(), Some(src));
+            });
         });
     }
 }

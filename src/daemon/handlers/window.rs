@@ -7,7 +7,6 @@ use x11rb::protocol::ErrorKind;
 use x11rb::protocol::damage::ConnectionExt as DamageExt;
 use x11rb::protocol::xproto::*;
 
-use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
 use super::super::thumbnail::Thumbnail;
 use super::upsert_spatial_settings;
@@ -285,40 +284,16 @@ pub fn process_detected_window(
 
             ctx.eve_clients.insert(window, thumbnail);
 
-            // Check whether this newly created thumbnail belongs to the active source
-            // window. Detection can arrive after activation but before FocusIn.
-            let is_actually_focused = crate::x11::get_active_window(
-                ctx.app_ctx.conn,
-                ctx.app_ctx.screen,
-                ctx.app_ctx.atoms,
-            )
-            .unwrap_or(None)
-            .map(|active| active == window)
-            .unwrap_or(false);
-
-            if is_actually_focused {
-                super::state::restore_focus_visibility(ctx);
-                sync_focused_borders(
-                    ctx.eve_clients,
-                    ctx.cycle_state,
+            if let Some(thumb) = ctx.eve_clients.get_mut(&window)
+                && let Err(error) = thumb.border(
                     ctx.display_config,
+                    false,
+                    ctx.cycle_state
+                        .is_skipped(thumb.effective_source_identity().as_ref()),
                     ctx.font_renderer,
-                    window,
-                    "restored focused window",
-                );
-            } else {
-                // Not focused, just draw inactive border
-                if let Some(thumb) = ctx.eve_clients.get_mut(&window)
-                    && let Err(e) = thumb.border(
-                        ctx.display_config,
-                        false,
-                        ctx.cycle_state
-                            .is_skipped(thumb.effective_source_identity().as_ref()),
-                        ctx.font_renderer,
-                    )
-                {
-                    tracing::warn!(window = window, error = %e, "Failed to draw initial border for new window");
-                }
+                )
+            {
+                tracing::warn!(window, %error, "Failed to draw initial border");
             }
         }
         Ok(None) => {
@@ -396,7 +371,25 @@ pub fn process_detected_window(
             );
         }
     }
+    super::super::activation::reconcile(ctx, std::time::Instant::now());
     Ok(())
+}
+
+/// Whether a source is actually viewable. An unanswered query keeps minimized rendering.
+fn source_is_viewable(ctx: &EventContext, window: Window) -> bool {
+    let attributes = ctx
+        .app_ctx
+        .conn
+        .get_window_attributes(window)
+        .map_err(anyhow::Error::from)
+        .and_then(|cookie| cookie.reply().map_err(anyhow::Error::from));
+    match attributes {
+        Ok(attributes) => attributes.map_state == MapState::VIEWABLE,
+        Err(error) => {
+            tracing::warn!(window, %error, "Failed to verify source map state; keeping minimized rendering");
+            false
+        }
+    }
 }
 
 fn refresh_tracked_window(
@@ -404,19 +397,18 @@ fn refresh_tracked_window(
     window: Window,
     identity: &crate::daemon::window_detection::WindowIdentity,
 ) -> Result<bool> {
-    use crate::x11::{get_active_window, is_window_minimized};
+    use crate::x11::is_window_minimized;
 
     if !ctx.eve_clients.contains_key(&window) {
         return Ok(false);
     }
 
-    let is_actually_focused =
-        get_active_window(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms)
-            .unwrap_or(None)
-            .map(|active| active == window)
-            .unwrap_or(false);
-    let is_minimized =
-        is_window_minimized(ctx.app_ctx.conn, window, ctx.app_ctx.atoms).unwrap_or(false);
+    // WM state properties can be absent or lag, and a stale MapNotify can arrive while a
+    // restore is refused. Leave minimized rendering only once the source is actually viewable.
+    let was_minimized = ctx.eve_clients[&window].state.is_minimized();
+    let is_minimized = is_window_minimized(ctx.app_ctx.conn, window, ctx.app_ctx.atoms)
+        .unwrap_or(false)
+        || (was_minimized && !source_is_viewable(ctx, window));
 
     let mut position_changed = None;
 
@@ -531,19 +523,13 @@ fn refresh_tracked_window(
         });
     }
 
-    if is_actually_focused {
-        super::state::restore_focus_visibility(ctx);
-        sync_focused_borders(
-            ctx.eve_clients,
-            ctx.cycle_state,
-            ctx.display_config,
-            ctx.font_renderer,
-            window,
-            "tracked window refreshed",
-        );
-    } else if !is_minimized
+    // Reconcile first so a focused or requested window is drawn once, with its final border;
+    // only windows left unfocused need the inactive border.
+    super::super::activation::reconcile(ctx, std::time::Instant::now());
+    if !is_minimized
         && let Some(thumb) = ctx.eve_clients.get_mut(&window)
-        && let Err(e) = thumb.border(
+        && !thumb.state.is_focused()
+        && let Err(error) = thumb.border(
             ctx.display_config,
             false,
             ctx.cycle_state
@@ -551,7 +537,7 @@ fn refresh_tracked_window(
             ctx.font_renderer,
         )
     {
-        tracing::warn!(window = window, error = %e, "Failed to draw inactive border for refreshed window");
+        tracing::warn!(window, %error, "Failed to draw inactive border for refreshed window");
     }
 
     Ok(true)
@@ -604,6 +590,9 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
         ctx.cycle_state.get_active_windows(),
         ctx.eve_clients,
     );
+    // Evaluate before removal: removing the source is what makes its transaction end.
+    let affects_focus = window_to_remove.is_some()
+        || super::super::activation::structure_change_affects_focus(ctx, event.window);
 
     if let Some(win) = window_to_remove {
         info!(
@@ -620,6 +609,9 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
             window = event.window,
             "Ignored DestroyNotify for unknown/untracked window"
         );
+    }
+    if affects_focus {
+        super::super::activation::reconcile(ctx, std::time::Instant::now());
     }
     Ok(())
 }

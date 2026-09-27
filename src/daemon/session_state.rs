@@ -13,6 +13,7 @@ use crate::common::types::{CharacterSettings, Position};
 /// Runtime window and focus state, never persisted to disk.
 #[derive(Default)]
 pub struct SessionState {
+    pub(super) focus: super::activation::FocusRuntime,
     /// Window ID → position (session-only, not persisted)
     /// Used for logged-out windows that show "EVE" without character name
     /// Window IDs are ephemeral and don't survive X11 server restarts
@@ -135,6 +136,7 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            ..SessionState::default()
         };
         let char_positions = HashMap::new();
 
@@ -150,6 +152,7 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            ..SessionState::default()
         };
         let char_positions = HashMap::new();
 
@@ -165,6 +168,7 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            ..SessionState::default()
         };
         let char_positions = HashMap::new();
 
@@ -180,6 +184,7 @@ mod tests {
             window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
+            ..SessionState::default()
         };
         let char_positions = HashMap::new();
 

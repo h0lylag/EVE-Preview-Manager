@@ -34,7 +34,12 @@ pub fn activate_window(
         window,
         &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
     )
-    .context(format!("Failed to raise window {} to top of stack", window))?;
+    .context(format!("Failed to raise window {} to top of stack", window))?
+    .check()
+    .context(format!(
+        "Failed to submit raise request for window {}",
+        window
+    ))?;
 
     let event = ClientMessageEvent {
         response_type: CLIENT_MESSAGE_EVENT,
@@ -53,6 +58,11 @@ pub fn activate_window(
     )
     .context(format!(
         "Failed to send _NET_ACTIVE_WINDOW event for window {}",
+        window
+    ))?
+    .check()
+    .context(format!(
+        "Failed to submit activation request for window {}",
         window
     ))?;
 

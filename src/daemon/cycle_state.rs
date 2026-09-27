@@ -36,7 +36,7 @@ pub struct CycleState {
     /// Active cycle groups: group_name -> GroupState
     groups: HashMap<String, GroupState>,
 
-    /// Currently focused active window (if any).
+    /// Latest requested source while activation is pending, otherwise observed focus.
     /// Used to resolve starting position for cycling, especially for detached sources.
     current_window: Option<Window>,
 
@@ -689,7 +689,12 @@ impl CycleState {
         None
     }
 
-    /// Get the window ID of the currently focused window (if known)
+    /// Forget the focus/cycle cursor without losing per-group cycle positions.
+    pub(super) fn clear_current_window(&mut self) {
+        self.current_window = None;
+    }
+
+    /// Get the requested or observed source cursor (if known)
     pub fn get_current_window(&self) -> Option<Window> {
         self.current_window
     }
@@ -1135,6 +1140,31 @@ mod tests {
         assert_eq!(
             state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), true),
             eve_activation(10, "Pilot")
+        );
+    }
+    #[test]
+    fn clearing_focus_retains_cycle_group_positions() {
+        let mut state = CycleState::new(vec![crate::config::profile::CycleGroup {
+            name: "Default".into(),
+            cycle_list: vec![
+                CycleSlot::Eve("Alice".into()),
+                CycleSlot::Eve("Bob".into()),
+                CycleSlot::Eve("Charlie".into()),
+            ],
+            hotkey_forward: None,
+            hotkey_backward: None,
+        }]);
+        for (window, name) in [(10, "Alice"), (20, "Bob"), (30, "Charlie")] {
+            state.add_window(Some(SourceIdentity::eve(name)), window);
+        }
+        state.set_current_by_window_with_identity(20, None);
+        let index = state.groups["Default"].current_index;
+        state.clear_current_window();
+        assert_eq!(state.get_current_window(), None);
+        assert_eq!(state.groups["Default"].current_index, index);
+        assert_eq!(
+            state.cycle_forward("Default", None, false),
+            Some((30, Some(SourceIdentity::eve("Charlie"))))
         );
     }
 }

@@ -16,13 +16,10 @@ use crate::common::types::SourceIdentity;
 use crate::config::DaemonConfig;
 use crate::config::profile::LoggedOutUnidentifiedCycleMode;
 use crate::input::listener::{self, CycleCommand, TimestampedCommand};
-use crate::x11::{
-    AppContext, CachedAtoms, activate_window, minimize_window, refresh_pointer_state,
-    unminimize_window,
-};
+use crate::x11::{AppContext, CachedAtoms};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 
-use super::border_update::sync_focused_borders;
+use super::activation::{self, ActivationOrigin};
 use super::cycle_state::{CycleActivation, CycleState};
 use super::dispatcher::{EventContext, handle_event};
 use super::font;
@@ -73,65 +70,15 @@ fn restore_interrupted_group_drag(
     }
 }
 
-fn direct_tracked_source_window(
-    thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
-    window: Window,
-) -> Option<Window> {
-    if active_windows.is_some_and(|windows| windows.contains_key(&window)) {
-        return Some(window);
-    }
-
-    if thumbnails.contains_key(&window) {
-        return Some(window);
-    }
-
-    thumbnails.iter().find_map(|(&source_window, thumbnail)| {
-        (thumbnail.window() == window
-            || thumbnail.src() == window
-            || thumbnail.parent() == Some(window))
-        .then_some(source_window)
-    })
-}
-
 fn tracked_source_window_for_window(
     ctx: &AppContext<'_>,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
     active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
     window: Window,
 ) -> Option<Window> {
-    if let Some(source_window) = direct_tracked_source_window(thumbnails, active_windows, window) {
-        return Some(source_window);
-    }
-
-    let mut current = window;
-    for _ in 0..10 {
-        let parent = ctx
-            .conn
-            .query_tree(current)
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .map(|reply| reply.parent)?;
-
-        if let Some(source_window) =
-            direct_tracked_source_window(thumbnails, active_windows, parent)
-        {
-            debug!(
-                child = window,
-                parent = parent,
-                source_window = source_window,
-                "Matched focused window to tracked source ancestor"
-            );
-            return Some(source_window);
-        }
-
-        if parent == ctx.screen.root || parent == 0 {
-            break;
-        }
-        current = parent;
-    }
-
-    None
+    super::focus::resolve_window(ctx, thumbnails, active_windows, window)
+        .ok()
+        .and_then(super::focus::FocusOwner::source)
 }
 
 fn active_tracked_source_window(
@@ -185,6 +132,8 @@ fn initialize_x11() -> Result<(
         ),
     )
     .context("Failed to set event mask on root window")?;
+    // Root focus events replace idle polling at root/None, so this subscription is required.
+    super::focus::select_root_focus_changes(&conn)?;
 
     // Pre-cache picture formats
     let formats = crate::x11::CachedFormats::new(&conn, screen)
@@ -465,11 +414,14 @@ async fn run_event_loop(
     let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(3));
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Timer for delayed thumbnail hiding (hysteresis)
-    let hide_timer = tokio::time::sleep(tokio::time::Duration::from_secs(86400));
-    tokio::pin!(hide_timer);
+    // One timer services activation probes, timeout, and visibility hysteresis.
+    let focus_timer = tokio::time::sleep(tokio::time::Duration::from_secs(86400));
+    tokio::pin!(focus_timer);
+    let mut armed_deadline = None;
+    let mut reconcile_startup = true;
 
     loop {
+        let mut batch_full = true;
         // Scope ctx to allow mutable borrow of font_renderer later
         {
             // Construct AppContext for this iteration
@@ -480,13 +432,39 @@ async fn run_event_loop(
                 formats,
             };
 
-            // Process all pending X11 events without blocking to ensure the queue is drained
-            // This prevents the event channel from filling up during heavy activity
-            while let Some(event) = ctx
-                .conn
-                .poll_for_event()
-                .context("Failed to poll for X11 event")?
+            // Service due focus work before draining: its synchronous focus queries can move
+            // newly arrived events into x11rb's queue, where socket readiness cannot see them.
+            if reconcile_startup
+                || activation::next_deadline(&resources.session)
+                    .is_some_and(|deadline| std::time::Instant::now() >= deadline)
             {
+                activation::reconcile(
+                    &mut EventContext {
+                        app_ctx: &ctx,
+                        daemon_config: &mut resources.config,
+                        eve_clients: &mut resources.eve_clients,
+                        session_state: &mut resources.session,
+                        cycle_state: &mut resources.cycle,
+                        group_drag_state: &mut resources.group_drag,
+                        status_tx: &status_tx,
+                        font_renderer: &font_renderer,
+                        display_config: &display_config,
+                    },
+                    std::time::Instant::now(),
+                );
+                reconcile_startup = false;
+            }
+
+            // Bound each batch so continuous damage/input cannot starve focus deadlines.
+            for _ in 0..256 {
+                let Some(event) = ctx
+                    .conn
+                    .poll_for_event()
+                    .context("Failed to poll for X11 event")?
+                else {
+                    batch_full = false;
+                    break;
+                };
                 // Scope the mutable borrows for event handling
                 {
                     let mut context = EventContext {
@@ -533,6 +511,15 @@ async fn run_event_loop(
                 }
             }
 
+            current_windows.retain(|window| {
+                *window > 1
+                    && !conn
+                        .setup()
+                        .roots
+                        .iter()
+                        .any(|screen| screen.root == *window)
+            });
+
             let need_update = {
                 if let Ok(guard) = allowed_windows.read() {
                     *guard != current_windows
@@ -550,29 +537,109 @@ async fn run_event_loop(
             }
         }
 
-        // Update hide timer if deadline was set or changed
-        if let Some(deadline) = resources.session.focus_loss_deadline {
-            // Calculate duration until deadline
-            // If deadline is in past, use 0 duration to fire immediately
-            let duration = deadline
-                .checked_duration_since(std::time::Instant::now())
-                .unwrap_or(std::time::Duration::ZERO);
-
-            hide_timer
-                .as_mut()
-                .reset(tokio::time::Instant::now() + duration);
-
-            debug!(
-                delay_ms = duration.as_millis(),
-                "Updated hide timer deadline"
-            );
+        let deadline = activation::next_deadline(&resources.session);
+        if deadline != armed_deadline {
+            if let Some(deadline) = deadline {
+                focus_timer
+                    .as_mut()
+                    .reset(tokio::time::Instant::from_std(deadline));
+            }
+            armed_deadline = deadline;
         }
 
         tokio::select! {
-            biased;  // Process branches in order - prioritize hotkeys over heartbeat/IPC
+            biased;
 
-            // 1. Handle Hotkey Commands (HIGHEST PRIORITY)
-            // Checked first to minimize latency and prevent XWayland grab conflicts
+            // 1. Service due focus work (HIGHEST PRIORITY)
+            // Precedes another hotkey, even under sustained input.
+            () = &mut focus_timer, if armed_deadline.is_some() => { continue; }
+
+            // 2. Handle Manager IPC commands
+            // Control is rare and cheap; it precedes input so sustained hotkeys or X traffic cannot
+            // starve shutdown.
+            msg = ipc_config_rx_tokio.recv() => {
+                let Some(msg) = msg else {
+                    info!("IPC bridge closed - shutting down daemon");
+                    return Ok(());
+                };
+
+                match msg {
+                    DaemonControlMessage::ManagerDisconnected => {
+                        info!("Manager IPC disconnected - shutting down daemon");
+                        return Ok(());
+                    }
+                    DaemonControlMessage::Config(ConfigMessage::Shutdown) => {
+                        info!("Graceful shutdown requested by Manager");
+                        return Ok(());
+                    }
+                    DaemonControlMessage::Config(ConfigMessage::InitialConfig(_)) => {
+                        return Err(anyhow::anyhow!(
+                            "Received InitialConfig after daemon initialization"
+                        ));
+                    }
+
+                    DaemonControlMessage::Config(ConfigMessage::ThumbnailMoves {
+                        updates,
+                    }) => {
+                        debug!(update_count = updates.len(), "Received thumbnail move batch");
+
+                        for update in updates {
+                            let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
+                                t.effective_source_identity().as_ref() == Some(&update.source)
+                            });
+
+                            if let Some(thumb) = thumbnail_opt {
+                                if thumb.current_position == update.position
+                                    && thumb.dimensions == update.dimensions
+                                {
+                                    debug!(
+                                        name = %update.source.name,
+                                        "Thumbnail move ignored: position/size unchanged"
+                                    );
+                                    continue;
+                                }
+
+                                if let Err(e) = thumb.reposition(update.position.x, update.position.y) {
+                                    error!(name = %update.source.name, error = %e, "Failed to reposition thumbnail");
+                                }
+                                if let Err(e) = thumb.resize(update.dimensions.width, update.dimensions.height) {
+                                    error!(name = %update.source.name, error = %e, "Failed to resize thumbnail");
+                                }
+                                info!(
+                                    name = %update.source.name,
+                                    x = update.position.x,
+                                    y = update.position.y,
+                                    width = update.dimensions.width,
+                                    height = update.dimensions.height,
+                                    "Position updated by Manager"
+                                );
+                            } else {
+                                debug!(name = %update.source.name, kind = ?update.source.kind, "Thumbnail move ignored: source not tracked");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Send Heartbeat (due once per interval; must not be starved by input)
+            _ = heartbeat_interval.tick() => {
+                if let Err(e) = status_tx.send(DaemonMessage::Heartbeat) {
+                    error!(error = %e, "Failed to send heartbeat to Manager");
+                    // If we can't send heartbeat, manager might be dead.
+                    // We'll let the IPC config channel failure handle termination.
+                }
+            }
+
+            // 4. Handle legacy SIGUSR1 notifications
+            _ = sigusr1.recv() => {
+                info!("SIGUSR1 received; configuration changes require a Manager-driven daemon restart");
+                let _ = status_tx.send(DaemonMessage::Status(
+                    "SIGUSR1 ignored: use Save & Apply to reload configuration".to_string(),
+                ));
+            }
+
+            // 5. Handle Hotkey Commands
+            // Checked before X11 events to minimize latency and prevent XWayland grab conflicts
             Some(msg) = hotkey_rx.recv() => {
                  let TimestampedCommand { command, timestamp } = msg;
 
@@ -645,107 +712,17 @@ async fn run_event_loop(
                             "Activating window via hotkey"
                         );
 
-                        // NOTE: When minimize mode is enabled, unminimize the target window FIRST
-                        // before calling activate_window. The WM still decides when to
-                        // restore and focus it; sending these requests is not confirmation.
-                        if resources.config.profile.client_minimize_on_switch
-                            && let Err(e) = unminimize_window(ctx.conn, window)
-                        {
-                            error!(window = window, error = %e, "Failed to unminimize window before activation");
-                        }
-
-                        if let Err(e) = activate_window(ctx.conn, ctx.screen, ctx.atoms, window, timestamp) {
-                            error!(window = window, error = %e, "Failed to activate window");
-                        } else {
-                            debug!(window = window, timestamp, "Window activation request sent");
-
-                            // Optimistically select the requested target and redraw its border.
-                            // FocusIn may reconcile this later; request submission is not focus
-                            // confirmation. Confirmation before minimization remains deferred.
-                            resources
-                                .cycle
-                                .set_current_by_window_with_identity(window, source_identity.as_ref());
-
-                            let display_config = resources.config.build_display_config();
-                            sync_focused_borders(
-                                &mut resources.eve_clients,
-                                &resources.cycle,
-                                &display_config,
-                                &font_renderer,
-                                window,
-                                "hotkey activation",
-                            );
-
-                            // Refresh pointer state after the immediate border redraw work. This
-                            // keeps the final synthetic mouse event near the real cursor instead
-                            // of the legacy activation-time (0,0) coordinate.
-                            if let Err(e) = refresh_pointer_state(ctx.conn, window, timestamp) {
-                                debug!(window = window, error = %e, "Failed to refresh pointer state after border redraw");
-                            }
-
-                            // Submit border and pointer requests before the delay. Flushing does
-                            // not wait for the server or compositor to finish rendering them.
-                            let _ = ctx.conn.flush();
-
-                            if resources.config.profile.client_minimize_on_switch {
-                                // Retain the existing delay for previously reported KWin focus
-                                // thrashing. It does not establish that focus has transferred.
-                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-
-                                // Select from every tracked source, including sources without a
-                                // rendered preview, while preserving typed and remembered exemptions.
-                                let other_windows = super::handlers::source_windows_to_minimize(
-                                    &resources.cycle,
-                                    &resources.session,
-                                    &display_config,
-                                    window,
-                                );
-
-                                for other_window in other_windows {
-                                    // Clear border on the window BEFORE minimizing it
-                                    // This prevents leaving stale active borders on minimized windows
-                                    // The thumbnail is optional and only needed for border cleanup.
-                                    if let Some(thumb) = resources.eve_clients.get_mut(&other_window) {
-                                        // Don't change state here - let the minimize handler set it to Minimized
-                                        // Just clear the border for now
-                                        if let Err(e) = thumb.border(
-                                            &display_config,
-                                            false,
-                                            resources.cycle.is_skipped(thumb.effective_source_identity().as_ref()),
-                                            &font_renderer,
-                                        ) {
-                                            warn!(window = other_window, error = %e, "Failed to clear border before minimize");
-                                        }
-                                    }
-                                    if let Err(e) = minimize_window(ctx.conn, ctx.screen, ctx.atoms, other_window) {
-                                        debug!(window = other_window, error = %e, "Failed to minimize window via hotkey");
-                                    }
-                                }
-
-                                // Minimize Manager GUI as well (to prevent focus stealing/clutter)
-                                // We search for "eve-preview-manager" class.
-                                // NOTE: Thumbnails are now "eve-preview-thumbnail", so this is safe/unique.
-                                let manager_window = crate::x11::get_client_list(ctx.conn, ctx.screen, ctx.atoms)
-                                    .ok()
-                                    .and_then(|windows| {
-                                        windows.into_iter().find(|&w| {
-                                            crate::x11::get_window_class(ctx.conn, w, ctx.atoms)
-                                                .ok()
-                                                .flatten()
-                                                .map(|class| class == "eve-preview-manager")
-                                                .unwrap_or(false)
-                                        })
-                                    });
-
-                                if let Some(mgr_win) = manager_window {
-                                    if let Err(e) = minimize_window(ctx.conn, ctx.screen, ctx.atoms, mgr_win) {
-                                        debug!(window = mgr_win, error = %e, "Failed to minimize Manager GUI");
-                                    } else {
-                                        debug!("Minimized Manager GUI");
-                                    }
-                                }
-                            }
-                        }
+                        activation::begin(&mut EventContext {
+                            app_ctx: &ctx,
+                            daemon_config: &mut resources.config,
+                            eve_clients: &mut resources.eve_clients,
+                            session_state: &mut resources.session,
+                            cycle_state: &mut resources.cycle,
+                            group_drag_state: &mut resources.group_drag,
+                            status_tx: &status_tx,
+                            font_renderer: &font_renderer,
+                            display_config: &display_config,
+                        }, window, source_identity.as_ref(), timestamp, ActivationOrigin::Hotkey);
                     } else {
                         warn!("No window to activate via hotkey");
                     }
@@ -756,7 +733,7 @@ async fn run_event_loop(
 
             }
 
-            // 2. Handle X11 Events (SECOND PRIORITY)
+            // 6. Handle X11 Events
             // Wait for X11 connection to be readable (meaning an event is available)
             // This is level-triggered
             ready = x11_fd.readable() => {
@@ -774,106 +751,9 @@ async fn run_event_loop(
                 continue;
             }
 
-            // 3. Handle Delayed Hide (Hysteresis)
-            // Only process this branch if there's an active deadline
-            () = &mut hide_timer, if resources.session.focus_loss_deadline.is_some() => {
-                debug!("Executing delayed thumbnail hide");
-                restore_interrupted_group_drag(conn, &mut resources, "focus-loss hide");
-                let ctx = AppContext { conn, screen, atoms, formats };
-                crate::daemon::handlers::state::hide_after_focus_loss(&mut EventContext {
-                    app_ctx: &ctx,
-                    daemon_config: &mut resources.config,
-                    eve_clients: &mut resources.eve_clients,
-                    session_state: &mut resources.session,
-                    cycle_state: &mut resources.cycle,
-                    group_drag_state: &mut resources.group_drag,
-                    status_tx: &status_tx,
-                    font_renderer: &font_renderer,
-                    display_config: &display_config,
-                });
-            }
+            // x11rb may already hold events after the socket becomes empty.
+            () = tokio::task::yield_now(), if batch_full => {}
 
-            // 4. Send Heartbeat (Lower priority - can wait)
-            _ = heartbeat_interval.tick() => {
-                if let Err(e) = status_tx.send(DaemonMessage::Heartbeat) {
-                    error!(error = %e, "Failed to send heartbeat to Manager");
-                    // If we can't send heartbeat, manager might be dead.
-                    // We'll let the IPC config channel failure handle termination.
-                }
-            }
-
-            // 4. Handle legacy SIGUSR1 notifications (lower priority)
-            _ = sigusr1.recv() => {
-                info!("SIGUSR1 received; configuration changes require a Manager-driven daemon restart");
-                let _ = status_tx.send(DaemonMessage::Status(
-                    "SIGUSR1 ignored: use Save & Apply to reload configuration".to_string(),
-                ));
-            }
-
-            // 5. Handle Manager IPC commands (lower priority)
-            msg = ipc_config_rx_tokio.recv() => {
-                let Some(msg) = msg else {
-                    info!("IPC bridge closed - shutting down daemon");
-                    return Ok(());
-                };
-
-                match msg {
-                    DaemonControlMessage::ManagerDisconnected => {
-                        info!("Manager IPC disconnected - shutting down daemon");
-                        return Ok(());
-                    }
-                    DaemonControlMessage::Config(ConfigMessage::Shutdown) => {
-                        info!("Graceful shutdown requested by Manager");
-                        return Ok(());
-                    }
-                    DaemonControlMessage::Config(ConfigMessage::InitialConfig(_)) => {
-                        return Err(anyhow::anyhow!(
-                            "Received InitialConfig after daemon initialization"
-                        ));
-                    }
-
-                    DaemonControlMessage::Config(ConfigMessage::ThumbnailMoves {
-                        updates,
-                    }) => {
-                        debug!(update_count = updates.len(), "Received thumbnail move batch");
-
-                        for update in updates {
-                            let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
-                                t.effective_source_identity().as_ref() == Some(&update.source)
-                            });
-
-                            if let Some(thumb) = thumbnail_opt {
-                                if thumb.current_position == update.position
-                                    && thumb.dimensions == update.dimensions
-                                {
-                                    debug!(
-                                        name = %update.source.name,
-                                        "Thumbnail move ignored: position/size unchanged"
-                                    );
-                                    continue;
-                                }
-
-                                if let Err(e) = thumb.reposition(update.position.x, update.position.y) {
-                                    error!(name = %update.source.name, error = %e, "Failed to reposition thumbnail");
-                                }
-                                if let Err(e) = thumb.resize(update.dimensions.width, update.dimensions.height) {
-                                    error!(name = %update.source.name, error = %e, "Failed to resize thumbnail");
-                                }
-                                info!(
-                                    name = %update.source.name,
-                                    x = update.position.x,
-                                    y = update.position.y,
-                                    width = update.dimensions.width,
-                                    height = update.dimensions.height,
-                                    "Position updated by Manager"
-                                );
-                            } else {
-                                debug!(name = %update.source.name, kind = ?update.source.kind, "Thumbnail move ignored: source not tracked");
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -975,17 +855,9 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
 
     // Initialize border state for all windows (defaults to inactive/cleared)
     // This ensures inactive borders are drawn immediately on startup if enabled
-    let init_ctx = AppContext {
-        conn: &conn,
-        screen,
-        atoms: &atoms,
-        formats: &formats,
-    };
-    let active_source_window = active_tracked_source_window(&init_ctx, &eve_clients, None);
-
     for (window, thumbnail) in eve_clients.iter_mut() {
         // Check if this window currently has focus
-        let is_focused = active_source_window.map(|w| w == *window).unwrap_or(false);
+        let is_focused = false; // Observed focus is reconciled on entry to the event loop.
 
         // Update state and draw appropriate border
         thumbnail.state = crate::common::types::ThumbnailState::Normal {
@@ -1676,6 +1548,536 @@ mod tests {
                     assert!(!resources.cycle.is_skipped(Some(&identity)));
                 })
             })
+        });
+    }
+    // Observe the actual daemon with a real passive grab and a controlled WM.
+    // The fixture delivers the command after KeyPress; it does not run the listener.
+    // release_at_transfer: -1 just before focus, 1 just after, 0 uses release_delay_ms.
+    fn confirmed_activation_case(
+        minimize: bool,
+        restore_delay_ms: u64,
+        release_delay_ms: u64,
+        pointer_inside: bool,
+        release_at_transfer: i8,
+        pointer_root: bool,
+        flood_events: bool,
+    ) {
+        use std::time::{Duration, Instant};
+        use x11rb::protocol::{Event, xtest::ConnectionExt as _};
+        with_x11(|ctx| {
+            let mut profile = Profile {
+                thumbnail_enabled: true,
+                thumbnail_hide_not_focused: true,
+                client_minimize_on_switch: minimize,
+                hotkey_require_eve_focus: true,
+                ..Profile::default()
+            };
+            profile.cycle_groups[0].cycle_list =
+                vec![CycleSlot::Eve("Alice".into()), CycleSlot::Eve("Bob".into())];
+            let group = profile.cycle_groups[0].name.clone();
+            let config = DaemonConfig {
+                profile,
+                character_thumbnails: HashMap::new(),
+                custom_source_thumbnails: HashMap::new(),
+                profile_hotkeys: HashMap::new(),
+                runtime_hidden: false,
+            };
+            let display = config.build_display_config();
+            let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
+            let a = window(ctx, ctx.screen.root);
+            let b = window(ctx, ctx.screen.root);
+            let mut cycle = CycleState::new(config.profile.cycle_groups.clone());
+            let mut thumbnails = HashMap::new();
+            for (src, name) in [(a, "Alice"), (b, "Bob")] {
+                cycle.add_window(Some(SourceIdentity::eve(name)), src);
+                ctx.conn
+                    .change_window_attributes(
+                        src,
+                        &ChangeWindowAttributesAux::new().event_mask(
+                            EventMask::FOCUS_CHANGE
+                                | EventMask::STRUCTURE_NOTIFY
+                                | EventMask::PROPERTY_CHANGE,
+                        ),
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let thumbnail = Thumbnail::new(
+                    ctx,
+                    crate::common::types::SourceKind::Eve,
+                    name.into(),
+                    None,
+                    src,
+                    &display,
+                    &font,
+                    None,
+                    Dimensions::new(160, 100),
+                    PreviewMode::default(),
+                    false,
+                )
+                .unwrap();
+                thumbnails.insert(src, thumbnail);
+            }
+            let preview_b = thumbnails[&b].window();
+            cycle.set_current_by_window_with_identity(a, Some(&SourceIdentity::eve("Alice")));
+            super::super::border_update::sync_focused_borders(
+                &mut thumbnails,
+                &cycle,
+                &display,
+                &font,
+                a,
+                super::super::border_update::BorderFocus::Observed,
+                "audit initial focus",
+            );
+            ctx.conn
+                .configure_window(a, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))
+                .unwrap()
+                .check()
+                .unwrap();
+            ctx.conn
+                .warp_pointer(
+                    x11rb::NONE,
+                    ctx.screen.root,
+                    0,
+                    0,
+                    0,
+                    0,
+                    if pointer_inside { 300 } else { 900 },
+                    if pointer_inside { 200 } else { 700 },
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            ctx.conn
+                .set_input_focus(
+                    if pointer_root {
+                        InputFocus::POINTER_ROOT
+                    } else {
+                        InputFocus::PARENT
+                    },
+                    a,
+                    0u32,
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            ctx.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    ctx.screen.root,
+                    ctx.atoms.net_active_window,
+                    AtomEnum::WINDOW,
+                    &[a],
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            if minimize {
+                ctx.conn.unmap_window(b).unwrap().check().unwrap();
+            }
+            let resources = DaemonResources {
+                config,
+                session: SessionState::new(),
+                cycle,
+                eve_clients: thumbnails,
+                group_drag: GroupDragState::default(),
+            };
+            let (wm, _) = x11rb::connect(None).unwrap();
+            let root = ctx.screen.root;
+            let active_atom = ctx.atoms.net_active_window;
+            let change_atom = ctx.atoms.wm_change_state;
+            wm.change_window_attributes(
+                root,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_REDIRECT),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let (hotkey_tx, hotkey_rx) = mpsc::channel(32);
+            let (config_tx, config_rx) = ipc::channel().unwrap();
+            let (status_tx, _status_rx) = ipc::channel().unwrap();
+            let wm_task = std::thread::spawn(move || {
+                for src in [a, b] {
+                    wm.change_window_attributes(
+                        src,
+                        &ChangeWindowAttributesAux::new().event_mask(EventMask::FOCUS_CHANGE),
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                }
+                wm.grab_key(
+                    false,
+                    root,
+                    ModMask::from(0u16),
+                    112,
+                    GrabMode::ASYNC,
+                    GrabMode::SYNC,
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+                wm.xtest_fake_input(KEY_PRESS_EVENT, 112, 0, root, 0, 0, 0)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let start = Instant::now();
+                let mut activation_time = None;
+                let mut restored_time = None;
+                let mut minimized_early = false;
+                let mut saw_minimize = false;
+                let mut saw_restore_request = false;
+                let mut released_time = None;
+                let mut command_sent = false;
+                while start.elapsed() < Duration::from_secs(3) {
+                    while let Some(event) = wm.poll_for_event().unwrap() {
+                        match event {
+                            Event::KeyPress(e) if !command_sent => {
+                                command_sent = true;
+                                wm.allow_events(Allow::ASYNC_KEYBOARD, e.time)
+                                    .unwrap()
+                                    .check()
+                                    .unwrap();
+                                hotkey_tx
+                                    .blocking_send(TimestampedCommand {
+                                        command: CycleCommand::Forward(group.clone()),
+                                        timestamp: e.time,
+                                    })
+                                    .unwrap();
+                            }
+                            Event::FocusIn(e) => {
+                                eprintln!(
+                                    "focus IN source={} mode={:?} detail={:?}",
+                                    if e.event == a { "A" } else { "B" },
+                                    e.mode,
+                                    e.detail
+                                );
+                            }
+                            Event::FocusOut(e) => {
+                                eprintln!(
+                                    "focus OUT source={} mode={:?} detail={:?}",
+                                    if e.event == a { "A" } else { "B" },
+                                    e.mode,
+                                    e.detail
+                                );
+                            }
+                            Event::MapRequest(e) if e.window == b => {
+                                saw_restore_request = true;
+                            }
+                            Event::ConfigureRequest(e) => {
+                                // Accept stacking requests without restoring a hidden client.
+                                wm.configure_window(
+                                    e.window,
+                                    &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+                                )
+                                .unwrap()
+                                .check()
+                                .unwrap();
+                            }
+                            Event::ClientMessage(e) if e.type_ == active_atom && e.window == b => {
+                                if activation_time.is_none() {
+                                    activation_time = Some(Instant::now());
+                                }
+                            }
+                            Event::ClientMessage(e)
+                                if e.type_ == change_atom
+                                    && e.window == a
+                                    && e.data.as_data32()[0] == 3 =>
+                            {
+                                saw_minimize = true;
+                                let focus = wm.get_input_focus().unwrap().reply().unwrap().focus;
+                                let target_map = wm
+                                    .get_window_attributes(b)
+                                    .unwrap()
+                                    .reply()
+                                    .unwrap()
+                                    .map_state;
+                                minimized_early |= focus != b || target_map != MapState::VIEWABLE;
+                                eprintln!(
+                                    "minimize={minimize}, restore_delay={restore_delay_ms}ms: old-client minimize at {:?}; target map={target_map:?}, focus_is_target={}",
+                                    activation_time.map(|t: Instant| t.elapsed()),
+                                    focus == b
+                                );
+                                wm.unmap_window(a).unwrap().check().unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                    if restored_time.is_none()
+                        && activation_time
+                            .is_some_and(|t| t.elapsed() >= Duration::from_millis(restore_delay_ms))
+                    {
+                        wm.map_window(b).unwrap().check().unwrap();
+                        if release_at_transfer == -1 {
+                            wm.xtest_fake_input(KEY_RELEASE_EVENT, 112, 0, root, 0, 0, 0)
+                                .unwrap()
+                                .check()
+                                .unwrap();
+                            released_time = Some(Instant::now());
+                            eprintln!("key release immediately BEFORE focus transfer");
+                        }
+                        wm.set_input_focus(
+                            if pointer_root {
+                                InputFocus::POINTER_ROOT
+                            } else {
+                                InputFocus::PARENT
+                            },
+                            b,
+                            0u32,
+                        )
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                        if release_at_transfer == 1 {
+                            wm.xtest_fake_input(KEY_RELEASE_EVENT, 112, 0, root, 0, 0, 0)
+                                .unwrap()
+                                .check()
+                                .unwrap();
+                            released_time = Some(Instant::now());
+                            eprintln!("key release immediately AFTER focus transfer");
+                        }
+                        wm.change_property32(
+                            PropMode::REPLACE,
+                            root,
+                            active_atom,
+                            AtomEnum::WINDOW,
+                            &[b],
+                        )
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                        restored_time = Some(Instant::now());
+                    }
+                    if release_at_transfer == 0
+                        && released_time.is_none()
+                        && activation_time
+                            .is_some_and(|t| t.elapsed() >= Duration::from_millis(release_delay_ms))
+                    {
+                        eprintln!(
+                            "key release: target_focus={} pointer_target={}",
+                            wm.get_input_focus().unwrap().reply().unwrap().focus == b,
+                            wm.query_pointer(root).unwrap().reply().unwrap().child == b
+                        );
+                        wm.xtest_fake_input(KEY_RELEASE_EVENT, 112, 0, root, 0, 0, 0)
+                            .unwrap()
+                            .check()
+                            .unwrap();
+                        released_time = Some(Instant::now());
+                    }
+                    if restored_time.is_some_and(|t| t.elapsed() >= Duration::from_millis(200))
+                        && released_time.is_some_and(|t| t.elapsed() >= Duration::from_millis(200))
+                    {
+                        break;
+                    }
+                    if flood_events {
+                        // More events than one daemon batch, throughout the pending interval.
+                        for value in 0..512u32 {
+                            wm.change_property32(
+                                PropMode::REPLACE,
+                                a,
+                                AtomEnum::WM_COMMAND,
+                                AtomEnum::CARDINAL,
+                                &[value],
+                            )
+                            .unwrap();
+                        }
+                        wm.flush().unwrap();
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let final_focus = wm.get_input_focus().unwrap().reply().unwrap().focus;
+                let visible = wm
+                    .get_window_attributes(preview_b)
+                    .unwrap()
+                    .reply()
+                    .unwrap()
+                    .map_state
+                    == MapState::VIEWABLE;
+                eprintln!(
+                    "RESULT transfer_release={release_at_transfer} minimize={minimize} restore_ms={restore_delay_ms} release_ms={release_delay_ms} pointer_inside={pointer_inside} early_minimize={minimized_early} restore_request={saw_restore_request} focused={} visible={visible}",
+                    final_focus == b
+                );
+                assert!(released_time.is_some());
+                config_tx.send(ConfigMessage::Shutdown).unwrap();
+                (
+                    minimized_early,
+                    saw_minimize,
+                    restored_time.is_some(),
+                    final_focus == b,
+                    visible,
+                )
+            });
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let signal =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                        .unwrap();
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    run_event_loop(
+                        ctx.conn,
+                        ctx.screen,
+                        display,
+                        ctx.atoms,
+                        ctx.formats,
+                        font,
+                        resources,
+                        hotkey_rx,
+                        HashMap::new(),
+                        signal,
+                        config_rx,
+                        status_tx,
+                        Arc::new(RwLock::new(HashSet::new())),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            });
+            let (early, saw_minimize, restored, focused, visible) = wm_task.join().unwrap();
+            assert!(restored && focused, "fixture must restore and focus target");
+            assert!(!early, "must not minimize before target focus and mapping");
+            assert!(visible, "successful switch must retain previews");
+            assert_eq!(saw_minimize, minimize && restore_delay_ms < 1000);
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn confirmed_activation_grab_restore_matrix() {
+        for pointer_root in [false, true] {
+            for minimize in [false, true] {
+                for inside in [false, true] {
+                    for delay in [0, 150] {
+                        for release_at_transfer in [-1, 1] {
+                            confirmed_activation_case(
+                                minimize,
+                                delay,
+                                0,
+                                inside,
+                                release_at_transfer,
+                                pointer_root,
+                                false,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // A released grab while the WM is still restoring the target.
+        confirmed_activation_case(true, 150, 50, false, 0, false, false);
+        confirmed_activation_case(true, 150, 50, false, 0, true, false);
+    }
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn activation_timeout_is_serviced_under_continuous_x_events() {
+        confirmed_activation_case(true, 1200, 50, false, 0, false, true);
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn heartbeat_and_shutdown_are_not_starved_by_sustained_hotkeys() {
+        use std::time::Duration;
+        with_x11(|ctx| {
+            let config = DaemonConfig {
+                profile: Profile {
+                    thumbnail_enabled: false,
+                    hotkey_require_eve_focus: true,
+                    ..Profile::default()
+                },
+                character_thumbnails: HashMap::new(),
+                custom_source_thumbnails: HashMap::new(),
+                profile_hotkeys: HashMap::new(),
+                runtime_hidden: false,
+            };
+            let display = config.build_display_config();
+            let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
+            let mut resources = DaemonResources {
+                cycle: CycleState::new(config.profile.cycle_groups.clone()),
+                config,
+                session: SessionState::default(),
+                eve_clients: HashMap::new(),
+                group_drag: GroupDragState::default(),
+            };
+            let source = window(ctx, ctx.screen.root);
+            resources
+                .cycle
+                .add_window(Some(SourceIdentity::eve("Alice")), source);
+            // The real WM focus gate accepts every command, so each one is fully processed.
+            focus(ctx, Some(source));
+            ctx.conn
+                .set_input_focus(InputFocus::PARENT, source, 0u32)
+                .unwrap()
+                .check()
+                .unwrap();
+            let command = || TimestampedCommand {
+                command: CycleCommand::Forward("missing".into()),
+                timestamp: 0,
+            };
+            let (hotkey_tx, hotkey_rx) = mpsc::channel(128);
+            for _ in 0..128 {
+                hotkey_tx.try_send(command()).unwrap();
+            }
+            // Input stays continuously ready until the loop exits and drops the receiver.
+            let producer =
+                std::thread::spawn(move || while hotkey_tx.blocking_send(command()).is_ok() {});
+            let (config_tx, config_rx) = ipc::channel().unwrap();
+            let (status_tx, status_rx) = ipc::channel().unwrap();
+            // Two heartbeats span a full interval under sustained input; only then shut down.
+            let control = std::thread::spawn(move || {
+                let mut heartbeats = 0;
+                while heartbeats < 2 {
+                    match status_rx.try_recv_timeout(Duration::from_secs(5)) {
+                        Ok(DaemonMessage::Heartbeat) => heartbeats += 1,
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+                config_tx.send(ConfigMessage::Shutdown).unwrap();
+                heartbeats
+            });
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(async {
+                let signal =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                        .unwrap();
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    run_event_loop(
+                        ctx.conn,
+                        ctx.screen,
+                        display,
+                        ctx.atoms,
+                        ctx.formats,
+                        font,
+                        resources,
+                        hotkey_rx,
+                        HashMap::new(),
+                        signal,
+                        config_rx,
+                        status_tx,
+                        Arc::new(RwLock::new(HashSet::new())),
+                    ),
+                )
+                .await
+            });
+            producer.join().unwrap();
+            let heartbeats = control.join().unwrap();
+            assert_eq!(
+                heartbeats, 2,
+                "heartbeats must continue under sustained input"
+            );
+            assert!(
+                result.is_ok(),
+                "a queued shutdown must beat sustained hotkey input"
+            );
+            result.unwrap().unwrap();
         });
     }
 }

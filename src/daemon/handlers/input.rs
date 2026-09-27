@@ -5,7 +5,6 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
-use super::super::border_update::sync_focused_borders;
 use super::super::dispatcher::EventContext;
 use super::super::group_drag::{
     GroupDragMember, GroupDragState, is_group_chord_press, shared_delta, translated_position,
@@ -223,28 +222,6 @@ fn finish_group_drag(ctx: &mut EventContext<'_, '_>, released_button: u8) {
     );
 }
 
-fn set_clicked_cycle_target(
-    ctx: &mut EventContext<'_, '_>,
-    window: Window,
-    source_identity: Option<&SourceIdentity>,
-) {
-    let cycle_identity = source_identity.cloned().or_else(|| {
-        ctx.session_state
-            .window_last_character
-            .get(&window)
-            .map(|name| SourceIdentity::eve(name.clone()))
-    });
-
-    ctx.cycle_state
-        .set_current_by_window_with_identity(window, cycle_identity.as_ref());
-
-    debug!(
-        window = window,
-        source = %cycle_identity.as_ref().map(|id| id.name.as_str()).unwrap_or(""),
-        "Set current window via thumbnail click"
-    );
-}
-
 fn remembered_eve_identity(ctx: &EventContext<'_, '_>, window: Window) -> Option<SourceIdentity> {
     ctx.session_state
         .window_last_character
@@ -344,8 +321,6 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
 
 /// Handle button releases, completing group drags before normal click/drag behavior.
 pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) -> Result<()> {
-    use crate::x11::{activate_window, minimize_window, unminimize_window};
-
     debug!(
         x = event.root_x,
         y = event.root_y,
@@ -393,33 +368,7 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         clicked_src = Some(src);
 
         // Collect data we need for border updates before the mutable borrow
-        let character_name = thumbnail.character_name.clone();
         clicked_identity = thumbnail.effective_source_identity();
-
-        // Left-click requests focus (dragging is right-click only).
-        if is_left_click {
-            if ctx.daemon_config.profile.client_minimize_on_switch
-                && let Err(e) = unminimize_window(ctx.app_ctx.conn, src)
-            {
-                debug!(
-                    window = src,
-                    error = ?e,
-                    "Failed to unminimize window before click activation"
-                );
-            }
-
-            activate_window(
-                ctx.app_ctx.conn,
-                ctx.app_ctx.screen,
-                ctx.app_ctx.atoms,
-                src,
-                event.time,
-            )
-            .context(format!(
-                "Failed to activate window for '{}'",
-                character_name
-            ))?;
-        }
 
         if event.detail == mouse::BUTTON_RIGHT {
             finished_single_drag = thumbnail.input_state.dragging;
@@ -432,66 +381,17 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         commit_thumbnail_positions(ctx, &[clicked_key]);
     }
 
-    // After dropping the thumbnail borrow, update cycle state and borders for left-clicks.
-    if is_left_click {
+    if is_left_click && let Some(target) = clicked_src {
         if clicked_identity.is_none() {
             clicked_identity = remembered_eve_identity(ctx, clicked_key);
         }
-        set_clicked_cycle_target(ctx, clicked_key, clicked_identity.as_ref());
-
-        sync_focused_borders(
-            ctx.eve_clients,
-            ctx.cycle_state,
-            ctx.display_config,
-            ctx.font_renderer,
-            clicked_key,
-            "thumbnail click",
+        super::super::activation::begin(
+            ctx,
+            target,
+            clicked_identity.as_ref(),
+            event.time,
+            super::super::activation::ActivationOrigin::Click,
         );
-
-        // Submit border updates; flush does not confirm rendering or focus.
-        let _ = ctx.app_ctx.conn.flush();
-    }
-
-    if is_left_click
-        && ctx.daemon_config.profile.client_minimize_on_switch
-        && let Some(clicked_src) = clicked_src
-    {
-        // Retain the same settling delay as hotkeys; it is not focus confirmation.
-        std::thread::sleep(std::time::Duration::from_millis(25));
-
-        // Select from every tracked source, including sources without a rendered preview.
-        let windows_to_minimize = super::source_windows_to_minimize(
-            ctx.cycle_state,
-            ctx.session_state,
-            ctx.display_config,
-            clicked_src,
-        );
-
-        for window in windows_to_minimize {
-            // Clear the border when a thumbnail exists; minimization does not require one.
-            if let Some(thumb) = ctx.eve_clients.get_mut(&window) {
-                // Don't change state here - let the minimize handler set it to Minimized
-                // Just clear the border for now
-                if let Err(e) = thumb.border(
-                    ctx.display_config,
-                    false,
-                    ctx.cycle_state
-                        .is_skipped(thumb.effective_source_identity().as_ref()),
-                    ctx.font_renderer,
-                ) {
-                    warn!(window = window, error = %e, "Failed to clear border before minimize");
-                }
-            }
-
-            if let Err(e) = minimize_window(
-                ctx.app_ctx.conn,
-                ctx.app_ctx.screen,
-                ctx.app_ctx.atoms,
-                window,
-            ) {
-                debug!(error = ?e, window = window, "Failed to minimize window");
-            }
-        }
     }
 
     Ok(())
