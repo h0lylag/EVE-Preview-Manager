@@ -11,7 +11,7 @@ use x11rb::protocol::damage::ConnectionExt as DamageExt;
 use x11rb::protocol::xproto::*;
 
 use crate::common::constants::eve;
-use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage};
+use crate::common::ipc::{BootstrapMessage, ConfigMessage, DaemonMessage, ThumbnailSpatialUpdate};
 use crate::common::types::SourceIdentity;
 use crate::config::DaemonConfig;
 use crate::config::profile::LoggedOutUnidentifiedCycleMode;
@@ -96,6 +96,102 @@ fn active_tracked_source_window(
 enum DaemonControlMessage {
     Config(ConfigMessage),
     ManagerDisconnected,
+}
+
+fn apply_thumbnail_moves(
+    resources: &mut DaemonResources<'_>,
+    display_config: &crate::config::DisplayConfig,
+    font_renderer: &font::FontRenderer,
+    updates: Vec<ThumbnailSpatialUpdate>,
+) {
+    for update in updates {
+        let thumbnail_opt = resources.eve_clients.values_mut().find(|thumbnail| {
+            thumbnail.effective_source_identity().as_ref() == Some(&update.source)
+        });
+
+        if let Some(thumbnail) = thumbnail_opt {
+            if thumbnail.current_position == update.position
+                && thumbnail.dimensions == update.dimensions
+            {
+                debug!(name = %update.source.name, "Thumbnail move ignored: position/size unchanged");
+                continue;
+            }
+
+            if let Err(error) = thumbnail.reposition(update.position.x, update.position.y) {
+                error!(name = %update.source.name, %error, "Failed to reposition thumbnail");
+            }
+            let resized = thumbnail.dimensions != update.dimensions;
+            if let Err(error) = thumbnail.resize(update.dimensions.width, update.dimensions.height)
+            {
+                error!(name = %update.source.name, %error, "Failed to resize thumbnail");
+            } else if resized {
+                // Resizing replaces the overlay pixmap and discards the window contents.
+                // Rebuild both now: idle sources may never send another damage notification.
+                let result = if thumbnail.state.is_minimized() {
+                    thumbnail.update(display_config, font_renderer)
+                } else {
+                    thumbnail.border(
+                        display_config,
+                        thumbnail.state.is_focused(),
+                        resources
+                            .cycle
+                            .is_skipped(thumbnail.effective_source_identity().as_ref()),
+                        font_renderer,
+                    )
+                };
+                if let Err(error) = result {
+                    error!(name = %update.source.name, %error, "Failed to redraw thumbnail after resize");
+                    // Preserve the content attempt even if rebuilding the overlay failed.
+                    if let Err(error) = thumbnail.update(display_config, font_renderer) {
+                        error!(name = %update.source.name, %error, "Failed to repaint thumbnail after resize");
+                    }
+                }
+            }
+            info!(
+                name = %update.source.name,
+                x = update.position.x,
+                y = update.position.y,
+                width = update.dimensions.width,
+                height = update.dimensions.height,
+                "Position updated by Manager"
+            );
+        } else {
+            debug!(name = %update.source.name, kind = ?update.source.kind, "Thumbnail move ignored: source not tracked");
+        }
+    }
+}
+
+fn initialize_thumbnail_borders(
+    eve_clients: &mut HashMap<Window, Thumbnail<'_>>,
+    cycle_state: &CycleState,
+    config: &crate::config::DisplayConfig,
+    font_renderer: &font::FontRenderer,
+) {
+    for (window, thumbnail) in eve_clients.iter_mut() {
+        // Check if this window currently has focus
+        let is_focused = false; // Observed focus is reconciled on entry to the event loop.
+
+        // Update state and draw appropriate border
+        if !thumbnail.state.is_minimized() {
+            thumbnail.state = crate::common::types::ThumbnailState::Normal {
+                focused: is_focused,
+            };
+        }
+        if let Err(e) = thumbnail.border(
+            config,
+            is_focused,
+            cycle_state.is_skipped(thumbnail.effective_source_identity().as_ref()),
+            font_renderer,
+        ) {
+            // Log warning but continue
+            tracing::warn!(
+                window = window,
+                character = %thumbnail.character_name,
+                error = %e,
+                "Failed to draw initial border"
+            );
+        }
+    }
 }
 
 fn initialize_x11() -> Result<(
@@ -583,46 +679,16 @@ async fn run_event_loop(
                     }) => {
                         debug!(update_count = updates.len(), "Received thumbnail move batch");
 
-                        for update in updates {
-                            let thumbnail_opt = resources.eve_clients.values_mut().find(|t| {
-                                t.effective_source_identity().as_ref() == Some(&update.source)
-                            });
-
-                            if let Some(thumb) = thumbnail_opt {
-                                if thumb.current_position == update.position
-                                    && thumb.dimensions == update.dimensions
-                                {
-                                    debug!(
-                                        name = %update.source.name,
-                                        "Thumbnail move ignored: position/size unchanged"
-                                    );
-                                    continue;
-                                }
-
-                                if let Err(e) = thumb.reposition(update.position.x, update.position.y) {
-                                    error!(name = %update.source.name, error = %e, "Failed to reposition thumbnail");
-                                }
-                                if let Err(e) = thumb.resize(update.dimensions.width, update.dimensions.height) {
-                                    error!(name = %update.source.name, error = %e, "Failed to resize thumbnail");
-                                }
-                                info!(
-                                    name = %update.source.name,
-                                    x = update.position.x,
-                                    y = update.position.y,
-                                    width = update.dimensions.width,
-                                    height = update.dimensions.height,
-                                    "Position updated by Manager"
-                                );
-                            } else {
-                                debug!(name = %update.source.name, kind = ?update.source.kind, "Thumbnail move ignored: source not tracked");
-                            }
-                        }
+                        apply_thumbnail_moves(&mut resources, &display_config, &font_renderer, updates);
                     }
                 }
             }
 
             // 3. Send Heartbeat (due once per interval; must not be starved by input)
             _ = heartbeat_interval.tick() => {
+                for thumbnail in resources.eve_clients.values_mut() {
+                    thumbnail.report_damage_metrics();
+                }
                 if let Err(e) = status_tx.send(DaemonMessage::Heartbeat) {
                     error!(error = %e, "Failed to send heartbeat to Manager");
                     // If we can't send heartbeat, manager might be dead.
@@ -853,31 +919,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         .context("Failed to get initial list of tracked source windows")?;
     }
 
-    // Initialize border state for all windows (defaults to inactive/cleared)
-    // This ensures inactive borders are drawn immediately on startup if enabled
-    for (window, thumbnail) in eve_clients.iter_mut() {
-        // Check if this window currently has focus
-        let is_focused = false; // Observed focus is reconciled on entry to the event loop.
-
-        // Update state and draw appropriate border
-        thumbnail.state = crate::common::types::ThumbnailState::Normal {
-            focused: is_focused,
-        };
-        if let Err(e) = thumbnail.border(
-            &config,
-            is_focused,
-            cycle_state.is_skipped(thumbnail.effective_source_identity().as_ref()),
-            &font_renderer,
-        ) {
-            // Log warning but continue
-            tracing::warn!(
-                window = window,
-                character = %thumbnail.character_name,
-                error = %e,
-                "Failed to draw initial border"
-            );
-        }
-    }
+    initialize_thumbnail_borders(&mut eve_clients, &cycle_state, &config, &font_renderer);
 
     // 8. Run Main Event Loop
     let resources = DaemonResources {
@@ -1320,6 +1362,337 @@ mod tests {
             .unwrap()
             .check()
             .unwrap();
+    }
+
+    fn preview_pixels(ctx: &AppContext<'_>, thumbnail: &Thumbnail<'_>) -> Vec<u32> {
+        let reply = ctx
+            .conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                thumbnail.window(),
+                0,
+                0,
+                thumbnail.dimensions.width,
+                thumbnail.dimensions.height,
+                u32::MAX,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(
+            reply.data.len(),
+            usize::from(thumbnail.dimensions.width) * usize::from(thumbnail.dimensions.height) * 4
+        );
+        reply
+            .data
+            .chunks_exact(4)
+            .map(|bytes| {
+                let bytes = bytes.try_into().unwrap();
+                let pixel = if ctx.conn.setup().image_byte_order == ImageOrder::LSB_FIRST {
+                    u32::from_le_bytes(bytes)
+                } else {
+                    u32::from_be_bytes(bytes)
+                };
+                pixel & 0xFFFFFF
+            })
+            .collect()
+    }
+
+    fn check_manager_resize(mode: PreviewMode, minimized: bool, hidden: bool) {
+        use crate::common::types::{Position, ThumbnailState};
+
+        with_x11(|ctx| {
+            // Real damage is subscribed, but no events are dispatched in this test.
+            ctx.conn
+                .damage_query_version(1, 1)
+                .unwrap()
+                .reply()
+                .unwrap();
+            with_daemon(ctx, |resources, font, _| {
+                resources.config.profile.thumbnail_enabled = true;
+                resources.config.profile.thumbnail_opacity = 100;
+                resources.config.profile.thumbnail_active_border = true;
+                resources.config.profile.thumbnail_active_border_size = 3;
+                resources.config.profile.thumbnail_active_border_color = "#00FF00".into();
+                resources.config.profile.thumbnail_inactive_border = false;
+                resources.config.profile.thumbnail_text_color = "#FFFFFF".into();
+                resources.config.profile.thumbnail_text_x = 10;
+                resources.config.profile.thumbnail_text_y = 10;
+                let display = resources.config.build_display_config();
+                let identity = SourceIdentity::eve("Alice");
+                let src = window(ctx, ctx.screen.root);
+                let gc = ctx.conn.generate_id().unwrap();
+                ctx.conn
+                    .create_gc(gc, src, &CreateGCAux::new().foreground(0x0000FF))
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                ctx.conn
+                    .poly_fill_rectangle(
+                        src,
+                        gc,
+                        &[Rectangle {
+                            x: 0,
+                            y: 0,
+                            width: 400,
+                            height: 300,
+                        }],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let position = Position::new(600, 0);
+                let mut thumbnail = Thumbnail::new(
+                    ctx,
+                    identity.kind,
+                    identity.name.clone(),
+                    None,
+                    src,
+                    &display,
+                    font,
+                    Some(position),
+                    Dimensions::new(160, 100),
+                    mode.clone(),
+                    false,
+                )
+                .unwrap();
+                thumbnail.state = if minimized {
+                    ThumbnailState::Minimized
+                } else {
+                    ThumbnailState::Normal { focused: true }
+                };
+                if !minimized {
+                    thumbnail.border(&display, true, true, font).unwrap();
+                }
+                thumbnail.update(&display, font).unwrap();
+                resources.cycle.add_window(Some(identity.clone()), src);
+                resources.cycle.toggle_skip(&identity);
+                resources.eve_clients.insert(src, thumbnail);
+
+                for (dimensions, focused) in [
+                    (Dimensions::new(240, 160), true),
+                    (Dimensions::new(120, 80), false),
+                ] {
+                    let thumbnail = resources.eve_clients.get_mut(&src).unwrap();
+                    if !minimized {
+                        thumbnail.state = ThumbnailState::Normal { focused };
+                    }
+                    if !focused {
+                        resources.cycle.toggle_skip(&identity);
+                    }
+                    if hidden {
+                        thumbnail
+                            .set_visibility_blocked(true, &display, font)
+                            .unwrap();
+                    }
+                    apply_thumbnail_moves(
+                        resources,
+                        &display,
+                        font,
+                        vec![ThumbnailSpatialUpdate::new(
+                            identity.clone(),
+                            position,
+                            dimensions,
+                        )],
+                    );
+                    let thumbnail = resources.eve_clients.get_mut(&src).unwrap();
+                    assert_eq!(thumbnail.dimensions, dimensions);
+                    assert_eq!(resources.cycle.is_skipped(Some(&identity)), focused);
+                    if hidden {
+                        assert!(!thumbnail.is_visible());
+                        thumbnail
+                            .set_visibility_blocked(false, &display, font)
+                            .unwrap();
+                    }
+                    let actual = preview_pixels(ctx, thumbnail);
+                    let w = usize::from(dimensions.width);
+                    let h = usize::from(dimensions.height);
+                    let base = if minimized {
+                        0
+                    } else if matches!(mode, PreviewMode::Live) {
+                        0x0000FF
+                    } else {
+                        0x00FFFF
+                    };
+                    assert_eq!(
+                        actual[(h / 4) * w + w / 2],
+                        base,
+                        "resize must repaint interior: {mode:?}, minimized={minimized}, hidden={hidden}, {dimensions:?}"
+                    );
+                    assert_eq!(
+                        actual[w + 1],
+                        if focused && !minimized {
+                            0x00FF00
+                        } else {
+                            base
+                        },
+                        "resize must restore current border"
+                    );
+                    assert_eq!(
+                        actual[(3 * h / 4) * w + 3 * w / 4],
+                        if focused && !minimized {
+                            0xFF0000
+                        } else {
+                            base
+                        },
+                        "resize must restore current skip indicator"
+                    );
+                    assert!(
+                        (10..30.min(h)).any(|y| {
+                            actual[y * w + 10..y * w + 80.min(w)].iter().any(|pixel| {
+                                pixel & 0xFF0000 != 0
+                                    && pixel & 0x00FF00 != 0
+                                    && pixel & 0x0000FF != 0
+                            })
+                        }),
+                        "resize must restore name text"
+                    );
+
+                    // Compare the complete output against an explicit repaint at the new size.
+                    if !minimized {
+                        thumbnail.border(&display, focused, focused, font).unwrap();
+                    }
+                    thumbnail.update(&display, font).unwrap();
+                    assert_eq!(actual, preview_pixels(ctx, thumbnail));
+                }
+
+                let before = preview_pixels(ctx, &resources.eve_clients[&src]);
+                let dimensions = resources.eve_clients[&src].dimensions;
+                apply_thumbnail_moves(
+                    resources,
+                    &display,
+                    font,
+                    vec![ThumbnailSpatialUpdate::new(
+                        identity.clone(),
+                        position,
+                        Dimensions::new(0, 80),
+                    )],
+                );
+                assert_eq!(resources.eve_clients[&src].dimensions, dimensions);
+                assert_eq!(preview_pixels(ctx, &resources.eve_clients[&src]), before);
+
+                // A move without resizing must not capture a newer source frame.
+                ctx.conn
+                    .change_gc(gc, &ChangeGCAux::new().foreground(0xFF0000))
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                ctx.conn
+                    .poly_fill_rectangle(
+                        src,
+                        gc,
+                        &[Rectangle {
+                            x: 0,
+                            y: 0,
+                            width: 400,
+                            height: 300,
+                        }],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                apply_thumbnail_moves(
+                    resources,
+                    &display,
+                    font,
+                    vec![ThumbnailSpatialUpdate::new(
+                        identity,
+                        Position::new(650, 0),
+                        dimensions,
+                    )],
+                );
+                assert_eq!(preview_pixels(ctx, &resources.eve_clients[&src]), before);
+                ctx.conn.free_gc(gc).unwrap().check().unwrap();
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn startup_preserves_detected_minimized_preview() {
+        with_x11(|ctx| {
+            use x11rb::protocol::damage::ConnectionExt as _;
+            ctx.conn
+                .damage_query_version(1, 1)
+                .unwrap()
+                .reply()
+                .unwrap();
+            with_daemon(ctx, |resources, font, _| {
+                resources.config.profile.thumbnail_enabled = true;
+                let display = resources.config.build_display_config();
+                let src = window(ctx, ctx.screen.root);
+                ctx.conn
+                    .change_property32(
+                        PropMode::REPLACE,
+                        src,
+                        ctx.atoms.net_wm_state,
+                        AtomEnum::ATOM,
+                        &[ctx.atoms.net_wm_state_hidden],
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let thumbnail = super::super::window_detection::check_and_create_window(
+                    ctx,
+                    &resources.config,
+                    &display,
+                    src,
+                    font,
+                    &mut resources.session,
+                    &resources.eve_clients,
+                    Some(super::super::window_detection::WindowIdentity::new_eve(
+                        "Alice".into(),
+                    )),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(thumbnail.state.is_minimized());
+                let before = preview_pixels(ctx, &thumbnail);
+                assert!(before.contains(&0));
+                assert!(
+                    before.iter().any(|&pixel| pixel != 0),
+                    "minimized overlay must be visible"
+                );
+                resources.eve_clients.insert(src, thumbnail);
+                initialize_thumbnail_borders(
+                    &mut resources.eve_clients,
+                    &resources.cycle,
+                    &display,
+                    font,
+                );
+                let thumbnail = &resources.eve_clients[&src];
+                assert!(thumbnail.state.is_minimized());
+                assert!(preview_pixels(ctx, thumbnail) == before);
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn manager_resize_repaints_idle_preview() {
+        check_manager_resize(PreviewMode::Live, false, false);
+        check_manager_resize(
+            PreviewMode::Static {
+                color: "#00FFFF".into(),
+            },
+            false,
+            false,
+        );
+        check_manager_resize(PreviewMode::Live, true, false);
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn manager_resize_hidden_preview_is_ready_on_reveal() {
+        check_manager_resize(PreviewMode::Live, false, true);
+        check_manager_resize(
+            PreviewMode::Static {
+                color: "#00FFFF".into(),
+            },
+            false,
+            true,
+        );
+        check_manager_resize(PreviewMode::Live, true, true);
     }
 
     fn toggle<'a>(

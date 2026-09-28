@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
@@ -71,67 +72,111 @@ pub fn handle_damage_notify(
     // some thumbnails might have per-source "Always Show" overrides.
     // Instead, we check the override status for the specific thumbnail below.
 
-    if let Some(source_window) = ctx
+    if let Some((&source_window, thumbnail)) = ctx
         .eve_clients
-        .iter()
+        .iter_mut()
         .find(|(_, thumbnail)| thumbnail.damage() == event.damage)
-        .map(|(source_window, _)| *source_window)
     {
-        let update_result = ctx
-            .eve_clients
-            .get_mut(&source_window)
-            .expect("damage lookup returned an existing thumbnail")
-            .update(ctx.display_config, ctx.font_renderer);
-
-        if let Err(error) = update_result {
-            if is_stale_x11_window_error(&error) {
-                let character = ctx
-                    .eve_clients
-                    .get(&source_window)
-                    .map(|thumbnail| thumbnail.effective_character_name().to_string())
-                    .unwrap_or_default();
-
-                debug!(
-                    damage = event.damage,
-                    source_window = source_window,
-                    character = %character,
-                    error = %error,
-                    "Ignoring damage event for destroyed source window"
-                );
-
-                remove_from_group_drag(ctx, source_window);
-                ctx.cycle_state.remove_window(source_window);
-                ctx.session_state.remove_window(source_window);
-                ctx.eve_clients.remove(&source_window);
-                return Ok(());
-            }
-
-            return Err(error).context(format!(
-                "Failed to update thumbnail for damage event (damage={})",
-                event.damage
-            ));
+        // NON_EMPTY only notifies after the region becomes empty again. Re-arm before
+        // updating, even if rendering is hidden or fails, and retain damage during capture.
+        // Draws before the server processes this subtract do not notify again. Content-
+        // dependent paths must capture afterwards on this same connection to include them.
+        let started = thumbnail.damage_metrics.as_ref().map(|_| Instant::now());
+        let update_result = (|| {
+            ctx.app_ctx
+                .conn
+                .damage_subtract(event.damage, 0u32, 0u32)
+                .with_context(|| {
+                    format!("Failed to subtract damage region (damage={})", event.damage)
+                })?;
+            thumbnail.update_for_damage(ctx.display_config)
+        })();
+        if let (Some(started), Some(metrics)) = (started, thumbnail.damage_metrics.as_mut()) {
+            metrics.record_damage(update_result.as_ref().ok().copied(), started.elapsed());
         }
 
-        ctx.app_ctx
-            .conn
-            .damage_subtract(event.damage, 0u32, 0u32)
-            .context(format!(
-                "Failed to subtract damage region (damage={})",
-                event.damage
-            ))?;
-        ctx.app_ctx
-            .conn
-            .flush()
-            .context("Failed to flush X11 connection after damage update")?;
+        return finish_thumbnail_update(ctx, source_window, update_result.map(|_| ()))
+            .with_context(|| {
+                format!(
+                    "Failed to update thumbnail for damage event (damage={})",
+                    event.damage
+                )
+            });
     }
     Ok(())
 }
 
-fn is_stale_x11_window_error(error: &anyhow::Error) -> bool {
+/// Repaint once at the end of an exposure sequence, and only for our preview windows.
+pub fn handle_expose(ctx: &mut EventContext, event: ExposeEvent) -> Result<()> {
+    if event.count != 0 {
+        return Ok(());
+    }
+    if let Some((&source_window, thumbnail)) = ctx
+        .eve_clients
+        .iter_mut()
+        .find(|(_, thumbnail)| thumbnail.window() == event.window)
+    {
+        let result = thumbnail.update_for_expose(ctx.display_config, ctx.font_renderer);
+        if let Some(metrics) = &mut thumbnail.damage_metrics {
+            metrics.record_expose(result.is_err());
+        }
+        return finish_thumbnail_update(ctx, source_window, result).with_context(|| {
+            format!(
+                "Failed to repaint exposed thumbnail (window={})",
+                event.window
+            )
+        });
+    }
+    Ok(())
+}
+
+fn finish_thumbnail_update(
+    ctx: &mut EventContext,
+    source_window: Window,
+    result: Result<()>,
+) -> Result<()> {
+    if let Err(error) = result {
+        if !is_stale_x11_window_error(&error, source_window) {
+            return Err(error);
+        }
+        debug!(source_window, error = %error, "Removing preview for destroyed source window");
+        remove_from_group_drag(ctx, source_window);
+        ctx.cycle_state.remove_window(source_window);
+        ctx.session_state.remove_window(source_window);
+        ctx.eve_clients.remove(&source_window);
+    }
+    Ok(())
+}
+
+/// Paint newly tracked previews and remove sources that disappeared during creation.
+pub(in crate::daemon) fn draw_initial_border(
+    ctx: &mut EventContext,
+    source_window: Window,
+) -> Result<()> {
+    let Some(thumbnail) = ctx.eve_clients.get(&source_window) else {
+        return Ok(());
+    };
+    let result = thumbnail.border(
+        ctx.display_config,
+        false,
+        ctx.cycle_state
+            .is_skipped(thumbnail.effective_source_identity().as_ref()),
+        ctx.font_renderer,
+    );
+    finish_thumbnail_update(ctx, source_window, result)
+}
+
+fn is_stale_x11_window_error(error: &anyhow::Error, source_window: Window) -> bool {
     error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<ReplyError>(),
-            Some(ReplyError::X11Error(x11_error)) if x11_error.error_kind == ErrorKind::Window
+            Some(ReplyError::X11Error(x11_error))
+                if x11_error.error_kind == ErrorKind::Window
+                    // The source may disappear between attributes and geometry replies.
+                    // Other drawable errors do not justify removing this source's tracking.
+                    || (x11_error.error_kind == ErrorKind::Drawable
+                        && x11_error.bad_value == source_window
+                        && x11_error.major_opcode == GET_GEOMETRY_REQUEST)
         )
     })
 }
@@ -172,7 +217,7 @@ pub fn process_detected_window(
         ctx.eve_clients,
         Some(identity.clone()),
     ) {
-        Ok(Some(mut thumbnail)) => {
+        Ok(Some(thumbnail)) => {
             let geom_result = ctx
                 .app_ctx
                 .conn
@@ -224,19 +269,9 @@ pub fn process_detected_window(
                             });
                         }
 
-                        // Force initial update for custom sources as they might not emit Damage events immediately
+                        // Ask custom apps to paint their first frame; the initial border
+                        // below paints the preview even when the source remains idle.
                         if identity.is_custom() {
-                            // 1. Attempt immediate capture
-                            if let Err(e) = thumbnail.update(ctx.display_config, ctx.font_renderer)
-                            {
-                                tracing::warn!(
-                                    "Failed to perform initial update for custom source {}: {}",
-                                    thumbnail.character_name,
-                                    e
-                                );
-                            }
-
-                            // 2. Send synthetic Expose event to force the application to repaint
                             // This fixes issues where apps wait for focus or interaction to paint their first frame
                             let src_geom = ctx
                                 .app_ctx
@@ -284,15 +319,7 @@ pub fn process_detected_window(
 
             ctx.eve_clients.insert(window, thumbnail);
 
-            if let Some(thumb) = ctx.eve_clients.get_mut(&window)
-                && let Err(error) = thumb.border(
-                    ctx.display_config,
-                    false,
-                    ctx.cycle_state
-                        .is_skipped(thumb.effective_source_identity().as_ref()),
-                    ctx.font_renderer,
-                )
-            {
+            if let Err(error) = draw_initial_border(ctx, window) {
                 tracing::warn!(window, %error, "Failed to draw initial border");
             }
         }
@@ -761,6 +788,8 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                     .set_character_name(
                         new_character_name.to_string(),
                         final_settings,
+                        ctx.cycle_state
+                            .is_skipped(Some(&SourceIdentity::eve(new_character_name))),
                         ctx.display_config,
                         ctx.font_renderer,
                     )
@@ -768,21 +797,16 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                         "Failed to update thumbnail after character change from '{}'",
                         old_name
                     ))?;
-
-                if !thumbnail.state.is_minimized() {
-                    thumbnail
-                        .border(
-                            ctx.display_config,
-                            thumbnail.state.is_focused(),
-                            ctx.cycle_state
-                                .is_skipped(thumbnail.effective_source_identity().as_ref()),
-                            ctx.font_renderer,
-                        )
-                        .context("Failed to restore border after character change")?;
-                }
             } else {
                 thumbnail
-                    .set_character_name(String::new(), None, ctx.display_config, ctx.font_renderer)
+                    .set_character_name(
+                        String::new(),
+                        None,
+                        ctx.cycle_state
+                            .is_skipped(thumbnail.effective_source_identity().as_ref()),
+                        ctx.display_config,
+                        ctx.font_renderer,
+                    )
                     .context(format!(
                         "Failed to clear thumbnail name after logout from '{}'",
                         old_name
@@ -833,6 +857,187 @@ pub fn handle_configure_notify(ctx: &mut EventContext, event: ConfigureNotifyEve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn stale_geometry_cleanup_preserves_other_tracking() {
+        use crate::common::types::PreviewMode;
+        use crate::config::{DaemonConfig, profile::Profile};
+        use crate::daemon::{
+            cycle_state::CycleState,
+            font::FontRenderer,
+            group_drag::{ChordButtons, GroupDragMember, GroupDragState},
+            session_state::SessionState,
+        };
+        use crate::x11::{AppContext, CachedAtoms, CachedFormats};
+
+        assert_eq!(std::env::var("EPM_X11_TESTS").as_deref(), Ok("1"));
+        for lost_anchor in [false, true] {
+            let (conn, screen_number) = x11rb::connect(None).unwrap();
+            conn.damage_query_version(1, 1).unwrap().reply().unwrap();
+            let screen = &conn.setup().roots[screen_number];
+            let atoms = CachedAtoms::new(&conn).unwrap();
+            let formats = CachedFormats::new(&conn, screen).unwrap();
+            let app_ctx = AppContext {
+                conn: &conn,
+                screen,
+                atoms: &atoms,
+                formats: &formats,
+            };
+            let font = FontRenderer::resolve_from_config(&conn, "sans-serif", 12.0).unwrap();
+            let mut config = DaemonConfig {
+                profile: Profile::default(),
+                character_thumbnails: HashMap::new(),
+                custom_source_thumbnails: HashMap::new(),
+                profile_hotkeys: HashMap::new(),
+                runtime_hidden: false,
+            };
+            let display = config.build_display_config();
+            let mut thumbnails = HashMap::new();
+            let mut cycle = CycleState::new(Vec::new());
+            let mut session = SessionState::new();
+            let mut members = Vec::new();
+            for (name, x) in [("Lost", 600), ("Survivor", 900)] {
+                let src = conn.generate_id().unwrap();
+                conn.create_window(
+                    screen.root_depth,
+                    src,
+                    screen.root,
+                    0,
+                    0,
+                    40,
+                    40,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    screen.root_visual,
+                    &CreateWindowAux::new(),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+                conn.map_window(src).unwrap().check().unwrap();
+                let identity = SourceIdentity::eve(name);
+                let start_position = Position::new(x, 0);
+                let mut thumbnail = Thumbnail::new(
+                    &app_ctx,
+                    identity.kind,
+                    identity.name.clone(),
+                    None,
+                    src,
+                    &display,
+                    &font,
+                    Some(start_position),
+                    Dimensions::new(100, 60),
+                    PreviewMode::Live,
+                    false,
+                )
+                .unwrap();
+                thumbnail.reposition(x, 50).unwrap();
+                thumbnails.insert(src, thumbnail);
+                cycle.add_window(Some(identity), src);
+                session.update_window_position(src, x, 50);
+                session.update_last_character(src, name);
+                members.push(GroupDragMember {
+                    source_window: src,
+                    start_position,
+                });
+            }
+            let source = members[0].source_window;
+            let survivor = members[1].source_window;
+            let survivor_start = members[1].start_position;
+            let survivor_moved = thumbnails[&survivor].current_position;
+            let anchor = if lost_anchor { source } else { survivor };
+            let mut drag = GroupDragState::Active {
+                anchor,
+                pointer_start: Position::new(0, 0),
+                members,
+            };
+            let (tx, _rx) = ipc_channel::ipc::channel().unwrap();
+            let mut ctx = EventContext {
+                app_ctx: &app_ctx,
+                daemon_config: &mut config,
+                eve_clients: &mut thumbnails,
+                session_state: &mut session,
+                cycle_state: &mut cycle,
+                group_drag_state: &mut drag,
+                status_tx: &tx,
+                font_renderer: &font,
+                display_config: &display,
+            };
+
+            // Reproduce the actual error shape, not the timing of the pipelined-query race.
+            conn.get_window_attributes(source).unwrap().reply().unwrap();
+            conn.destroy_window(source).unwrap().check().unwrap();
+            let unrelated = conn.generate_id().unwrap();
+            let unrelated_error = conn.get_geometry(unrelated).unwrap().reply().unwrap_err();
+            let other_request_error = conn
+                .get_image(ImageFormat::Z_PIXMAP, source, 0, 0, 1, 1, u32::MAX)
+                .unwrap()
+                .reply()
+                .unwrap_err();
+            for error in [unrelated_error, other_request_error] {
+                assert!(
+                    matches!(&error, ReplyError::X11Error(packet) if packet.error_kind == ErrorKind::Drawable)
+                );
+                assert!(finish_thumbnail_update(&mut ctx, source, Err(error.into())).is_err());
+                assert_eq!(ctx.eve_clients.len(), 2);
+                assert_eq!(ctx.cycle_state.get_active_windows().len(), 2);
+                assert_eq!(ctx.session_state.window_positions.len(), 2);
+                assert_eq!(ctx.session_state.window_last_character.len(), 2);
+                assert_eq!(ctx.group_drag_state.anchor(), Some(anchor));
+                assert!(
+                    matches!(ctx.group_drag_state, GroupDragState::Active { members, .. } if members.len() == 2)
+                );
+            }
+            let error = conn.get_geometry(source).unwrap().reply().unwrap_err();
+            assert!(matches!(&error, ReplyError::X11Error(packet)
+                if packet.error_kind == ErrorKind::Drawable
+                    && packet.bad_value == source && packet.major_opcode == GET_GEOMETRY_REQUEST));
+            finish_thumbnail_update(
+                &mut ctx,
+                source,
+                Err(anyhow::Error::new(error).context("source capture")),
+            )
+            .unwrap();
+            assert!(!ctx.eve_clients.contains_key(&source));
+            assert!(!ctx.cycle_state.get_active_windows().contains_key(&source));
+            assert!(!ctx.session_state.window_positions.contains_key(&source));
+            assert!(
+                !ctx.session_state
+                    .window_last_character
+                    .contains_key(&source)
+            );
+            assert!(ctx.eve_clients.contains_key(&survivor));
+            assert!(ctx.cycle_state.get_active_windows().contains_key(&survivor));
+            assert_eq!(
+                ctx.session_state.window_positions[&survivor],
+                survivor_moved
+            );
+            assert_eq!(
+                ctx.session_state.window_last_character[&survivor],
+                "Survivor"
+            );
+            if lost_anchor {
+                assert!(matches!(
+                    ctx.group_drag_state,
+                    GroupDragState::SuppressingRelease(ChordButtons::Both)
+                ));
+                assert_eq!(ctx.eve_clients[&survivor].current_position, survivor_start);
+                let geometry = conn
+                    .get_geometry(ctx.eve_clients[&survivor].window())
+                    .unwrap()
+                    .reply()
+                    .unwrap();
+                assert_eq!(Position::new(geometry.x, geometry.y), survivor_start);
+            } else {
+                assert!(
+                    matches!(ctx.group_drag_state, GroupDragState::Active { anchor, members, .. }
+                    if *anchor == survivor && members.len() == 1 && members[0].source_window == survivor)
+                );
+                assert_eq!(ctx.eve_clients[&survivor].current_position, survivor_moved);
+            }
+        }
+    }
 
     #[test]
     fn destroy_matcher_recognizes_tracked_source_without_thumbnail() {
