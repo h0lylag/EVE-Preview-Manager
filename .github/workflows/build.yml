@@ -66,14 +66,18 @@ jobs:
       - name: Run Tests
         run: cargo test --locked --all-features --verbose
 
-      - name: Get Version
-        id: version
+      - name: Get Artifact Name
+        id: artifact
         run: |
-          version="$(grep -m1 'version =' Cargo.toml | cut -d '"' -f2)"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -er '.packages[] | select(.name == "eve-preview-manager") | .version'
+          )"
+          artifact_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          echo "name=eve-preview-manager-v${version}-${artifact_os}-$(uname -m)" >> "$GITHUB_OUTPUT"
 
       - name: Upload Binary
         uses: actions/upload-artifact@v4
         with:
-          name: eve-preview-manager-v${{ steps.version.outputs.version }}
+          name: ${{ steps.artifact.outputs.name }}
           path: target/release/eve-preview-manager
