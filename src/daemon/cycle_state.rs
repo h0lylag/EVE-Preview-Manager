@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 use x11rb::protocol::xproto::Window;
 
-use crate::common::types::SourceIdentity;
+use crate::common::types::{SourceIdentity, SourceKind};
 
 /// State for a single cycle group
 #[derive(Debug, Clone)]
@@ -89,16 +89,42 @@ impl CycleState {
         }
     }
 
-    /// Register a source window (called from CreateNotify / initial scan).
+    /// Admit a source window, or update the live name of an admitted EVE client.
+    ///
+    /// Admission is final: a registered window keeps its kind, and a custom source keeps
+    /// its alias, until it is removed. Only an EVE client's character name may change.
     pub fn add_window(&mut self, identity: Option<SourceIdentity>, window: Window) {
-        debug!(identity = ?identity, window = window, "Adding window for source");
-        if !self.active_windows.contains_key(&window) {
+        if let Some(existing) = self.active_windows.get(&window) {
+            let keeps_admission = match (existing, &identity) {
+                (Some(existing), Some(identity)) if existing.kind.is_custom() => {
+                    existing == identity
+                }
+                (Some(existing), Some(identity)) => identity.kind == existing.kind,
+                (Some(existing), None) => existing.kind.is_eve(),
+                (None, Some(identity)) => identity.kind.is_eve(),
+                (None, None) => true,
+            };
+            if !keeps_admission {
+                warn!(existing = ?existing, rejected = ?identity, window, "Ignoring identity change for admitted source");
+                return;
+            }
+        } else {
             self.active_window_order.push(window);
         }
+        debug!(identity = ?identity, window = window, "Adding window for source");
         self.active_windows.insert(window, identity);
 
         // Cycle commands filter this superset against configured groups, remembered
         // logged-out identities, or unidentified login-screen candidates.
+    }
+
+    /// Kind fixed at admission, or None for an unregistered window.
+    pub(super) fn admitted_kind(&self, window: Window) -> Option<SourceKind> {
+        self.active_windows.get(&window).map(|identity| {
+            identity
+                .as_ref()
+                .map_or(SourceKind::Eve, |identity| identity.kind)
+        })
     }
 
     /// Remove window (called from DestroyNotify)
@@ -118,8 +144,16 @@ impl CycleState {
         }
     }
 
-    /// Update an EVE client's live character name (called on login/logout).
+    /// Update an admitted EVE client's live character name (called on login/logout).
+    /// Never admits a window and never applies to custom sources.
     pub fn update_character(&mut self, window: Window, new_name: String) {
+        if self.admitted_kind(window) != Some(SourceKind::Eve) {
+            debug!(
+                window,
+                "Ignoring character update for a window not admitted as EVE"
+            );
+            return;
+        }
         let identity = (!new_name.is_empty()).then(|| SourceIdentity::eve(new_name));
         self.add_window(identity, window);
     }
@@ -1202,5 +1236,53 @@ mod tests {
         state.remove_window(10);
         assert_eq!(state.eve_client_count(), 0);
         assert_eq!(state.get_active_windows().len(), 2);
+    }
+
+    #[test]
+    fn admission_fixes_kind_and_custom_alias() {
+        let mut state = CycleState::new(Vec::new());
+        state.add_window(Some(SourceIdentity::custom("YouTube")), 1);
+        state.add_window(None, 2);
+        state.add_window(Some(SourceIdentity::eve("Pilot")), 3);
+        let order = state.active_window_order.clone();
+
+        // Custom sources can change neither kind nor alias, directly or via character updates.
+        state.add_window(Some(SourceIdentity::eve("Impostor")), 1);
+        state.add_window(None, 1);
+        state.add_window(Some(SourceIdentity::custom("Discord")), 1);
+        state.update_character(1, "Impostor".into());
+        state.update_character(1, String::new());
+        // EVE clients, logged in or out, never become custom sources.
+        state.add_window(Some(SourceIdentity::custom("YouTube")), 2);
+        state.add_window(Some(SourceIdentity::custom("Pilot")), 3);
+        assert_eq!(state.admitted_kind(1), Some(SourceKind::Custom));
+        assert_eq!(state.admitted_kind(2), Some(SourceKind::Eve));
+        assert_eq!(state.admitted_kind(3), Some(SourceKind::Eve));
+        assert_eq!(
+            state.get_active_windows()[&1],
+            Some(SourceIdentity::custom("YouTube"))
+        );
+        assert_eq!(state.get_active_windows()[&2], None);
+        assert_eq!(state.eve_client_count(), 2);
+
+        // Login, swap and logout remain EVE name transitions.
+        state.update_character(2, "Alice".into());
+        state.add_window(Some(SourceIdentity::eve("Bob")), 3);
+        state.update_character(3, String::new());
+        assert_eq!(
+            state.get_active_windows()[&2],
+            Some(SourceIdentity::eve("Alice"))
+        );
+        assert_eq!(state.get_active_windows()[&3], None);
+        assert_eq!(state.active_window_order, order);
+
+        // Character updates never admit a window; removal ends the admission.
+        state.update_character(4, "Ghost".into());
+        assert_eq!(state.admitted_kind(4), None);
+        assert_eq!(state.eve_client_count(), 2);
+        assert_eq!(state.active_window_order, order);
+        state.remove_window(1);
+        state.add_window(Some(SourceIdentity::eve("Reused")), 1);
+        assert_eq!(state.admitted_kind(1), Some(SourceKind::Eve));
     }
 }

@@ -175,6 +175,16 @@ pub fn identify_window(
         return Ok(Some(WindowIdentity::new_eve(character_name)));
     }
 
+    match_custom_rule(ctx, window, custom_rules)
+}
+
+/// Match configured custom-source rules against the window's current title and class.
+/// Admitted custom sources use this directly, so an EVE-like title cannot reclassify them.
+pub(super) fn match_custom_rule(
+    ctx: &AppContext,
+    window: Window,
+    custom_rules: &[CustomWindowRule],
+) -> Result<Option<WindowIdentity>> {
     // Read title and class for custom-rule matching.
     let wm_name_cookie =
         ctx.conn
@@ -807,7 +817,10 @@ mod tests {
         session_state::SessionState,
     };
     use crate::{
-        common::ipc::DaemonMessage,
+        common::{
+            ipc::DaemonMessage,
+            types::{SourceIdentity, SourceKind},
+        },
         config::{DaemonConfig, profile::Profile},
         x11::{AppContext, CachedAtoms, CachedFormats},
     };
@@ -4386,6 +4399,181 @@ mod tests {
                     crate::common::types::SourceKind::Eve,
                     &visibility
                 ));
+            });
+        });
+    }
+
+    fn map_event(ctx: &AppContext<'_>, window: Window) -> Event {
+        Event::MapNotify(MapNotifyEvent {
+            response_type: MAP_NOTIFY_EVENT,
+            event: ctx.screen.root,
+            window,
+            ..Default::default()
+        })
+    }
+
+    /// Fail if the Manager was told about an EVE character, then drain the rest.
+    fn assert_no_eve_detected(rx: &IpcReceiver<DaemonMessage>) {
+        for _ in 0..32 {
+            match rx.try_recv() {
+                Ok(DaemonMessage::CharacterDetected { name, is_custom }) => {
+                    assert!(is_custom, "unexpected EVE character detection for {name}")
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => return,
+                Err(error) => panic!("unexpected IPC error: {error}"),
+            }
+        }
+        panic!("too many source registration messages");
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn eve_like_title_cannot_reclassify_custom_source() {
+        // "Pilot" also covers a custom alias shared with a real EVE character.
+        for alias in ["YouTube", "Pilot"] {
+            with_x11(|ctx| {
+                with_sources(ctx, |events, rx| {
+                    events.daemon_config.profile.custom_windows[0].alias = alias.into();
+                    let eve = window(ctx, "EVE - Pilot", "eve");
+                    let custom = window(ctx, "YouTube", "browser");
+                    handle_event(events, create_event(ctx, eve)).unwrap();
+                    handle_event(events, create_event(ctx, custom)).unwrap();
+                    drain_messages(rx);
+                    let pilot = events.daemon_config.character_thumbnails["Pilot"].clone();
+                    events
+                        .eve_clients
+                        .get_mut(&custom)
+                        .unwrap()
+                        .reposition(471, 251)
+                        .unwrap();
+
+                    set_title(ctx, custom, "EVE - Impostor");
+                    handle_event(events, property_event(custom, ctx.atoms.wm_name)).unwrap();
+                    handle_event(events, map_event(ctx, custom)).unwrap();
+
+                    assert_eq!(events.cycle_state.eve_client_count(), 1, "{alias}");
+                    assert_eq!(
+                        events.cycle_state.get_active_windows()[&custom],
+                        Some(SourceIdentity::custom(alias))
+                    );
+                    let preview = &events.eve_clients[&custom];
+                    assert_eq!(preview.source_kind(), SourceKind::Custom);
+                    assert_eq!(preview.character_name, alias);
+                    let saved = &events.daemon_config.character_thumbnails;
+                    assert!(!saved.contains_key("Impostor") && !saved.contains_key("YouTube"));
+                    assert_eq!((saved["Pilot"].x, saved["Pilot"].y), (pilot.x, pilot.y));
+                    assert!(
+                        !events
+                            .session_state
+                            .window_last_character
+                            .contains_key(&custom)
+                    );
+                    assert_no_eve_detected(rx);
+                });
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn custom_rule_title_cannot_reclassify_eve_client() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, _| {
+                let eve = window(ctx, "EVE - Pilot", "eve");
+                handle_event(events, create_event(ctx, eve)).unwrap();
+
+                set_title(ctx, eve, "YouTube");
+                handle_event(events, property_event(eve, ctx.atoms.wm_name)).unwrap();
+                ctx.conn.unmap_window(eve).unwrap().check().unwrap();
+                ctx.conn.map_window(eve).unwrap().check().unwrap();
+                handle_event(events, map_event(ctx, eve)).unwrap();
+
+                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_eq!(
+                    events.cycle_state.get_active_windows()[&eve],
+                    Some(SourceIdentity::eve("Pilot"))
+                );
+                let preview = &events.eve_clients[&eve];
+                assert_eq!(preview.source_kind(), SourceKind::Eve);
+                assert_eq!(preview.character_name, "Pilot");
+                let custom = &events.daemon_config.custom_source_thumbnails;
+                assert!(!custom.contains_key("Pilot") && !custom.contains_key("YouTube"));
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn map_applies_eve_rename_to_registry_and_preview() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, _| {
+                let eve = window(ctx, "EVE - Pilot", "eve");
+                handle_event(events, create_event(ctx, eve)).unwrap();
+
+                // The WM_NAME notification has not been handled when the source maps.
+                set_title(ctx, eve, "EVE - Other");
+                handle_event(events, map_event(ctx, eve)).unwrap();
+
+                let other = Some(SourceIdentity::eve("Other"));
+                assert_eq!(events.cycle_state.get_active_windows()[&eve], other);
+                assert_eq!(events.eve_clients[&eve].effective_source_identity(), other);
+                assert!(
+                    events
+                        .daemon_config
+                        .character_thumbnails
+                        .contains_key("Other")
+                );
+                assert_eq!(events.session_state.window_last_character[&eve], "Other");
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn unrendered_sources_keep_admitted_kind_but_eve_names_update() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, rx| {
+                let mut display = events.display_config.clone();
+                display.enabled = false;
+                let events = &mut EventContext {
+                    display_config: &display,
+                    app_ctx: events.app_ctx,
+                    daemon_config: &mut *events.daemon_config,
+                    eve_clients: &mut *events.eve_clients,
+                    session_state: &mut *events.session_state,
+                    cycle_state: &mut *events.cycle_state,
+                    group_drag_state: &mut *events.group_drag_state,
+                    status_tx: events.status_tx,
+                    font_renderer: events.font_renderer,
+                };
+                let eve = window(ctx, "EVE - Pilot", "eve");
+                let custom = window(ctx, "YouTube", "browser");
+                handle_event(events, create_event(ctx, eve)).unwrap();
+                handle_event(events, create_event(ctx, custom)).unwrap();
+                assert!(events.eve_clients.is_empty());
+                drain_messages(rx);
+
+                set_title(ctx, custom, "EVE - Impostor");
+                set_title(ctx, eve, "EVE - Other");
+                for source in [custom, eve] {
+                    handle_event(events, property_event(source, ctx.atoms.wm_name)).unwrap();
+                    handle_event(events, map_event(ctx, source)).unwrap();
+                }
+
+                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                let registry = events.cycle_state.get_active_windows();
+                assert_eq!(registry[&custom], Some(SourceIdentity::custom("YouTube")));
+                assert_eq!(registry[&eve], Some(SourceIdentity::eve("Other")));
+                let remembered = &events.session_state.window_last_character;
+                assert!(!remembered.contains_key(&custom));
+                assert_eq!(remembered[&eve], "Other");
+                assert!(
+                    !events
+                        .daemon_config
+                        .character_thumbnails
+                        .contains_key("Impostor")
+                );
             });
         });
     }
