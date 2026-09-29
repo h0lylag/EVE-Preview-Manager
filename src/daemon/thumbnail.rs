@@ -221,12 +221,12 @@ impl<'a> Thumbnail<'a> {
         self.source_kind
     }
 
-    /// Returns the remembered session identity synchronized from SessionState.
+    /// Returns the remembered session identity synchronized from the source registry.
     pub fn remembered_character_name(&self) -> Option<&str> {
         self.remembered_character_name.as_deref()
     }
 
-    /// Update the cached remembered identity from authoritative SessionState.
+    /// Update the cached remembered identity from the source registry.
     pub fn sync_remembered_character_name(&mut self, remembered_character_name: Option<String>) {
         self.remembered_character_name = remembered_character_name.filter(|name| !name.is_empty());
     }
@@ -559,19 +559,19 @@ impl<'a> Thumbnail<'a> {
         Ok(())
     }
 
-    /// Called when character name changes (e.g. login detection update).
+    /// Called when character name changes (e.g. login detection update). The remembered
+    /// name comes from the source registry; the preview never infers it.
     pub fn set_character_name(
         &mut self,
         new_name: String,
+        remembered_character_name: Option<String>,
         new_settings: Option<crate::common::types::CharacterSettings>,
         skipped: bool,
         display_config: &DisplayConfig,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.character_name = new_name;
-        if !self.character_name.is_empty() {
-            self.remembered_character_name = Some(self.character_name.clone());
-        }
+        self.sync_remembered_character_name(remembered_character_name);
 
         // Resizing regenerates the overlay pixmap, so rebuild the overlay afterwards.
 

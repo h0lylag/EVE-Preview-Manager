@@ -266,10 +266,9 @@ fn finish_group_drag(ctx: &mut EventContext<'_, '_>, released_button: u8) {
 }
 
 fn remembered_eve_identity(ctx: &EventContext<'_, '_>, window: Window) -> Option<SourceIdentity> {
-    ctx.session_state
-        .window_last_character
-        .get(&window)
-        .map(|name| SourceIdentity::eve(name.clone()))
+    ctx.sources
+        .remembered_character(window)
+        .map(SourceIdentity::eve)
 }
 
 /// Capture a preview click or start a single/group drag.

@@ -2,7 +2,6 @@ pub(super) mod input;
 pub(super) mod state;
 pub(super) mod window;
 
-use super::session_state::SessionState;
 use super::source_registry::SourceRegistry;
 use crate::common::types::CharacterSettings;
 use crate::config::DisplayConfig;
@@ -14,7 +13,6 @@ use x11rb::protocol::xproto::Window;
 /// for optional border cleanup.
 pub(super) fn source_windows_to_minimize(
     sources: &SourceRegistry,
-    session_state: &SessionState,
     display_config: &DisplayConfig,
     activated_window: Window,
 ) -> Vec<Window> {
@@ -27,7 +25,7 @@ pub(super) fn source_windows_to_minimize(
 
             // Live identity first; logged-out EVE clients use their remembered character.
             let settings = sources
-                .identity(source_window, Some(&session_state.window_last_character))
+                .effective_identity(source_window)
                 .and_then(|identity| display_config.settings_for(identity.kind, &identity.name));
 
             !settings.is_some_and(|settings| settings.exempt_from_minimize)
@@ -93,11 +91,10 @@ mod tests {
         sources.register(2, TrackedSource::eve("Other"));
 
         let display_config = test_display_config();
-        let session_state = SessionState::new();
         assert!(!display_config.enabled);
 
         assert_eq!(
-            source_windows_to_minimize(&sources, &session_state, &display_config, 1),
+            source_windows_to_minimize(&sources, &display_config, 1),
             vec![2]
         );
     }
@@ -116,10 +113,9 @@ mod tests {
         display_config
             .custom_source_settings
             .insert("Shared".to_string(), exempt_settings());
-        let session_state = SessionState::new();
 
         assert_eq!(
-            source_windows_to_minimize(&sources, &session_state, &display_config, 1),
+            source_windows_to_minimize(&sources, &display_config, 1),
             vec![2]
         );
     }
@@ -128,13 +124,8 @@ mod tests {
     fn minimization_uses_remembered_identity_but_keeps_unidentified_windows() {
         let mut sources = SourceRegistry::default();
         sources.register(1, TrackedSource::eve("Active"));
-        sources.register(2, TrackedSource::eve(""));
+        sources.register(2, TrackedSource::logged_out_after("Remembered"));
         sources.register(3, TrackedSource::eve(""));
-
-        let mut session_state = SessionState::new();
-        session_state
-            .window_last_character
-            .insert(2, "Remembered".to_string());
 
         let mut display_config = test_display_config();
         display_config
@@ -142,7 +133,7 @@ mod tests {
             .insert("Remembered".to_string(), exempt_settings());
 
         assert_eq!(
-            source_windows_to_minimize(&sources, &session_state, &display_config, 1),
+            source_windows_to_minimize(&sources, &display_config, 1),
             vec![3]
         );
     }

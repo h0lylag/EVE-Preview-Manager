@@ -223,12 +223,8 @@ fn minimize_after_confirmation(ctx: &mut EventContext<'_, '_>, pending: &Pending
     if !pending.minimize {
         return;
     }
-    let mut windows = handlers::source_windows_to_minimize(
-        ctx.sources,
-        ctx.session_state,
-        ctx.display_config,
-        pending.target,
-    );
+    let mut windows =
+        handlers::source_windows_to_minimize(ctx.sources, ctx.display_config, pending.target);
     if pending.kind == ActivationOrigin::Hotkey
         && let Some(manager) =
             crate::x11::get_client_list(ctx.app_ctx.conn, ctx.app_ctx.screen, ctx.app_ctx.atoms)
@@ -381,10 +377,8 @@ pub(super) fn reconcile(ctx: &mut EventContext<'_, '_>, now: Instant) {
         match observation.owner {
             FocusOwner::Source(source) | FocusOwner::Frame(source) => {
                 let remembered = ctx
-                    .session_state
-                    .window_last_character
-                    .get(&source)
-                    .cloned()
+                    .sources
+                    .remembered_character(source)
                     .map(SourceIdentity::eve);
                 ctx.cycle_state.set_current_by_window_with_identity(
                     ctx.sources,
@@ -1263,12 +1257,10 @@ mod display_tests {
             let remembered = window(ctx.app_ctx, ctx.app_ctx.screen.root);
             let no_preview = window(ctx.app_ctx, ctx.app_ctx.screen.root);
             ctx.sources.register(custom, TrackedSource::custom("Alice"));
-            ctx.sources.register(remembered, TrackedSource::eve(""));
+            ctx.sources
+                .register(remembered, TrackedSource::logged_out_after("Remembered"));
             ctx.sources
                 .register(no_preview, TrackedSource::eve("NoPreview"));
-            ctx.session_state
-                .window_last_character
-                .insert(remembered, "Remembered".into());
             let mut display = ctx.display_config.clone();
             let mut exempt = crate::common::types::CharacterSettings::new(0, 0, 160, 100);
             exempt.exempt_from_minimize = true;

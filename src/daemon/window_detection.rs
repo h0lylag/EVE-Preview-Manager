@@ -115,11 +115,11 @@ fn should_ignore_source_window(ctx: &AppContext, window: Window) -> Result<bool>
         .is_some_and(|class| class.eq_ignore_ascii_case("eve-preview-thumbnail")))
 }
 
-/// Identify a window as either an EVE client or a Custom Source
+/// Identify a window as either an EVE client or a Custom Source.
+/// Classification only: registration records the identity once the window is admitted.
 pub fn identify_window(
     ctx: &AppContext,
     window: Window,
-    state: &mut SessionState,
     custom_rules: &[CustomWindowRule],
 ) -> Result<Option<WindowIdentity>> {
     if should_ignore_source_window(ctx, window)? {
@@ -159,14 +159,13 @@ pub fn identify_window(
 
     if let Some(eve_window) = is_window_eve(ctx.conn, window, ctx.atoms)? {
         // A different client can finish setting ownership metadata while we read
-        // the title. Recheck before updating session state or returning an identity.
+        // the title. Recheck before returning an identity.
         if should_ignore_source_window(ctx, window)? {
             return Ok(None);
         }
 
         let character_name = eve_window.character_name().to_string();
         debug!(window, character = %character_name, "Confirmed EVE Client");
-        state.update_last_character(window, &character_name);
 
         ctx.conn.change_window_attributes(
             window,
@@ -323,21 +322,11 @@ pub fn check_and_create_window<'a>(
     window: Window,
     font_renderer: &crate::daemon::font::FontRenderer,
     state: &mut SessionState,
-    existing_thumbnails: &HashMap<Window, Thumbnail>,
-    known_identity: Option<WindowIdentity>,
     // Callers register the candidate first; it counts even if no thumbnail is created.
-    eve_client_count: usize,
+    sources: &SourceRegistry,
+    existing_thumbnails: &HashMap<Window, Thumbnail>,
+    identity: WindowIdentity,
 ) -> Result<Option<Thumbnail<'a>>> {
-    // Check if window matches EVE or Custom Rule
-    let identity = if let Some(id) = known_identity {
-        id
-    } else {
-        match identify_window(ctx, window, state, &daemon_config.profile.custom_windows)? {
-            Some(id) => id,
-            None => return Ok(None),
-        }
-    };
-
     // Apply Limit Logic for Custom Sources
     if identity.is_custom() {
         // FILTER 1: Must be mapped and viewable OR minimized
@@ -451,11 +440,7 @@ pub fn check_and_create_window<'a>(
     // process_detected_window for Create, Map, and identity-change events.
     // This function is strictly for determining if we should create a renderable thumbnail.
 
-    let remembered_character_name = if identity.is_eve() {
-        state.window_last_character.get(&window).cloned()
-    } else {
-        None
-    };
+    let remembered_character_name = sources.remembered_character(window).map(str::to_string);
     let character_name = identity.name.clone();
     let effective_character_name = if character_name.is_empty() {
         remembered_character_name.as_deref().unwrap_or("")
@@ -556,7 +541,12 @@ pub fn check_and_create_window<'a>(
     if display_config.hide_active {
         state.preview_visibility.mark_unconfirmed(window);
     }
-    let visibility = VisibilityContext::new(display_config, daemon_config, state, eve_client_count);
+    let visibility = VisibilityContext::new(
+        display_config,
+        daemon_config,
+        state,
+        sources.eve_client_count(),
+    );
     let blocked = state
         .preview_visibility
         .blocked(window, identity.kind, &visibility);
@@ -626,7 +616,7 @@ pub fn scan_eve_windows<'a>(
     for w in windows {
         // 1. Identify valid windows (EVE or Custom Source)
         // We use identify_window directly so we can track them even if no thumbnail is created
-        let identity = match identify_window(ctx, w, state, &daemon_config.profile.custom_windows) {
+        let identity = match identify_window(ctx, w, &daemon_config.profile.custom_windows) {
             Ok(Some(id)) => id,
             Ok(None) => continue, // Not a relevant window
             Err(e) => {
@@ -642,7 +632,6 @@ pub fn scan_eve_windows<'a>(
 
     // The whole initial population is registered before any preview can map, so the
     // first preview already knows whether it is the only EVE client.
-    let eve_client_count = sources.eve_client_count();
     for (w, identity) in detected_windows {
         // 2. Try to create thumbnail
         match check_and_create_window(
@@ -652,9 +641,9 @@ pub fn scan_eve_windows<'a>(
             w,
             font_renderer,
             state,
+            sources,
             &eve_clients,
-            Some(identity.clone()),
-            eve_client_count,
+            identity.clone(),
         ) {
             Ok(Some(eve)) => {
                 // Save initial position and dimensions (important for first-time characters)
@@ -891,7 +880,7 @@ mod tests {
             ]))
             .unwrap();
             assert!(
-                super::identify_window(ctx, helper, &mut SessionState::new(), &rules)
+                super::identify_window(ctx, helper, &rules)
                     .unwrap()
                     .is_none()
             );
@@ -1325,7 +1314,8 @@ mod tests {
         with_damage_source(false, |events, drawer, src, gc| {
             let damage = events.eve_clients[&src].damage();
             events.session_state.update_window_position(src, 1, 2);
-            events.session_state.update_last_character(src, "YouTube");
+            // Custom sources never carry EVE history; EVE cleanup is covered elsewhere.
+            assert_eq!(events.sources.remembered_character(src), None);
             draw_damage(drawer, src, gc, &[0x0000FF]);
             let mut pending = take_damage(events.app_ctx, damage);
             assert_eq!(pending.len(), 1);
@@ -1340,12 +1330,7 @@ mod tests {
             assert!(!events.eve_clients.contains_key(&src));
             assert!(!events.sources.contains(src));
             assert!(!events.session_state.window_positions.contains_key(&src));
-            assert!(
-                !events
-                    .session_state
-                    .window_last_character
-                    .contains_key(&src)
-            );
+            assert_eq!(events.sources.remembered_character(src), None);
             events
                 .app_ctx
                 .conn
@@ -1526,6 +1511,8 @@ mod tests {
                 .unwrap();
             with_sources(ctx, |events, _| {
                 let src = window(ctx, "EVE - Alice", "eve");
+                let identity = super::WindowIdentity::new_eve("Alice".into());
+                events.sources.register(src, identity.tracked_source());
                 let thumbnail = super::check_and_create_window(
                     events.app_ctx,
                     events.daemon_config,
@@ -1533,27 +1520,21 @@ mod tests {
                     src,
                     events.font_renderer,
                     events.session_state,
+                    events.sources,
                     events.eve_clients,
-                    None,
-                    1,
+                    identity,
                 )
                 .unwrap()
                 .unwrap();
-                events.sources.register(src, TrackedSource::eve("Alice"));
+                assert_eq!(events.sources.remembered_character(src), Some("Alice"));
                 events.session_state.update_window_position(src, 1, 2);
-                events.session_state.update_last_character(src, "Alice");
                 events.eve_clients.insert(src, thumbnail);
                 ctx.conn.destroy_window(src).unwrap().check().unwrap();
                 crate::daemon::handlers::window::draw_initial_border(events, src).unwrap();
                 assert!(!events.eve_clients.contains_key(&src));
                 assert!(!events.sources.contains(src));
                 assert!(!events.session_state.window_positions.contains_key(&src));
-                assert!(
-                    !events
-                        .session_state
-                        .window_last_character
-                        .contains_key(&src)
-                );
+                assert_eq!(events.sources.remembered_character(src), None);
                 ctx.conn.get_input_focus().unwrap().reply().unwrap();
                 while let Some(event) = ctx.conn.poll_for_event().unwrap() {
                     if let Event::Error(error) = event {
@@ -1899,11 +1880,14 @@ mod tests {
                 .reply()
                 .unwrap();
             with_sources(ctx, |events, _| {
-                let src = window(ctx, "YouTube", "browser");
+                let src = window(ctx, "EVE - Pilot", "eve");
                 handle_event(events, create_event(ctx, src)).unwrap();
+                // Log out so the source holds history rather than only a live name.
+                set_title(ctx, src, "EVE");
+                handle_event(events, property_event(src, ctx.atoms.wm_name)).unwrap();
+                assert_eq!(events.sources.remembered_character(src), Some("Pilot"));
                 let preview = events.eve_clients[&src].window();
                 events.session_state.update_window_position(src, 1, 2);
-                events.session_state.update_last_character(src, "YouTube");
                 // Destroy before consuming the preview's original map Expose.
                 ctx.conn.destroy_window(src).unwrap().check().unwrap();
                 let exposes = take_exposes(ctx, preview);
@@ -1914,12 +1898,7 @@ mod tests {
                 assert!(!events.eve_clients.contains_key(&src));
                 assert!(!events.sources.contains(src));
                 assert!(!events.session_state.window_positions.contains_key(&src));
-                assert!(
-                    !events
-                        .session_state
-                        .window_last_character
-                        .contains_key(&src)
-                );
+                assert_eq!(events.sources.remembered_character(src), None);
                 ctx.conn.get_input_focus().unwrap().reply().unwrap();
                 while let Some(event) = ctx.conn.poll_for_event().unwrap() {
                     if let Event::Error(error) = event {
@@ -1949,7 +1928,6 @@ mod tests {
                 let config_before = serde_json::to_value(&*events.daemon_config).unwrap();
                 let sources_before = events.sources.clone();
                 let positions_before = events.session_state.window_positions.clone();
-                let characters_before = events.session_state.window_last_character.clone();
                 drain_messages(rx);
 
                 // Fail on the first extra preview, rather than allowing runaway allocation.
@@ -1962,10 +1940,6 @@ mod tests {
                 }
                 assert_eq!(*events.sources, sources_before);
                 assert_eq!(events.session_state.window_positions, positions_before);
-                assert_eq!(
-                    events.session_state.window_last_character,
-                    characters_before
-                );
                 assert_eq!(
                     serde_json::to_value(&*events.daemon_config).unwrap(),
                     config_before
@@ -4385,9 +4359,9 @@ mod tests {
                     source,
                     events.font_renderer,
                     events.session_state,
+                    events.sources,
                     events.eve_clients,
-                    Some(identity),
-                    1,
+                    identity,
                 );
                 assert!(result.is_err());
                 let visibility = super::VisibilityContext::new(
@@ -4468,12 +4442,7 @@ mod tests {
                     let saved = &events.daemon_config.character_thumbnails;
                     assert!(!saved.contains_key("Impostor") && !saved.contains_key("YouTube"));
                     assert_eq!((saved["Pilot"].x, saved["Pilot"].y), (pilot.x, pilot.y));
-                    assert!(
-                        !events
-                            .session_state
-                            .window_last_character
-                            .contains_key(&custom)
-                    );
+                    assert_eq!(events.sources.remembered_character(custom), None);
                     assert_no_eve_detected(rx);
                 });
             });
@@ -4538,7 +4507,7 @@ mod tests {
                         .character_thumbnails
                         .contains_key("Other")
                 );
-                assert_eq!(events.session_state.window_last_character[&eve], "Other");
+                assert_eq!(events.sources.remembered_character(eve), Some("Other"));
             });
         });
     }
@@ -4583,9 +4552,8 @@ mod tests {
                     Some(&TrackedSource::custom("YouTube"))
                 );
                 assert_eq!(registry.get(eve), Some(&TrackedSource::eve("Other")));
-                let remembered = &events.session_state.window_last_character;
-                assert!(!remembered.contains_key(&custom));
-                assert_eq!(remembered[&eve], "Other");
+                assert_eq!(registry.remembered_character(custom), None);
+                assert_eq!(registry.remembered_character(eve), Some("Other"));
                 assert!(
                     !events
                         .daemon_config
@@ -4594,5 +4562,71 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// Accept a source rename that the preview cannot follow: its window is gone, so the
+    /// geometry query fails after the registry has recorded the observation.
+    fn fail_preview_rename(
+        ctx: &AppContext<'_>,
+        events: &mut EventContext<'_, '_>,
+        source: Window,
+        title: &str,
+    ) {
+        let preview = events.eve_clients[&source].window();
+        ctx.conn.destroy_window(preview).unwrap().check().unwrap();
+        set_title(ctx, source, title);
+        assert!(handle_event(events, property_event(source, ctx.atoms.wm_name)).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn failed_preview_rename_leaves_registry_on_the_source_observation() {
+        // Follow-ups: back to the preview's name, a non-EVE title then remap, and logout.
+        for follow_up in ["EVE - Alice", "Not EVE", "EVE"] {
+            with_x11(|ctx| {
+                with_sources(ctx, |events, _| {
+                    let eve = window(ctx, "EVE - Alice", "eve");
+                    handle_event(events, create_event(ctx, eve)).unwrap();
+
+                    fail_preview_rename(ctx, events, eve, "EVE - Bob");
+                    assert_eq!(events.sources.get(eve), Some(&TrackedSource::eve("Bob")));
+                    assert_eq!(events.eve_clients[&eve].character_name, "Alice");
+                    assert_eq!(
+                        events.eve_clients[&eve].remembered_character_name(),
+                        Some("Bob")
+                    );
+
+                    set_title(ctx, eve, follow_up);
+                    let observed = handle_event(events, property_event(eve, ctx.atoms.wm_name));
+                    let expected = match follow_up {
+                        // The preview already shows Alice: record it without touching input.
+                        "EVE - Alice" => {
+                            observed.unwrap();
+                            TrackedSource::eve("Alice")
+                        }
+                        // No EVE observation: refreshing from the lagging preview must not
+                        // roll the registry back. The gone preview may fail to refresh.
+                        "Not EVE" => {
+                            observed.unwrap();
+                            let _ = handle_event(events, map_event(ctx, eve));
+                            TrackedSource::eve("Bob")
+                        }
+                        // Logout remembers the last observed character, not the preview's.
+                        _ => {
+                            assert!(observed.is_err());
+                            TrackedSource::logged_out_after("Bob")
+                        }
+                    };
+                    assert_eq!(events.sources.get(eve), Some(&expected), "{follow_up}");
+                    if follow_up == "EVE" {
+                        // The logged-out preview's skip state uses this identity.
+                        assert_eq!(
+                            events.sources.effective_identity(eve),
+                            Some(SourceIdentity::eve("Bob"))
+                        );
+                    }
+                });
+            });
+        }
     }
 }

@@ -19,11 +19,6 @@ pub struct SessionState {
     /// Window IDs are ephemeral and don't survive X11 server restarts
     pub window_positions: HashMap<Window, Position>,
 
-    /// Window ID → last known character name (session-only)
-    /// Tracks which character was last logged in on each window
-    /// Used for including logged-out windows in cycle (if enabled in profile)
-    pub window_last_character: HashMap<Window, String>,
-
     /// Focus-loss hiding remains active until source focus is confirmed, even with no previews.
     pub focus_hidden: bool,
 
@@ -81,15 +76,8 @@ impl SessionState {
     /// Update session position (window tracking)
     pub fn update_window_position(&mut self, window: Window, x: i16, y: i16) {
         self.window_positions.insert(window, Position::new(x, y));
-        let character_name = self
-            .window_last_character
-            .get(&window)
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
-
         info!(
             window = window,
-            character = %character_name,
             x = x,
             y = y,
             "Saved session position for window"
@@ -99,25 +87,9 @@ impl SessionState {
     /// Remove a destroyed or stale source from session tracking.
     pub fn remove_window(&mut self, window: Window) {
         self.window_positions.remove(&window);
-        self.window_last_character.remove(&window);
         self.preview_visibility.source_removed(window);
         if self.pressed_preview_source == Some(window) {
             self.pressed_preview_source = None;
-        }
-    }
-
-    /// Update last known character for a window (called on character name change)
-    /// Only tracks non-empty character names (ignores logged-out state)
-    pub fn update_last_character(&mut self, window: Window, character_name: &str) {
-        if !character_name.is_empty() {
-            if let Some(existing) = self.window_last_character.get(&window)
-                && existing == character_name
-            {
-                return;
-            }
-            self.window_last_character
-                .insert(window, character_name.to_string());
-            info!(window = window, character = %character_name, "Tracked last known character for window");
         }
     }
 }
@@ -143,7 +115,6 @@ mod tests {
     fn test_get_position_new_character_no_inherit() {
         let state = SessionState {
             window_positions: HashMap::from([(456, Position::new(300, 400))]),
-            window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
             ..SessionState::default()
@@ -159,7 +130,6 @@ mod tests {
     fn test_get_position_new_character_with_inherit() {
         let state = SessionState {
             window_positions: HashMap::from([(789, Position::new(500, 600))]),
-            window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
             ..SessionState::default()
@@ -175,7 +145,6 @@ mod tests {
     fn test_get_position_new_character_inherit_but_no_window_position() {
         let state = SessionState {
             window_positions: HashMap::new(),
-            window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
             ..SessionState::default()
@@ -191,7 +160,6 @@ mod tests {
     fn test_get_position_logged_out_window() {
         let state = SessionState {
             window_positions: HashMap::from([(111, Position::new(700, 800))]),
-            window_last_character: HashMap::new(),
             focus_loss_deadline: None,
             focus_hidden: false,
             ..SessionState::default()
@@ -298,20 +266,6 @@ mod tests {
         assert_eq!(
             state.window_positions.get(&999),
             Some(&Position::new(100, 200))
-        );
-    }
-
-    #[test]
-    fn test_update_last_character_refreshes_non_empty_swaps() {
-        let mut state = SessionState::new();
-
-        state.update_last_character(123, "A");
-        state.update_last_character(123, "B");
-        state.update_last_character(123, "");
-
-        assert_eq!(
-            state.window_last_character.get(&123).map(String::as_str),
-            Some("B")
         );
     }
 }

@@ -1,9 +1,11 @@
 //! Live source windows and what each was admitted as
 //!
 //! The registry is the single owner of which windows are tracked, their discovery order,
-//! and the admission invariants: a registered window keeps its kind, and a custom source
-//! its alias, until it is removed. Only an EVE client's character name changes. Cycling,
-//! focus, visibility, and minimization read it; none of them own it.
+//! the admission invariants, and each EVE client's session history. A registered window
+//! keeps its kind, and a custom source its alias, until it is removed. Only an EVE
+//! client's session changes, and it records the last accepted title observation even if
+//! the preview fails to follow. Cycling, focus, visibility, minimization, and previews
+//! read it; none of them own it.
 
 use std::collections::HashMap;
 use tracing::{debug, warn};
@@ -11,22 +13,67 @@ use x11rb::protocol::xproto::Window;
 
 use crate::common::types::{SourceIdentity, SourceKind};
 
+/// An EVE client's session, as last observed from its window title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EveSession {
+    LoggedIn(String),
+    /// On the login screen; `last` is the character it was last logged in as, if any.
+    LoggedOut {
+        last: Option<String>,
+    },
+}
+
+impl EveSession {
+    fn new(character: String) -> Self {
+        if character.is_empty() {
+            Self::LoggedOut { last: None }
+        } else {
+            Self::LoggedIn(character)
+        }
+    }
+
+    /// Apply an accepted title observation: a character logs in or swaps; the login
+    /// screen logs out and keeps the previous character as history.
+    fn observe(&mut self, character: String) {
+        if !character.is_empty() {
+            *self = Self::LoggedIn(character);
+        } else if let Self::LoggedIn(previous) = self {
+            *self = Self::LoggedOut {
+                last: Some(std::mem::take(previous)),
+            };
+        }
+    }
+
+    fn live(&self) -> Option<&str> {
+        match self {
+            Self::LoggedIn(character) => Some(character),
+            Self::LoggedOut { .. } => None,
+        }
+    }
+
+    /// The live character, or the last one while logged out.
+    fn remembered(&self) -> Option<&str> {
+        match self {
+            Self::LoggedIn(character) => Some(character),
+            Self::LoggedOut { last } => last.as_deref(),
+        }
+    }
+}
+
 /// What a registered window was admitted as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackedSource {
-    /// An EVE client; `character` is None while it shows the login screen.
-    Eve { character: Option<String> },
+    Eve(EveSession),
     /// A configured custom source, named by its rule alias (which may be empty).
-    Custom { alias: String },
+    Custom {
+        alias: String,
+    },
 }
 
 impl TrackedSource {
-    /// An EVE client, logged out when `character` is empty.
+    /// An EVE client, logged out with no history when `character` is empty.
     pub fn eve(character: impl Into<String>) -> Self {
-        let character = character.into();
-        Self::Eve {
-            character: (!character.is_empty()).then_some(character),
-        }
+        Self::Eve(EveSession::new(character.into()))
     }
 
     pub fn custom(alias: impl Into<String>) -> Self {
@@ -37,7 +84,7 @@ impl TrackedSource {
 
     pub fn kind(&self) -> SourceKind {
         match self {
-            Self::Eve { .. } => SourceKind::Eve,
+            Self::Eve(_) => SourceKind::Eve,
             Self::Custom { .. } => SourceKind::Custom,
         }
     }
@@ -45,23 +92,29 @@ impl TrackedSource {
     /// The identity the window shows right now; None for a logged-out EVE client.
     pub fn live_identity(&self) -> Option<SourceIdentity> {
         match self {
-            Self::Eve { character } => character.clone().map(SourceIdentity::eve),
+            Self::Eve(session) => session.live().map(SourceIdentity::eve),
             Self::Custom { alias } => Some(SourceIdentity::custom(alias.clone())),
         }
-    }
-
-    fn is_logged_out(&self) -> bool {
-        matches!(self, Self::Eve { character: None })
     }
 
     /// Whether the window currently shows `identity`, compared without allocating.
     fn shows(&self, identity: &SourceIdentity) -> bool {
         match self {
-            Self::Eve { character } => {
-                identity.kind.is_eve() && character.as_deref() == Some(identity.name.as_str())
+            Self::Eve(session) => {
+                identity.kind.is_eve() && session.live() == Some(identity.name.as_str())
             }
             Self::Custom { alias } => identity.kind.is_custom() && *alias == identity.name,
         }
+    }
+}
+
+#[cfg(test)]
+impl TrackedSource {
+    /// A logged-out EVE client that was last logged in as `character`.
+    pub fn logged_out_after(character: impl Into<String>) -> Self {
+        Self::Eve(EveSession::LoggedOut {
+            last: Some(character.into()),
+        })
     }
 }
 
@@ -84,37 +137,37 @@ pub struct SourceRegistry {
 }
 
 impl SourceRegistry {
-    /// Admit a source window, or update the character of an admitted EVE client.
+    /// Admit a source window, or apply a title observation to an admitted EVE client.
     ///
     /// Admission is final: a registered window keeps its kind, and a custom source its
-    /// alias, until it is removed. Any other change is rejected without mutation.
+    /// alias, until it is removed. Any other change is rejected without mutation. For an
+    /// admitted EVE client only the observed live character matters; its history is kept.
     pub fn register(&mut self, window: Window, source: TrackedSource) {
-        if let Some(existing) = self.sources.get(&window) {
-            let keeps_admission = match (existing, &source) {
-                (TrackedSource::Eve { .. }, TrackedSource::Eve { .. }) => true,
-                (TrackedSource::Custom { alias }, TrackedSource::Custom { alias: new }) => {
-                    alias == new
-                }
-                _ => false,
-            };
-            if !keeps_admission {
-                warn!(existing = ?existing, rejected = ?source, window, "Ignoring identity change for admitted source");
-                return;
+        match (self.sources.get_mut(&window), source) {
+            (None, source) => {
+                debug!(source = ?source, window, "Registering source window");
+                self.order.push(window);
+                self.sources.insert(window, source);
             }
-        } else {
-            self.order.push(window);
+            (Some(TrackedSource::Eve(session)), TrackedSource::Eve(observed)) => {
+                session.observe(match observed {
+                    EveSession::LoggedIn(character) => character,
+                    EveSession::LoggedOut { .. } => String::new(),
+                });
+            }
+            (Some(TrackedSource::Custom { alias }), TrackedSource::Custom { alias: new })
+                if *alias == new => {}
+            (Some(existing), rejected) => {
+                warn!(existing = ?existing, rejected = ?rejected, window, "Ignoring identity change for admitted source");
+            }
         }
-        debug!(source = ?source, window, "Registering source window");
-        self.sources.insert(window, source);
     }
 
-    /// Update an admitted EVE client's live character name (called on login/logout).
-    /// Never admits a window and never applies to custom sources.
+    /// Apply an accepted title observation to an admitted EVE client (login, swap, or
+    /// logout). Never admits a window and never applies to custom sources.
     pub fn update_character(&mut self, window: Window, new_name: String) {
         match self.sources.get_mut(&window) {
-            Some(TrackedSource::Eve { character }) => {
-                *character = (!new_name.is_empty()).then_some(new_name);
-            }
+            Some(TrackedSource::Eve(session)) => session.observe(new_name),
             _ => debug!(
                 window,
                 "Ignoring character update for a window not admitted as EVE"
@@ -122,7 +175,7 @@ impl SourceRegistry {
         }
     }
 
-    /// Forget a destroyed source, returning what it was admitted as.
+    /// Forget a destroyed source and its history, returning what it was admitted as.
     pub fn remove(&mut self, window: Window) -> Option<TrackedSource> {
         let removed = self.sources.remove(&window)?;
         debug!(source = ?removed, window, "Removing source window");
@@ -169,17 +222,24 @@ impl SourceRegistry {
             .count()
     }
 
-    /// Live identity first; a logged-out EVE client falls back to its remembered character.
-    pub fn identity(
-        &self,
-        window: Window,
-        remembered: Option<&HashMap<Window, String>>,
-    ) -> Option<SourceIdentity> {
+    /// The identity the window shows right now; None for a logged-out EVE client.
+    pub fn live_identity(&self, window: Window) -> Option<SourceIdentity> {
+        self.get(window)?.live_identity()
+    }
+
+    /// Live identity first; a logged-out EVE client falls back to its last character.
+    pub fn effective_identity(&self, window: Window) -> Option<SourceIdentity> {
         match self.get(window)? {
-            source if source.is_logged_out() => remembered
-                .and_then(|map| map.get(&window))
-                .map(|name| SourceIdentity::eve(name.clone())),
+            TrackedSource::Eve(session) => session.remembered().map(SourceIdentity::eve),
             source => source.live_identity(),
+        }
+    }
+
+    /// An EVE client's live character, or its last one while logged out.
+    pub fn remembered_character(&self, window: Window) -> Option<&str> {
+        match self.get(window)? {
+            TrackedSource::Eve(session) => session.remembered(),
+            TrackedSource::Custom { .. } => None,
         }
     }
 
@@ -189,35 +249,29 @@ impl SourceRegistry {
             .find_map(|(window, source)| source.shows(identity).then_some(window))
     }
 
-    /// A logged-out EVE client whose remembered character is `identity`.
-    pub fn logged_out_window_for(
-        &self,
-        identity: &SourceIdentity,
-        remembered: Option<&HashMap<Window, String>>,
-    ) -> Option<Window> {
+    /// A logged-out EVE client last logged in as `identity`.
+    pub fn logged_out_window_for(&self, identity: &SourceIdentity) -> Option<Window> {
         if !identity.kind.is_eve() || identity.name.is_empty() {
             return None;
         }
 
-        let map = remembered?;
-
-        self.iter()
-            .filter(|(_, source)| source.is_logged_out())
-            .find_map(|(window, _)| {
-                map.get(&window)
-                    .is_some_and(|last_char| last_char == &identity.name)
-                    .then_some(window)
-            })
+        self.iter().find_map(|(window, source)| {
+            matches!(source, TrackedSource::Eve(EveSession::LoggedOut { last: Some(last) })
+                if *last == identity.name)
+            .then_some(window)
+        })
     }
 
-    /// Logged-out EVE clients with no remembered character, in discovery order.
-    pub fn unidentified_logged_out(&self, remembered: &HashMap<Window, String>) -> Vec<Window> {
+    /// Logged-out EVE clients that were never identified, in discovery order.
+    pub fn unidentified_logged_out(&self) -> Vec<Window> {
         self.order
             .iter()
             .copied()
             .filter(|window| {
-                self.get(*window).is_some_and(TrackedSource::is_logged_out)
-                    && !remembered.contains_key(window)
+                matches!(
+                    self.get(*window),
+                    Some(TrackedSource::Eve(EveSession::LoggedOut { last: None }))
+                )
             })
             .collect()
     }
@@ -228,32 +282,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_prefers_live_source_and_requires_registration() {
+    fn identity_queries_prefer_live_names_and_require_registration() {
         let mut sources = SourceRegistry::default();
-        let remembered = HashMap::from([
-            (1, "Old Eve".to_string()),
-            (2, "Alice".to_string()),
-            (3, "Stale".to_string()),
-        ]);
         sources.register(1, TrackedSource::custom("Alice"));
-        sources.register(2, TrackedSource::eve(""));
+        sources.register(2, TrackedSource::logged_out_after("Alice"));
         sources.register(4, TrackedSource::eve(""));
+        let custom = Some(SourceIdentity::custom("Alice"));
+        assert_eq!(sources.live_identity(1), custom);
+        assert_eq!(sources.effective_identity(1), custom);
+        assert_eq!(sources.remembered_character(1), None);
+        assert_eq!(sources.live_identity(2), None);
         assert_eq!(
-            sources.identity(1, Some(&remembered)),
-            Some(SourceIdentity::custom("Alice"))
-        );
-        assert_eq!(
-            sources.identity(2, Some(&remembered)),
+            sources.effective_identity(2),
             Some(SourceIdentity::eve("Alice"))
         );
-        assert_eq!(sources.identity(2, None), None);
-        assert_eq!(sources.identity(3, Some(&remembered)), None);
-        assert_eq!(sources.identity(4, Some(&remembered)), None);
+        assert_eq!(sources.remembered_character(2), Some("Alice"));
+        for window in [3, 4] {
+            assert_eq!(sources.effective_identity(window), None);
+            assert_eq!(sources.remembered_character(window), None);
+        }
         sources.register(2, TrackedSource::eve("Bob"));
+        assert_eq!(sources.live_identity(2), Some(SourceIdentity::eve("Bob")));
         assert_eq!(
-            sources.identity(2, Some(&remembered)),
+            sources.effective_identity(2),
             Some(SourceIdentity::eve("Bob"))
         );
+    }
+
+    #[test]
+    fn eve_sessions_keep_history_across_logout_until_removal() {
+        let mut sources = SourceRegistry::default();
+        sources.register(1, TrackedSource::eve("Alice"));
+        assert_eq!(sources.remembered_character(1), Some("Alice"));
+
+        // Logging out keeps the character; repeated logouts and re-detection keep it too.
+        sources.update_character(1, String::new());
+        sources.update_character(1, String::new());
+        sources.register(1, TrackedSource::eve(""));
+        assert_eq!(
+            sources.get(1),
+            Some(&TrackedSource::logged_out_after("Alice"))
+        );
+
+        // Login, swap, and a later logout remember the newest character.
+        sources.update_character(1, "Bob".into());
+        assert_eq!(sources.get(1), Some(&TrackedSource::eve("Bob")));
+        sources.register(1, TrackedSource::eve("Carol"));
+        sources.update_character(1, String::new());
+        assert_eq!(
+            sources.get(1),
+            Some(&TrackedSource::logged_out_after("Carol"))
+        );
+
+        // Custom and unregistered windows never gain history.
+        sources.register(2, TrackedSource::custom("YouTube"));
+        sources.update_character(2, "Impostor".into());
+        sources.update_character(3, "Ghost".into());
+        assert_eq!(sources.remembered_character(2), None);
+        assert_eq!(sources.get(3), None);
+
+        // Removal drops history, so a reused window ID starts fresh.
+        assert_eq!(
+            sources.remove(1),
+            Some(TrackedSource::logged_out_after("Carol"))
+        );
+        sources.register(1, TrackedSource::eve(""));
+        assert_eq!(sources.remembered_character(1), None);
+        assert_eq!(sources.unidentified_logged_out(), vec![1]);
     }
 
     #[test]
@@ -303,12 +398,15 @@ mod tests {
         assert_eq!(sources.get(2), Some(&TrackedSource::eve("")));
         assert_eq!(sources.eve_client_count(), 2);
 
-        // Login, swap and logout remain EVE name transitions.
+        // Login, swap and logout remain EVE session transitions.
         sources.update_character(2, "Alice".into());
         sources.register(3, TrackedSource::eve("Bob"));
         sources.update_character(3, String::new());
         assert_eq!(sources.get(2), Some(&TrackedSource::eve("Alice")));
-        assert_eq!(sources.get(3), Some(&TrackedSource::eve("")));
+        assert_eq!(
+            sources.get(3),
+            Some(&TrackedSource::logged_out_after("Bob"))
+        );
         assert_eq!(sources.order, order);
 
         // Character updates never admit a window; removal ends the admission.
@@ -322,28 +420,24 @@ mod tests {
     }
 
     #[test]
-    fn logged_out_lookups_use_remembered_names_and_discovery_order() {
+    fn logged_out_lookups_use_history_and_discovery_order() {
         let mut sources = SourceRegistry::default();
         sources.register(30, TrackedSource::eve(""));
-        sources.register(10, TrackedSource::eve(""));
+        sources.register(10, TrackedSource::logged_out_after("Alice"));
         sources.register(20, TrackedSource::eve(""));
         sources.register(40, TrackedSource::eve("Live"));
         sources.register(50, TrackedSource::custom("Alice"));
-        let remembered = HashMap::from([(10, "Alice".to_string()), (40, "Old".to_string())]);
 
-        assert_eq!(sources.unidentified_logged_out(&remembered), vec![30, 20]);
+        assert_eq!(sources.unidentified_logged_out(), vec![30, 20]);
         let alice = SourceIdentity::eve("Alice");
+        assert_eq!(sources.logged_out_window_for(&alice), Some(10));
         assert_eq!(
-            sources.logged_out_window_for(&alice, Some(&remembered)),
-            Some(10)
-        );
-        assert_eq!(sources.logged_out_window_for(&alice, None), None);
-        assert_eq!(
-            sources.logged_out_window_for(&SourceIdentity::custom("Alice"), Some(&remembered)),
+            sources.logged_out_window_for(&SourceIdentity::custom("Alice")),
             None
         );
+        // A live client is not a logged-out candidate for its own character.
         assert_eq!(
-            sources.logged_out_window_for(&SourceIdentity::eve("Old"), Some(&remembered)),
+            sources.logged_out_window_for(&SourceIdentity::eve("Live")),
             None
         );
         assert_eq!(sources.window_for_identity(&alice), None);
@@ -357,6 +451,6 @@ mod tests {
         );
 
         sources.remove(30);
-        assert_eq!(sources.unidentified_logged_out(&remembered), vec![20]);
+        assert_eq!(sources.unidentified_logged_out(), vec![20]);
     }
 }

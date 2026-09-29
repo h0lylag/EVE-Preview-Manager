@@ -223,9 +223,9 @@ pub fn process_detected_window(
         window,
         ctx.font_renderer,
         ctx.session_state,
+        ctx.sources,
         ctx.eve_clients,
-        Some(identity.clone()),
-        ctx.sources.eve_client_count(),
+        identity.clone(),
     ) {
         Ok(Some(thumbnail)) => {
             let geom_result = ctx
@@ -452,10 +452,7 @@ fn refresh_tracked_window(
     if let Some(thumbnail) = ctx.eve_clients.get_mut(&window) {
         if identity.is_eve() {
             thumbnail.sync_remembered_character_name(
-                ctx.session_state
-                    .window_last_character
-                    .get(&window)
-                    .cloned(),
+                ctx.sources.remembered_character(window).map(str::to_string),
             );
         }
 
@@ -633,7 +630,6 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
         if let Some(identity) = identify_window(
             ctx.app_ctx,
             window,
-            ctx.session_state,
             &ctx.daemon_config.profile.custom_windows,
         )
         .context(format!("Failed to identify window {}", window))?
@@ -652,18 +648,22 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
             ))? {
                 Some(eve_window) => {
                     let name = eve_window.character_name().to_string();
+                    // Unrendered clients record the observation when registered below.
                     if rendered {
                         apply_eve_rename(ctx, window, &name)?;
-                    } else {
-                        ctx.session_state.update_last_character(window, &name);
                     }
                     Some(WindowIdentity::new_eve(name))
                 }
-                // A title that stops matching never demotes an EVE client.
-                None => ctx
-                    .eve_clients
-                    .get(&window)
-                    .map(|thumbnail| WindowIdentity::new_eve(thumbnail.character_name.clone())),
+                // A title that stops matching never demotes an EVE client. Refresh from the
+                // registry, so a preview lagging after a failed rename cannot roll it back.
+                None => rendered.then(|| {
+                    WindowIdentity::new_eve(
+                        ctx.sources
+                            .live_identity(window)
+                            .map(|identity| identity.name)
+                            .unwrap_or_default(),
+                    )
+                }),
             }
         }
         // Title changes cannot alter a rendered custom preview; skip the rule queries.
@@ -714,36 +714,34 @@ fn apply_eve_rename(
 ) -> Result<()> {
     let old_name = ctx.eve_clients[&window].character_name.clone();
 
-    // Repeated property notifications must not interrupt a click or drag.
+    // Repeated property notifications must not interrupt a click or drag. The registry
+    // still records them: a failed rename can leave it ahead of the preview.
     if old_name == new_character_name {
+        ctx.sources
+            .update_character(window, new_character_name.to_string());
+        let remembered = ctx.sources.remembered_character(window).map(str::to_string);
+        if let Some(thumbnail) = ctx.eve_clients.get_mut(&window) {
+            thumbnail.sync_remembered_character_name(remembered);
+        }
         return Ok(());
     }
     // Restore the old identity's layout before capturing geometry or applying the
     // new identity's settings. Those settings may hide the preview via an override.
     super::input::cancel_preview_input(ctx, window);
+
+    // The registry follows the source even if updating the preview fails below; a later
+    // observation retries while the preview still shows the old name.
+    ctx.sources
+        .update_character(window, new_character_name.to_string());
+    let remembered = ctx.sources.remembered_character(window).map(str::to_string);
+    let skipped = ctx
+        .cycle_state
+        .is_skipped(ctx.sources.effective_identity(window).as_ref());
     let thumbnail = ctx
         .eve_clients
         .get_mut(&window)
         .expect("Checked contains_key");
-
-    if !new_character_name.is_empty() {
-        ctx.session_state
-            .update_last_character(window, new_character_name);
-        thumbnail.sync_remembered_character_name(
-            ctx.session_state
-                .window_last_character
-                .get(&window)
-                .cloned(),
-        );
-    } else if !old_name.is_empty() {
-        ctx.session_state.update_last_character(window, &old_name);
-        thumbnail.sync_remembered_character_name(
-            ctx.session_state
-                .window_last_character
-                .get(&window)
-                .cloned(),
-        );
-    }
+    thumbnail.sync_remembered_character_name(remembered.clone());
 
     let geom = ctx
         .app_ctx
@@ -756,9 +754,6 @@ fn apply_eve_rename(
             thumbnail.window()
         ))?;
     let current_pos = Position::new(geom.x, geom.y);
-
-    ctx.sources
-        .update_character(window, new_character_name.to_string());
 
     let new_settings = ctx
         .daemon_config
@@ -837,9 +832,9 @@ fn apply_eve_rename(
         thumbnail
             .set_character_name(
                 new_character_name.to_string(),
+                remembered,
                 final_settings,
-                ctx.cycle_state
-                    .is_skipped(Some(&SourceIdentity::eve(new_character_name))),
+                skipped,
                 ctx.display_config,
                 ctx.font_renderer,
             )
@@ -851,9 +846,9 @@ fn apply_eve_rename(
         thumbnail
             .set_character_name(
                 String::new(),
+                remembered,
                 None,
-                ctx.cycle_state
-                    .is_skipped(thumbnail.effective_source_identity().as_ref()),
+                skipped,
                 ctx.display_config,
                 ctx.font_renderer,
             )
@@ -969,7 +964,6 @@ mod tests {
                 thumbnails.insert(src, thumbnail);
                 sources.register(src, TrackedSource::from(identity));
                 session.update_window_position(src, x, 50);
-                session.update_last_character(src, name);
                 members.push(GroupDragMember {
                     source_window: src,
                     start_position,
@@ -1017,7 +1011,7 @@ mod tests {
                 assert_eq!(ctx.eve_clients.len(), 2);
                 assert_eq!(ctx.sources.len(), 2);
                 assert_eq!(ctx.session_state.window_positions.len(), 2);
-                assert_eq!(ctx.session_state.window_last_character.len(), 2);
+                assert_eq!(ctx.sources.remembered_character(source), Some("Lost"));
                 assert_eq!(ctx.group_drag_state.anchor(), Some(anchor));
                 assert!(
                     matches!(ctx.group_drag_state, GroupDragState::Active { members, .. } if members.len() == 2)
@@ -1036,21 +1030,14 @@ mod tests {
             assert!(!ctx.eve_clients.contains_key(&source));
             assert!(!ctx.sources.contains(source));
             assert!(!ctx.session_state.window_positions.contains_key(&source));
-            assert!(
-                !ctx.session_state
-                    .window_last_character
-                    .contains_key(&source)
-            );
+            assert_eq!(ctx.sources.remembered_character(source), None);
             assert!(ctx.eve_clients.contains_key(&survivor));
             assert!(ctx.sources.contains(survivor));
             assert_eq!(
                 ctx.session_state.window_positions[&survivor],
                 survivor_moved
             );
-            assert_eq!(
-                ctx.session_state.window_last_character[&survivor],
-                "Survivor"
-            );
+            assert_eq!(ctx.sources.remembered_character(survivor), Some("Survivor"));
             if lost_anchor {
                 assert!(matches!(
                     ctx.group_drag_state,

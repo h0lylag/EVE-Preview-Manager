@@ -20,7 +20,7 @@ use crate::x11::{AppContext, CachedAtoms};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 
 use super::activation::{self, ActivationOrigin};
-use super::cycle_state::{CycleActivation, CycleState};
+use super::cycle_state::{CycleActivation, CycleState, LoggedOutCycling};
 use super::dispatcher::{EventContext, handle_event};
 use super::font;
 use super::group_drag::GroupDragState;
@@ -961,11 +961,10 @@ fn handle_cycle_command<'a>(
     status_tx: &IpcSender<DaemonMessage>,
     hotkey_groups: &HashMap<crate::config::HotkeyBinding, Vec<SourceIdentity>>,
 ) -> Option<CycleActivation> {
-    // Build logged-out map if feature is enabled in profile
-    let logged_out_map = if resources.config.profile.hotkey_logged_out_cycle {
-        Some(&resources.session.window_last_character)
+    let logged_out = if resources.config.profile.hotkey_logged_out_cycle {
+        LoggedOutCycling::IncludeRemembered
     } else {
-        None
+        LoggedOutCycling::LiveOnly
     };
     let append_unidentified = resources
         .config
@@ -979,15 +978,14 @@ fn handle_cycle_command<'a>(
                 resources.cycle.cycle_forward_with_unidentified(
                     &resources.sources,
                     group,
-                    logged_out_map,
-                    &resources.session.window_last_character,
+                    logged_out,
                     resources.config.profile.hotkey_cycle_reset_index,
                 )
             } else {
                 resources.cycle.cycle_forward(
                     &resources.sources,
                     group,
-                    logged_out_map,
+                    logged_out,
                     resources.config.profile.hotkey_cycle_reset_index,
                 )
             }
@@ -997,31 +995,24 @@ fn handle_cycle_command<'a>(
                 resources.cycle.cycle_backward_with_unidentified(
                     &resources.sources,
                     group,
-                    logged_out_map,
-                    &resources.session.window_last_character,
+                    logged_out,
                     resources.config.profile.hotkey_cycle_reset_index,
                 )
             } else {
                 resources.cycle.cycle_backward(
                     &resources.sources,
                     group,
-                    logged_out_map,
+                    logged_out,
                     resources.config.profile.hotkey_cycle_reset_index,
                 )
             }
         }
-        CycleCommand::LoggedOutUnidentifiedForward => {
-            resources.cycle.cycle_unidentified_logged_out_forward(
-                &resources.sources,
-                &resources.session.window_last_character,
-            )
-        }
-        CycleCommand::LoggedOutUnidentifiedBackward => {
-            resources.cycle.cycle_unidentified_logged_out_backward(
-                &resources.sources,
-                &resources.session.window_last_character,
-            )
-        }
+        CycleCommand::LoggedOutUnidentifiedForward => resources
+            .cycle
+            .cycle_unidentified_logged_out_forward(&resources.sources),
+        CycleCommand::LoggedOutUnidentifiedBackward => resources
+            .cycle
+            .cycle_unidentified_logged_out_backward(&resources.sources),
         CycleCommand::CharacterHotkey(binding) => {
             debug!(binding = %binding.display_name(), "Received direct-source hotkey command");
 
@@ -1034,11 +1025,9 @@ fn handle_cycle_command<'a>(
                 );
 
                 // Delegate logic to CycleState
-                resources.cycle.activate_next_in_group(
-                    &resources.sources,
-                    source_group,
-                    logged_out_map,
-                )
+                resources
+                    .cycle
+                    .activate_next_in_group(&resources.sources, source_group, logged_out)
             } else {
                 warn!(
                     binding = %binding.display_name(),
@@ -1071,7 +1060,7 @@ fn handle_cycle_command<'a>(
             // Remembered identity remains usable even when logged-out cycling is disabled.
             let Some(identity) = resources
                 .sources
-                .identity(window, Some(&resources.session.window_last_character))
+                .effective_identity(window)
                 .filter(|identity| !identity.name.is_empty())
             else {
                 warn!("Cannot toggle skip: Focused window has no source identity");
@@ -1196,11 +1185,9 @@ mod tests {
                         .register(10, TrackedSource::from(alice.clone()));
                     resources.sources.register(20, TrackedSource::eve(""));
                     resources.sources.register(30, TrackedSource::eve(""));
-                    resources.sources.register(40, TrackedSource::eve(""));
                     resources
-                        .session
-                        .window_last_character
-                        .insert(40, "Bob".into());
+                        .sources
+                        .register(40, TrackedSource::logged_out_after("Bob"));
                     let keys = HashMap::new();
                     let mut run = |command| {
                         let target =
@@ -1283,11 +1270,11 @@ mod tests {
         sources.register(1, TrackedSource::eve("Alice"));
         sources.register(2, TrackedSource::eve("Bob"));
         assert_eq!(
-            cycle.cycle_forward(&sources, "Fleet", None, false),
+            cycle.cycle_forward(&sources, "Fleet", LoggedOutCycling::LiveOnly, false),
             Some((1, Some(SourceIdentity::eve("Alice"))))
         );
         assert_eq!(
-            cycle.cycle_forward(&sources, "Other", None, false),
+            cycle.cycle_forward(&sources, "Other", LoggedOutCycling::LiveOnly, false),
             Some((2, Some(SourceIdentity::eve("Bob"))))
         );
         for invalid in ["Fleet", "fleet", "", " Fleet "] {
@@ -1644,6 +1631,9 @@ mod tests {
                 resources.config.profile.thumbnail_enabled = true;
                 let display = resources.config.build_display_config();
                 let src = window(ctx, ctx.screen.root);
+                let identity =
+                    super::super::window_detection::WindowIdentity::new_eve("Alice".into());
+                resources.sources.register(src, identity.tracked_source());
                 ctx.conn
                     .change_property32(
                         PropMode::REPLACE,
@@ -1662,11 +1652,9 @@ mod tests {
                     src,
                     font,
                     &mut resources.session,
+                    &resources.sources,
                     &resources.eve_clients,
-                    Some(super::super::window_detection::WindowIdentity::new_eve(
-                        "Alice".into(),
-                    )),
-                    1,
+                    identity,
                 )
                 .unwrap()
                 .unwrap();
@@ -1763,9 +1751,12 @@ mod tests {
                 let group = resources.config.profile.cycle_groups[0].name.clone();
                 for _ in 0..3 {
                     assert_eq!(
-                        resources
-                            .cycle
-                            .cycle_forward(&resources.sources, &group, None, false),
+                        resources.cycle.cycle_forward(
+                            &resources.sources,
+                            &group,
+                            LoggedOutCycling::LiveOnly,
+                            false
+                        ),
                         Some((custom, Some(custom_alice.clone())))
                     );
                 }
@@ -1776,9 +1767,12 @@ mod tests {
                 toggle(ctx, resources, font, tx);
                 assert!(resources.cycle.is_skipped(Some(&custom_alice)));
                 assert_eq!(
-                    resources
-                        .cycle
-                        .cycle_forward(&resources.sources, &group, None, false),
+                    resources.cycle.cycle_forward(
+                        &resources.sources,
+                        &group,
+                        LoggedOutCycling::LiveOnly,
+                        false
+                    ),
                     Some((eve, Some(alice.clone())))
                 );
                 toggle(ctx, resources, font, tx);
@@ -1786,11 +1780,8 @@ mod tests {
 
                 // Remembered identity works independently of the logged-out cycling option.
                 resources.config.profile.hotkey_logged_out_cycle = false;
+                // Logging out keeps Alice as the window's history.
                 resources.sources.register(eve, TrackedSource::eve(""));
-                resources
-                    .session
-                    .window_last_character
-                    .insert(eve, "Alice".into());
                 focus(ctx, Some(eve));
                 toggle(ctx, resources, font, tx);
                 assert!(resources.cycle.is_skipped(Some(&alice)));
@@ -1806,12 +1797,8 @@ mod tests {
 
                 let unknown = window(ctx, ctx.screen.root);
                 resources.sources.register(unknown, TrackedSource::eve(""));
+                // Untracked windows have no history to identify them.
                 let untracked = window(ctx, ctx.screen.root);
-                // Stale session data must not identify an untracked window.
-                resources
-                    .session
-                    .window_last_character
-                    .insert(untracked, "Alice".into());
                 for active in [Some(unknown), Some(untracked), None, Some(0)] {
                     focus(ctx, active);
                     toggle(ctx, resources, font, tx);
@@ -1819,10 +1806,7 @@ mod tests {
                     assert!(!resources.cycle.is_skipped(Some(&bob)));
                     assert!(!resources.cycle.is_skipped(Some(&custom_alice)));
                 }
-                resources
-                    .session
-                    .window_last_character
-                    .insert(unknown, String::new());
+                // A never-identified client has no identity to skip.
                 focus(ctx, Some(unknown));
                 toggle(ctx, resources, font, tx);
                 assert!(
