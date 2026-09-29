@@ -29,6 +29,12 @@ pub struct SessionState {
 
     /// Deadline for hiding thumbnails after focus loss (hysteresis).
     pub focus_loss_deadline: Option<std::time::Instant>,
+
+    /// Preview hiding state, including sources awaiting a successful focus observation.
+    pub(super) preview_visibility: super::preview_visibility::PreviewVisibility,
+
+    /// Source whose preview received the pending left-button press.
+    pub(super) pressed_preview_source: Option<Window>,
 }
 
 impl SessionState {
@@ -90,10 +96,14 @@ impl SessionState {
         );
     }
 
-    /// Remove window from session tracking (called on DestroyNotify)
+    /// Remove a destroyed or stale source from session tracking.
     pub fn remove_window(&mut self, window: Window) {
         self.window_positions.remove(&window);
         self.window_last_character.remove(&window);
+        self.preview_visibility.source_removed(window);
+        if self.pressed_preview_source == Some(window) {
+            self.pressed_preview_source = None;
+        }
     }
 
     /// Update last known character for a window (called on character name change)

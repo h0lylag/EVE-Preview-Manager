@@ -347,12 +347,24 @@ pub(super) fn reconcile(ctx: &mut EventContext<'_, '_>, now: Instant) {
     runtime.next_probe =
         (runtime.pending.is_some() || observation.needs_poll()).then_some(now + PROBE_INTERVAL);
 
-    match visibility_action(
+    // The action schedules any focus-loss deadline that the active-preview policy reads.
+    let action = visibility_action(
         ctx.session_state,
         ctx.display_config.hide_when_no_focus,
         observation,
         now,
-    ) {
+    );
+    // Settle the active-preview block before any handler below reconciles previews.
+    if ctx.display_config.hide_active {
+        let session = &mut *ctx.session_state;
+        let retain_during_grace = ctx.display_config.hide_when_no_focus
+            && session.focus_loss_deadline.is_some()
+            && !session.focus_hidden;
+        session
+            .preview_visibility
+            .observe(observation.owner, retain_during_grace);
+    }
+    match action {
         VisibilityAction::Restore => handlers::state::restore_focus_visibility(ctx),
         VisibilityAction::Hide => {
             if let Err(error) = handlers::input::cancel_group_drag(
@@ -364,6 +376,9 @@ pub(super) fn reconcile(ctx: &mut EventContext<'_, '_>, now: Instant) {
                 warn!(%error, "Failed to restore group drag before focus-loss hide");
             }
             handlers::state::hide_after_focus_loss(ctx);
+        }
+        VisibilityAction::Keep if ctx.display_config.hide_active => {
+            handlers::state::reconcile_previews(ctx);
         }
         VisibilityAction::Keep => {}
     }
@@ -949,10 +964,11 @@ mod display_tests {
         result
     }
 
+    /// A real click: the release only activates the preview that received the press.
     fn click(ctx: &mut EventContext<'_, '_>, source: Window) {
         let thumbnail = &ctx.eve_clients[&source];
-        let event = ButtonReleaseEvent {
-            response_type: BUTTON_RELEASE_EVENT,
+        let press = ButtonPressEvent {
+            response_type: BUTTON_PRESS_EVENT,
             detail: 1,
             event: thumbnail.window(),
             root: ctx.app_ctx.screen.root,
@@ -961,7 +977,12 @@ mod display_tests {
             same_screen: true,
             ..Default::default()
         };
-        handlers::input::handle_button_release(ctx, event).unwrap();
+        let release = ButtonReleaseEvent {
+            response_type: BUTTON_RELEASE_EVENT,
+            ..press
+        };
+        handlers::input::handle_button_press(ctx, press).unwrap();
+        handlers::input::handle_button_release(ctx, release).unwrap();
     }
 
     #[test]

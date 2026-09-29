@@ -68,6 +68,15 @@ jobs:
             env EPM_X11_TESTS=1 timeout 180s \
             cargo test --locked --all-features -- --ignored --test-threads=1
 
+      - name: Cross-screen input and focus regressions
+        if: matrix.job == 'test'
+        run: |
+          xvfb-run -a -s "-screen 0 1280x800x24 -screen 1 800x600x24 -nolisten tcp -noreset" \
+            env EPM_X11_TESTS=1 EPM_X11_MULTISCREEN=1 timeout 180s bash -e -c '
+              cargo test --locked --all-features preview_cross_screen_release -- --ignored --test-threads=1
+              cargo test --locked --all-features root_focus -- --ignored --test-threads=1
+            '
+
   nix:
     name: Nix build and tests
     runs-on: ubuntu-latest

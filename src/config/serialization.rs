@@ -82,6 +82,10 @@ struct ProfileHelper {
     thumbnail_snap_threshold: u16,
     #[serde(default)]
     thumbnail_hide_not_focused: bool,
+    #[serde(default)]
+    thumbnail_hide_when_single_client: bool,
+    #[serde(default)]
+    thumbnail_hide_active: bool,
     #[serde(default = "default_preserve_thumbnail_position_on_swap")]
     thumbnail_preserve_position_on_swap: bool,
     #[serde(default = "default_show_logged_out_character_name")]
@@ -232,6 +236,8 @@ impl From<ProfileHelper> for Profile {
             thumbnail_auto_save_position: helper.thumbnail_auto_save_position,
             thumbnail_snap_threshold: helper.thumbnail_snap_threshold,
             thumbnail_hide_not_focused: helper.thumbnail_hide_not_focused,
+            thumbnail_hide_when_single_client: helper.thumbnail_hide_when_single_client,
+            thumbnail_hide_active: helper.thumbnail_hide_active,
             thumbnail_preserve_position_on_swap: helper.thumbnail_preserve_position_on_swap,
             thumbnail_show_logged_out_character_name: helper
                 .thumbnail_show_logged_out_character_name,
@@ -321,6 +327,10 @@ impl<'de> Deserialize<'de> for Profile {
                 pub thumbnail_snap_threshold: u16,
                 #[serde(default)]
                 pub thumbnail_hide_not_focused: bool,
+                #[serde(default)]
+                pub thumbnail_hide_when_single_client: bool,
+                #[serde(default)]
+                pub thumbnail_hide_active: bool,
                 #[serde(default = "default_preserve_thumbnail_position_on_swap")]
                 pub thumbnail_preserve_position_on_swap: bool,
                 #[serde(default = "default_show_logged_out_character_name")]
@@ -425,6 +435,8 @@ impl<'de> Deserialize<'de> for Profile {
                 thumbnail_auto_save_position: p.thumbnail_auto_save_position,
                 thumbnail_snap_threshold: p.thumbnail_snap_threshold,
                 thumbnail_hide_not_focused: p.thumbnail_hide_not_focused,
+                thumbnail_hide_when_single_client: p.thumbnail_hide_when_single_client,
+                thumbnail_hide_active: p.thumbnail_hide_active,
                 thumbnail_preserve_position_on_swap: p.thumbnail_preserve_position_on_swap,
                 thumbnail_show_logged_out_character_name: p
                     .thumbnail_show_logged_out_character_name,

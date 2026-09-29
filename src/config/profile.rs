@@ -234,6 +234,10 @@ pub struct Profile {
     pub thumbnail_auto_save_position: bool,
     pub thumbnail_snap_threshold: u16,
     pub thumbnail_hide_not_focused: bool,
+    /// Hide the sole tracked EVE client preview.
+    pub thumbnail_hide_when_single_client: bool,
+    /// Hide the confirmed active EVE or custom-source preview.
+    pub thumbnail_hide_active: bool,
     /// When a new character logs in without saved coordinates, inherit the previous character's thumbnail position
     /// This keeps thumbnails in place when swapping characters on the same EVE client
     pub thumbnail_preserve_position_on_swap: bool,
@@ -415,6 +419,8 @@ fn default_profiles() -> Vec<Profile> {
         thumbnail_snap_threshold: default_snap_threshold(),
         thumbnail_hide_not_focused:
             crate::common::constants::defaults::behavior::HIDE_WHEN_NO_FOCUS,
+        thumbnail_hide_when_single_client: false,
+        thumbnail_hide_active: false,
         thumbnail_preserve_position_on_swap: default_preserve_thumbnail_position_on_swap(),
         thumbnail_show_logged_out_character_name: default_show_logged_out_character_name(),
         client_minimize_on_switch:
@@ -1834,6 +1840,39 @@ mod tests {
                 fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
+        }
+    }
+    #[test]
+    fn preview_hiding_json_defaults_and_round_trips() {
+        let profile = Profile::default();
+        assert!(!profile.thumbnail_hide_when_single_client);
+        assert!(!profile.thumbnail_hide_active);
+        let mut old = serde_json::to_value(&profile).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("thumbnail_hide_when_single_client");
+        old.as_object_mut().unwrap().remove("thumbnail_hide_active");
+        let restored: Profile = serde_json::from_value(old.clone()).unwrap();
+        assert!(!restored.thumbnail_hide_when_single_client && !restored.thumbnail_hide_active);
+        for single in [false, true] {
+            for active in [false, true] {
+                let profile = Profile {
+                    thumbnail_hide_when_single_client: single,
+                    thumbnail_hide_active: active,
+                    ..profile.clone()
+                };
+                let json = serde_json::to_value(&profile).unwrap();
+                assert_eq!(json["thumbnail_hide_when_single_client"], single);
+                assert_eq!(json["thumbnail_hide_active"], active);
+                let restored: Profile = serde_json::from_value(json).unwrap();
+                assert_eq!(restored.thumbnail_hide_when_single_client, single);
+                assert_eq!(restored.thumbnail_hide_active, active);
+            }
+        }
+        for key in ["thumbnail_hide_when_single_client", "thumbnail_hide_active"] {
+            let mut invalid = old.clone();
+            invalid[key] = serde_json::json!("true");
+            assert!(serde_json::from_value::<Profile>(invalid).is_err());
         }
     }
 }

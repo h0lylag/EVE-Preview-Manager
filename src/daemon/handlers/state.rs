@@ -1,4 +1,5 @@
 use super::super::dispatcher::EventContext;
+use super::super::preview_visibility::VisibilityContext;
 use anyhow::{Context, Result};
 use tracing::debug;
 use x11rb::protocol::xproto::*;
@@ -57,14 +58,45 @@ pub(in crate::daemon) fn restore_focus_visibility(ctx: &mut EventContext) {
 }
 
 /// Apply every active hiding reason, including when a previous reason has just cleared.
-fn reconcile_previews(ctx: &mut EventContext) {
-    let blocked = ctx.daemon_config.runtime_hidden
-        || (ctx.display_config.hide_when_no_focus && ctx.session_state.focus_hidden);
-    for thumbnail in ctx.eve_clients.values_mut() {
-        if let Err(error) =
-            thumbnail.set_visibility_blocked(blocked, ctx.display_config, ctx.font_renderer)
-        {
-            tracing::warn!(source = %thumbnail.character_name, error = %error, "Failed to reconcile preview visibility");
+/// Hides are applied before reveals so previews that swap places never overlap.
+pub(in crate::daemon) fn reconcile_previews(ctx: &mut EventContext) {
+    let eve_client_count = ctx.cycle_state.eve_client_count();
+    let session = &*ctx.session_state;
+    let visibility = VisibilityContext::new(
+        ctx.display_config,
+        ctx.daemon_config,
+        session,
+        eve_client_count,
+    );
+    let decisions: Vec<(Window, bool)> = ctx
+        .eve_clients
+        .iter()
+        .map(|(&source, thumbnail)| {
+            let blocked =
+                session
+                    .preview_visibility
+                    .blocked(source, thumbnail.source_kind(), &visibility);
+            (source, blocked)
+        })
+        .collect();
+    // Hiding unmaps the grab window, so end any click or drag it owns first. This is
+    // idempotent, so a preview already hidden by a failed unmap is still cleaned up.
+    for &(source, blocked) in &decisions {
+        if blocked {
+            super::input::cancel_preview_input(ctx, source);
+        }
+    }
+    for reveal in [false, true] {
+        for &(source, blocked) in &decisions {
+            if blocked == reveal {
+                continue;
+            }
+            if let Some(thumbnail) = ctx.eve_clients.get_mut(&source)
+                && let Err(error) =
+                    thumbnail.set_visibility_blocked(blocked, ctx.display_config, ctx.font_renderer)
+            {
+                tracing::warn!(source = %thumbnail.character_name, error = %error, "Failed to reconcile preview visibility");
+            }
         }
     }
 }

@@ -47,6 +47,15 @@ fn remove_from_group_drag(ctx: &mut EventContext<'_, '_>, source_window: Window)
     }
 }
 
+/// The sole removal boundary for live event handling, including stale render failures.
+fn forget_source(ctx: &mut EventContext<'_, '_>, source_window: Window) {
+    remove_from_group_drag(ctx, source_window);
+    ctx.cycle_state.remove_window(source_window);
+    ctx.session_state.remove_window(source_window);
+    ctx.eve_clients.remove(&source_window);
+    super::state::reconcile_previews(ctx);
+}
+
 fn source_window_for_destroy_event(
     destroyed_window: Window,
     active_windows: &HashMap<Window, Option<SourceIdentity>>,
@@ -140,10 +149,7 @@ fn finish_thumbnail_update(
             return Err(error);
         }
         debug!(source_window, error = %error, "Removing preview for destroyed source window");
-        remove_from_group_drag(ctx, source_window);
-        ctx.cycle_state.remove_window(source_window);
-        ctx.session_state.remove_window(source_window);
-        ctx.eve_clients.remove(&source_window);
+        forget_source(ctx, source_window);
     }
     Ok(())
 }
@@ -197,8 +203,10 @@ pub fn process_detected_window(
     );
     debug!(?identity, "Identity details");
 
-    let cycle_identity = (!identity.name.is_empty()).then(|| identity.source_identity());
-    ctx.cycle_state.add_window(cycle_identity, window);
+    ctx.cycle_state
+        .add_window(identity.cycle_identity(), window);
+    // Registration can change the EVE client count before any early return below.
+    super::state::reconcile_previews(ctx);
 
     // MapNotify/PropertyNotify can re-detect a source window that already has a
     // thumbnail, especially around minimize/restore. Refresh in place so the
@@ -216,6 +224,7 @@ pub fn process_detected_window(
         ctx.session_state,
         ctx.eve_clients,
         Some(identity.clone()),
+        ctx.cycle_state.eve_client_count(),
     ) {
         Ok(Some(thumbnail)) => {
             let geom_result = ctx
@@ -627,10 +636,7 @@ pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) 
             client_window = win,
             "DestroyNotify matched tracked source (direct or parent)"
         );
-        remove_from_group_drag(ctx, win);
-        ctx.cycle_state.remove_window(win);
-        ctx.session_state.remove_window(win);
-        ctx.eve_clients.remove(&win);
+        forget_source(ctx, win);
     } else {
         debug!(
             window = event.window,
@@ -658,13 +664,20 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
             ))?
         {
             // It IS an EVE window.
-            // Re-borrow thumbnail mutably
+            let old_name = ctx.eve_clients[&window].character_name.clone();
+            let new_character_name = eve_window.character_name();
+
+            // Repeated property notifications must not interrupt a click or drag.
+            if old_name == new_character_name {
+                return Ok(());
+            }
+            // Restore the old identity's layout before capturing geometry or applying the
+            // new identity's settings. Those settings may hide the preview via an override.
+            super::input::cancel_preview_input(ctx, window);
             let thumbnail = ctx
                 .eve_clients
                 .get_mut(&window)
                 .expect("Checked contains_key");
-            let old_name = thumbnail.character_name.clone();
-            let new_character_name = eve_window.character_name();
 
             if !new_character_name.is_empty() {
                 ctx.session_state
@@ -683,11 +696,6 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                         .get(&window)
                         .cloned(),
                 );
-            }
-
-            // Optimization: If name hasn't changed, we can exit early.
-            if old_name == new_character_name {
-                return Ok(());
             }
 
             let geom = ctx
@@ -812,6 +820,7 @@ pub fn handle_identity_update(ctx: &mut EventContext, window: Window) -> Result<
                         old_name
                     ))?;
             }
+            super::state::reconcile_previews(ctx);
         } else {
             // Tracked, but not valid EVE window (likely Custom Source)
             // Implicitly ignore property updates for custom sources to prevent re-detection loops

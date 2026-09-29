@@ -12,6 +12,7 @@ mod main_loop;
 
 pub mod handlers;
 mod overlay;
+mod preview_visibility;
 mod renderer;
 mod session_state;
 mod snapping;

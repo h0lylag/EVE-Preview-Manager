@@ -7,7 +7,8 @@ use x11rb::rust_connection::RustConnection;
 
 use super::super::dispatcher::EventContext;
 use super::super::group_drag::{
-    GroupDragMember, GroupDragState, is_group_chord_press, shared_delta, translated_position,
+    ChordButtons, GroupDragMember, GroupDragState, is_group_chord_press, shared_delta,
+    translated_position,
 };
 use super::super::snapping::{self, Rect};
 use super::super::thumbnail::Thumbnail;
@@ -19,18 +20,30 @@ use crate::common::types::{Dimensions, Position, SourceIdentity};
 fn source_window_for_pointer(
     ctx: &EventContext<'_, '_>,
     event_window: Window,
+    event_root: Window,
     root_x: i16,
     root_y: i16,
+    same_screen: bool,
 ) -> Option<Window> {
+    if let Some((&source, thumbnail)) = ctx
+        .eve_clients
+        .iter()
+        .find(|(_, thumbnail)| thumbnail.window() == event_window)
+    {
+        // A queued event for a preview that just hid must not target its replacement.
+        return thumbnail.is_visible().then_some(source);
+    }
+    // Only root events can use coordinates; an unknown XID may be a destroyed preview.
+    if event_window != ctx.app_ctx.screen.root
+        || event_root != ctx.app_ctx.screen.root
+        || !same_screen
+    {
+        return None;
+    }
     ctx.eve_clients
         .iter()
-        .find(|(_, thumbnail)| thumbnail.window() == event_window && thumbnail.is_visible())
-        .or_else(|| {
-            ctx.eve_clients.iter().find(|(_, thumbnail)| {
-                thumbnail.is_hovered(root_x, root_y) && thumbnail.is_visible()
-            })
-        })
-        .map(|(source_window, _)| *source_window)
+        .find(|(_, thumbnail)| thumbnail.is_hovered(root_x, root_y) && thumbnail.is_visible())
+        .map(|(&source, _)| source)
 }
 
 fn dragging_window(ctx: &EventContext<'_, '_>) -> Option<Window> {
@@ -199,6 +212,36 @@ pub(in crate::daemon) fn cancel_group_drag(
     Ok(queued_positions.len())
 }
 
+/// End input before hiding a preview or changing the identity and geometry it represents.
+pub(super) fn cancel_preview_input(ctx: &mut EventContext<'_, '_>, source: Window) {
+    if ctx.session_state.pressed_preview_source == Some(source) {
+        ctx.session_state.pressed_preview_source = None;
+    }
+    let member = matches!(&*ctx.group_drag_state,
+        GroupDragState::Active { members, .. } if members.iter().any(|m| m.source_window == source));
+    if member
+        && let Err(error) = cancel_group_drag(
+            ctx.app_ctx.conn,
+            ctx.eve_clients,
+            ctx.group_drag_state,
+            None,
+        )
+    {
+        warn!(error = %error, "Failed to restore hidden preview group drag");
+    }
+    if let Some(thumbnail) = ctx.eve_clients.get_mut(&source)
+        && thumbnail.input_state.dragging
+    {
+        let start = thumbnail.input_state.win_start;
+        thumbnail.input_state.dragging = false;
+        thumbnail.input_state.snap_targets.clear();
+        *ctx.group_drag_state = GroupDragState::SuppressingRelease(ChordButtons::Right);
+        if let Err(error) = thumbnail.reposition(start.x, start.y) {
+            warn!(source, error = %error, "Failed to restore hidden preview drag");
+        }
+    }
+}
+
 fn finish_group_drag(ctx: &mut EventContext<'_, '_>, released_button: u8) {
     let Some(members) = ctx.group_drag_state.finish_active(released_button) else {
         return;
@@ -229,7 +272,7 @@ fn remembered_eve_identity(ctx: &EventContext<'_, '_>, window: Window) -> Option
         .map(|name| SourceIdentity::eve(name.clone()))
 }
 
-/// Handle ButtonPress events - start a single or group drag.
+/// Capture a preview click or start a single/group drag.
 #[tracing::instrument(skip(ctx), fields(window = event.event))]
 pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> Result<()> {
     debug!(
@@ -239,6 +282,9 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
         "ButtonPress received"
     );
 
+    if event.detail == mouse::BUTTON_LEFT {
+        ctx.session_state.pressed_preview_source = None;
+    }
     if ctx
         .group_drag_state
         .should_suppress_press(event.detail, event.state)
@@ -246,9 +292,17 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
         return Ok(());
     }
 
-    let pointer_window = source_window_for_pointer(ctx, event.event, event.root_x, event.root_y);
+    let pointer_window = source_window_for_pointer(
+        ctx,
+        event.event,
+        event.root,
+        event.root_x,
+        event.root_y,
+        event.same_screen,
+    );
 
     if is_group_chord_press(event.detail, event.state) {
+        ctx.session_state.pressed_preview_source = None;
         // If RMB started a normal drag, promote that exact preview even when X11 reports
         // the second button over a different window under the active pointer grab.
         let visible_drag_owner = dragging_window(ctx).filter(|source_window| {
@@ -267,6 +321,12 @@ pub fn handle_button_press(ctx: &mut EventContext, event: ButtonPressEvent) -> R
         return Ok(()); // No thumbnail was clicked
     };
 
+    if event.detail == mouse::BUTTON_LEFT {
+        ctx.session_state.pressed_preview_source = event
+            .same_screen
+            .then_some(clicked_window)
+            .filter(|source| ctx.eve_clients[source].is_hovered(event.root_x, event.root_y));
+    }
     if event.detail != mouse::BUTTON_RIGHT {
         return Ok(());
     }
@@ -328,6 +388,11 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         "ButtonRelease received"
     );
 
+    let pressed_source = if event.detail == mouse::BUTTON_LEFT {
+        ctx.session_state.pressed_preview_source.take()
+    } else {
+        None
+    };
     if ctx
         .group_drag_state
         .consume_suppressed_release(event.detail)
@@ -343,11 +408,25 @@ pub fn handle_button_release(ctx: &mut EventContext, event: ButtonReleaseEvent) 
         return Ok(());
     }
 
-    let pointer_window = source_window_for_pointer(ctx, event.event, event.root_x, event.root_y);
+    let pointer_window = source_window_for_pointer(
+        ctx,
+        event.event,
+        event.root,
+        event.root_x,
+        event.root_y,
+        event.same_screen,
+    );
     let clicked_key = if event.detail == mouse::BUTTON_RIGHT {
         // Complete the preview that owns the active RMB drag, even if the pointer was
         // released outside it or over another preview.
         dragging_window(ctx).or(pointer_window)
+    } else if event.detail == mouse::BUTTON_LEFT {
+        pressed_source.filter(|source| {
+            event.same_screen
+                && ctx.eve_clients.get(source).is_some_and(|thumbnail| {
+                    thumbnail.is_visible() && thumbnail.is_hovered(event.root_x, event.root_y)
+                })
+        })
     } else {
         pointer_window
     };

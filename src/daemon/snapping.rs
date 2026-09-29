@@ -14,6 +14,13 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Test pixel containment without narrowing dimensions or overflowing X11 coordinates.
+    pub fn contains(&self, x: i16, y: i16) -> bool {
+        let dx = i32::from(x) - i32::from(self.x);
+        let dy = i32::from(y) - i32::from(self.y);
+        (0..i32::from(self.width)).contains(&dx) && (0..i32::from(self.height)).contains(&dy)
+    }
+
     pub fn left(&self) -> i16 {
         self.x
     }
@@ -117,6 +124,45 @@ fn check_snap(best: &mut Option<SnapCandidate>, edge: i16, target: i16, threshol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn containment_uses_half_open_pixel_bounds() {
+        let rect = Rect {
+            x: -10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
+        for point in [(-10, 20), (19, 59), (0, 30)] {
+            assert!(rect.contains(point.0, point.1));
+        }
+        for point in [(-11, 20), (-10, 19), (20, 20), (-10, 60)] {
+            assert!(!rect.contains(point.0, point.1));
+        }
+        assert!(!Rect { width: 0, ..rect }.contains(-10, 20));
+        assert!(!Rect { height: 0, ..rect }.contains(-10, 20));
+    }
+
+    #[test]
+    fn containment_supports_full_x11_coordinate_and_dimension_ranges() {
+        let edge = Rect {
+            x: i16::MAX - 10,
+            y: i16::MAX - 10,
+            width: 160,
+            height: 100,
+        };
+        assert!(edge.contains(i16::MAX, i16::MAX));
+        assert!(!edge.contains(i16::MIN, i16::MIN));
+        let wide = Rect {
+            x: i16::MIN,
+            y: i16::MIN,
+            width: u16::MAX,
+            height: u16::MAX,
+        };
+        assert!(wide.contains(i16::MIN, i16::MIN));
+        assert!(wide.contains(i16::MAX - 1, i16::MAX - 1));
+        assert!(!wide.contains(i16::MAX, i16::MAX));
+    }
 
     #[test]
     fn test_snap_disabled_when_threshold_zero() {

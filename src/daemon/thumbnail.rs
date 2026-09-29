@@ -82,7 +82,7 @@ pub struct Thumbnail<'a> {
     remembered_character_name: Option<String>,
     pub state: ThumbnailState,
     hidden: bool,            // Cached X11 mapping state.
-    externally_hidden: bool, // Combined preview-toggle and focus block.
+    externally_hidden: bool, // Combined manual, focus, population, and active-preview block.
     pub input_state: InputState,
     pub preview_mode: crate::common::types::PreviewMode,
 
@@ -109,7 +109,7 @@ impl<'a> Thumbnail<'a> {
     /// * `font_renderer` - Renderer for shared font resources.
     /// * `position` - Optional initial position (if loaded from config).
     /// * `dimensions` - Initial size.
-    /// * `externally_hidden` - Combined preview-toggle and focus block at creation.
+    /// * `externally_hidden` - Combined manual, focus, single-client, and active-source block at creation.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &AppContext<'a>,
@@ -409,7 +409,7 @@ impl<'a> Thumbnail<'a> {
         Ok(())
     }
 
-    /// Update global/focus blocking independently of the current source's render override.
+    /// Update external visibility blocking independently of the current source's render override.
     pub fn set_visibility_blocked(
         &mut self,
         blocked: bool,
@@ -609,10 +609,13 @@ impl<'a> Thumbnail<'a> {
     /// Uses cached `current_position` to avoid synchronous X11 roundtrip.
     pub fn is_hovered(&self, x: i16, y: i16) -> bool {
         // Use cached position to avoid synchronous X11 roundtrip
-        x >= self.current_position.x
-            && x <= self.current_position.x + self.dimensions.width as i16
-            && y >= self.current_position.y
-            && y <= self.current_position.y + self.dimensions.height as i16
+        Rect {
+            x: self.current_position.x,
+            y: self.current_position.y,
+            width: self.dimensions.width,
+            height: self.dimensions.height,
+        }
+        .contains(x, y)
     }
 }
 

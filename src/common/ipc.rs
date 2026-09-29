@@ -255,4 +255,39 @@ mod tests {
             Ok(DaemonMessage::Heartbeat)
         ));
     }
+    #[test]
+    fn preview_hiding_options_round_trip_over_binary_ipc() {
+        for single in [false, true] {
+            for active in [false, true] {
+                let config = DaemonConfig {
+                    profile: Profile {
+                        thumbnail_hide_not_focused: !single,
+                        thumbnail_hide_when_single_client: single,
+                        thumbnail_hide_active: active,
+                        thumbnail_preserve_position_on_swap: !active,
+                        thumbnail_opacity: 73,
+                        ..Profile::default()
+                    },
+                    character_thumbnails: HashMap::new(),
+                    custom_source_thumbnails: HashMap::new(),
+                    profile_hotkeys: HashMap::new(),
+                    runtime_hidden: false,
+                };
+                let (tx, rx) = ipc::channel::<ConfigMessage>().unwrap();
+                tx.send(ConfigMessage::InitialConfig(Box::new(config)))
+                    .unwrap();
+                let ConfigMessage::InitialConfig(received) = rx.recv().unwrap() else {
+                    panic!("expected startup config");
+                };
+                assert_eq!(received.profile.thumbnail_hide_not_focused, !single);
+                assert_eq!(received.profile.thumbnail_hide_when_single_client, single);
+                assert_eq!(received.profile.thumbnail_hide_active, active);
+                assert_eq!(
+                    received.profile.thumbnail_preserve_position_on_swap,
+                    !active
+                );
+                assert_eq!(received.profile.thumbnail_opacity, 73);
+            }
+        }
+    }
 }

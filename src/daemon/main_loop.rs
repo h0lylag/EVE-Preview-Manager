@@ -1643,6 +1643,7 @@ mod tests {
                     Some(super::super::window_detection::WindowIdentity::new_eve(
                         "Alice".into(),
                     )),
+                    1,
                 )
                 .unwrap()
                 .unwrap();
@@ -2451,6 +2452,31 @@ mod tests {
                 "a queued shutdown must beat sustained hotkey input"
             );
             result.unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn preview_toggle_preserves_cancelled_drag_release() {
+        with_x11(|ctx| {
+            with_daemon(ctx, |resources, font, tx| {
+                resources.group_drag = GroupDragState::SuppressingRelease(
+                    crate::daemon::group_drag::ChordButtons::Right,
+                );
+                handle_cycle_command(
+                    &CycleCommand::TogglePreviews,
+                    resources,
+                    ctx,
+                    font,
+                    tx,
+                    &HashMap::new(),
+                );
+                assert!(
+                    resources
+                        .group_drag
+                        .consume_suppressed_release(crate::common::constants::mouse::BUTTON_RIGHT)
+                );
+            })
         });
     }
 }
