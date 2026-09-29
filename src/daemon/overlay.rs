@@ -158,12 +158,10 @@ impl<'a> OverlayRenderer<'a> {
 
         // Render initial name
         let initial_border_size = renderer.calculate_border_size(config, identity, false);
-        renderer
-            .clear_content_area(dimensions, initial_border_size)
-            .context(format!(
-                "Failed to clear content area for initial render of '{}'",
-                identity.style
-            ))?;
+        renderer.clear(dimensions).context(format!(
+            "Failed to clear overlay for initial render of '{}'",
+            identity.style
+        ))?;
 
         renderer
             .update_name(
@@ -203,7 +201,7 @@ impl<'a> OverlayRenderer<'a> {
         )?;
         self.overlay_picture = overlay_picture;
 
-        Ok(())
+        self.clear(Dimensions::new(width, height))
     }
 
     /// Draws the skipped indicator (diagonal red lines)
@@ -257,8 +255,8 @@ impl<'a> OverlayRenderer<'a> {
         }
     }
 
-    /// Clears the center content area (inside the border).
-    pub fn clear_content_area(&self, dimensions: Dimensions, border_size: u16) -> Result<()> {
+    /// Initializes every pixel, including the border strip, to transparent.
+    fn clear(&self, dimensions: Dimensions) -> Result<()> {
         self.conn
             .render_composite(
                 PictOp::CLEAR,
@@ -269,12 +267,12 @@ impl<'a> OverlayRenderer<'a> {
                 0,
                 0,
                 0,
-                border_size as i16,
-                border_size as i16,
-                dimensions.width.saturating_sub(border_size * 2),
-                dimensions.height.saturating_sub(border_size * 2),
+                0,
+                0,
+                dimensions.width,
+                dimensions.height,
             )
-            .context("Failed to clear content area")?;
+            .context("Failed to clear overlay")?;
         Ok(())
     }
 
@@ -478,23 +476,7 @@ impl<'a> OverlayRenderer<'a> {
         skipped: bool,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
-        // 1. Clear the entire overlay first (transparent background)
-        self.conn
-            .render_composite(
-                PictOp::CLEAR,
-                self.overlay_picture,
-                0u32,
-                self.overlay_picture,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                dimensions.width,
-                dimensions.height,
-            )
-            .context("Failed to clear overlay")?;
+        self.clear(dimensions)?;
 
         // 2. Draw skipped indicator (Red X)
         // Drawn first so text appears on top of it

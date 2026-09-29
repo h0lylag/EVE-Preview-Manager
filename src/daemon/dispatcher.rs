@@ -37,6 +37,7 @@ pub(super) struct EventContext<'a, 'b> {
 pub(super) fn handle_event(ctx: &mut EventContext, event: Event) -> Result<()> {
     match event {
         DamageNotify(event) => handlers::window::handle_damage_notify(ctx, event),
+        Event::Expose(event) => handlers::window::handle_expose(ctx, event),
         CreateNotify(event) => handlers::window::handle_create_notify(ctx, event),
         Event::MapNotify(event) => handlers::window::handle_map_notify(ctx, event),
         Event::UnmapNotify(event) => {

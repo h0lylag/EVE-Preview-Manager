@@ -53,6 +53,21 @@ jobs:
         if: matrix.job == 'test'
         run: cargo test --locked --all-features
 
+      - name: Install display test dependencies
+        if: matrix.job == 'test'
+        run: sudo apt-get install -y --no-install-recommends xvfb xauth fonts-dejavu-core
+
+      - name: Build display tests
+        if: matrix.job == 'test'
+        run: cargo test --locked --all-features --no-run
+
+      - name: Display regressions on isolated Xvfb
+        if: matrix.job == 'test'
+        run: |
+          xvfb-run -a -s "-screen 0 1280x800x24 -nolisten tcp -noreset" \
+            env EPM_X11_TESTS=1 timeout 180s \
+            cargo test --locked --all-features -- --ignored --test-threads=1
+
   nix:
     name: Nix build and tests
     runs-on: ubuntu-latest

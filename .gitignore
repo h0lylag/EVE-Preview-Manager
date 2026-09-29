@@ -6,3 +6,5 @@ target/
 dist/
 result
 build-dist.sh
+.mcp.json
+.codex/

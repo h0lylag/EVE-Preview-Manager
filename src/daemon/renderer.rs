@@ -88,6 +88,7 @@ impl<'a> ThumbnailRenderer<'a> {
                     .override_redirect(x11::OVERRIDE_REDIRECT)
                     .event_mask(
                         EventMask::SUBSTRUCTURE_NOTIFY
+                            | EventMask::EXPOSURE
                             | EventMask::BUTTON_PRESS
                             | EventMask::BUTTON_RELEASE
                             | EventMask::POINTER_MOTION,
@@ -277,7 +278,7 @@ impl<'a> ThumbnailRenderer<'a> {
             .generate_id()
             .context("Failed to generate ID for damage tracking")?;
         ctx.conn
-            .damage_create(damage, src, DamageReportLevel::RAW_RECTANGLES)
+            .damage_create(damage, src, DamageReportLevel::NON_EMPTY)
             .context(format!(
                 "Failed to create damage tracking for '{}' (check DAMAGE extension)",
                 character_name
@@ -445,25 +446,40 @@ impl<'a> ThumbnailRenderer<'a> {
     /// Captures the current content of the source window and composites it into the thumbnail.
     ///
     /// This applies the necessary scaling transform to fit the source content into the thumbnail dimensions.
+    /// Returns whether a source composite was queued; false preserves the safety skip.
     ///
     /// # Errors
     /// Returns an error if X11 composite operations fail.
-    pub fn capture(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
-        // Query attributes to check map state
+    pub fn capture(&self, character_name: &str, dimensions: Dimensions) -> Result<bool> {
+        // Pipeline the fresh queries instead of waiting before sending the second.
         let attr_cookie = self.conn.get_window_attributes(self.src)?;
-        let attrs = attr_cookie.reply()?;
+        let geom_cookie = match self.conn.get_geometry(self.src) {
+            Ok(cookie) => cookie,
+            Err(error) => {
+                attr_cookie.discard_reply_and_errors();
+                return Err(error.into());
+            }
+        };
+        let attrs = match attr_cookie.reply() {
+            Ok(attrs) => attrs,
+            Err(error) => {
+                geom_cookie.discard_reply_and_errors();
+                return Err(error.into());
+            }
+        };
 
         // SAFETY: Check map state to prevent crashing KWin/Xwayland.
         // Attempting to composite from an unmapped window (even with valid size)
         // triggers a "Double free or corruption" crash in glamor/Xwayland.
         if attrs.map_state != MapState::VIEWABLE {
+            geom_cookie.discard_reply_and_errors();
             // Debug logging for capture issues
             tracing::trace!(
                 character = character_name,
                 src_window = self.src,
                 "Skipping capture of unmapped window"
             );
-            return Ok(()); // Skip capture to prevent crash
+            return Ok(false); // Skip capture to prevent crash
         }
 
         // NOTE: Query geometry fresh every frame.
@@ -471,7 +487,6 @@ impl<'a> ThumbnailRenderer<'a> {
         // Steam/Proton windows race between events and actual state, leading to
         // invalid reads if we trust the cache. Always ask the server.
         // Query source window geometry fresh
-        let geom_cookie = self.conn.get_geometry(self.src)?;
         let geom = geom_cookie.reply()?;
         let src_width = geom.width;
         let src_height = geom.height;
@@ -488,13 +503,13 @@ impl<'a> ThumbnailRenderer<'a> {
         // Safety Check: Skip capture if window is effectively empty/unmapped to avoid X server crashes
         // A 1x1 window (like seen with Firefox initially) can crash X11 drivers when used in Render operations
         if src_width <= 1 || src_height <= 1 {
-            tracing::warn!(
+            tracing::debug!(
                 character = character_name,
                 width = src_width,
                 height = src_height,
                 "Skipping capture of 1x1/empty window (likely not mapped yet)"
             );
-            return Ok(());
+            return Ok(false);
         }
 
         let transform = Transform {
@@ -505,7 +520,7 @@ impl<'a> ThumbnailRenderer<'a> {
         };
         self.conn
             .render_set_picture_transform(self.src_picture, transform)
-            .context(format!("Failed to set transform for '{}'", character_name))?;
+            .with_context(|| format!("Failed to set transform for '{}'", character_name))?;
         self.conn
             .render_composite(
                 PictOp::SRC,
@@ -521,11 +536,10 @@ impl<'a> ThumbnailRenderer<'a> {
                 dimensions.width,
                 dimensions.height,
             )
-            .context(format!(
-                "Failed to composite source window for '{}'",
-                character_name
-            ))?;
-        Ok(())
+            .with_context(|| {
+                format!("Failed to composite source window for '{}'", character_name)
+            })?;
+        Ok(true)
     }
 
     /// Fills the thumbnail with a static solid color.
@@ -544,10 +558,7 @@ impl<'a> ThumbnailRenderer<'a> {
 
         self.conn
             .render_fill_rectangles(PictOp::SRC, self.dst_picture, color, &[rect])
-            .context(format!(
-                "Failed to fill static color for '{}'",
-                character_name
-            ))?;
+            .with_context(|| format!("Failed to fill static color for '{}'", character_name))?;
         Ok(())
     }
 
@@ -572,10 +583,7 @@ impl<'a> ThumbnailRenderer<'a> {
             focused,
             skipped,
             font_renderer,
-        )?;
-
-        self.overlay(identity.style, dimensions)
-            .context(format!("Failed to apply overlay for '{}'", identity.style))
+        )
     }
 
     /// Renders the "MINIMIZED" state overlay.
@@ -610,38 +618,9 @@ impl<'a> ThumbnailRenderer<'a> {
         Ok(())
     }
 
-    /// Updates the text overlay with the character name.
-    pub fn update_name(
-        &self,
-        display_config: &DisplayConfig,
-        identity: OverlayIdentity<'_>,
-        dimensions: Dimensions,
-        font_renderer: &FontRenderer,
-    ) -> Result<()> {
-        // Calculate appropriate border size to preserve the hole
-        // We default to focused=false since this is usually called during initialization or generic updates
-        // However, if we are focused, the next border() call will correct it.
-        let border_size = self
-            .overlay
-            .calculate_border_size(display_config, identity, false);
-
-        // Must clear content area explicitly now
-        self.overlay
-            .clear_content_area(dimensions, border_size)
-            .context(format!(
-                "Failed to clear content area for '{}'",
-                identity.style
-            ))?;
-
-        Self::set_window_title(self.conn, self.atoms, self.window, identity.display)?;
-
-        self.overlay.update_name(
-            display_config,
-            identity,
-            dimensions,
-            border_size,
-            font_renderer,
-        )
+    /// Updates the preview's window title; overlay text is rebuilt with the border.
+    pub fn set_display_name(&self, name: &str) -> Result<()> {
+        Self::set_window_title(self.conn, self.atoms, self.window, name)
     }
 
     /// Composites the text/border overlay on top of the thumbnail content.
@@ -661,21 +640,21 @@ impl<'a> ThumbnailRenderer<'a> {
                 dimensions.width,
                 dimensions.height,
             )
-            .context(format!(
-                "Failed to composite overlay onto destination for '{}'",
-                character_name
-            ))?;
+            .with_context(|| {
+                format!(
+                    "Failed to composite overlay onto destination for '{}'",
+                    character_name
+                )
+            })?;
         Ok(())
     }
 
     /// Logic for full update cycle: capture source -> apply overlay.
     pub fn update(&self, character_name: &str, dimensions: Dimensions) -> Result<()> {
-        self.capture(character_name, dimensions).context(format!(
-            "Failed to capture source window for '{}'",
-            character_name
-        ))?;
+        self.capture(character_name, dimensions)
+            .with_context(|| format!("Failed to capture source window for '{}'", character_name))?;
         self.overlay(character_name, dimensions)
-            .context(format!("Failed to apply overlay for '{}'", character_name))?;
+            .with_context(|| format!("Failed to apply overlay for '{}'", character_name))?;
         Ok(())
     }
 
@@ -688,7 +667,7 @@ impl<'a> ThumbnailRenderer<'a> {
     ) -> Result<()> {
         self.fill_static(character_name, dimensions, color)?;
         self.overlay(character_name, dimensions)
-            .context(format!("Failed to apply overlay for '{}'", character_name))?;
+            .with_context(|| format!("Failed to apply overlay for '{}'", character_name))?;
         Ok(())
     }
 

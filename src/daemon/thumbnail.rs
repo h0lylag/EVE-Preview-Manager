@@ -13,6 +13,7 @@ use crate::common::types::{Dimensions, Position, SourceIdentity, SourceKind, Thu
 use crate::config::DisplayConfig;
 use crate::x11::AppContext;
 
+use super::damage_metrics::DamageMetrics;
 use super::font::FontRenderer;
 use super::overlay::OverlayIdentity;
 use super::renderer::ThumbnailRenderer;
@@ -45,6 +46,16 @@ fn display_character_name_from<'a>(
 
 fn preview_visible(enabled: bool, render_override: Option<bool>, blocked: bool) -> bool {
     render_override.unwrap_or(enabled) && !blocked
+}
+
+/// Result of handling source damage, not a promise of server/GPU completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DamageUpdate {
+    Hidden,
+    Static,
+    Minimized,
+    LiveCaptured,
+    LiveUnavailable,
 }
 
 #[derive(Debug, Default)]
@@ -82,6 +93,7 @@ pub struct Thumbnail<'a> {
 
     // === Backend ===
     renderer: ThumbnailRenderer<'a>,
+    pub(super) damage_metrics: Option<DamageMetrics>,
 }
 
 impl<'a> Thumbnail<'a> {
@@ -184,10 +196,18 @@ impl<'a> Thumbnail<'a> {
             preview_mode,
             dimensions,
             current_position: Position::new(x, y),
+            damage_metrics: DamageMetrics::new_if_enabled(),
             renderer,
         };
         thumbnail.reconcile_visibility(display_config)?;
         Ok(thumbnail)
+    }
+
+    pub(super) fn report_damage_metrics(&mut self) {
+        let source_window = self.src();
+        if let Some(metrics) = &mut self.damage_metrics {
+            metrics.report_if_due(self.source_kind, source_window);
+        }
     }
 
     // Accessors
@@ -347,7 +367,7 @@ impl<'a> Thumbnail<'a> {
         Ok(())
     }
 
-    /// Updates the thumbnail border based on focus state.
+    /// Rebuilds the overlay and repaints its base so removed marks do not leave pixels behind.
     pub fn border(
         &self,
         display_config: &DisplayConfig,
@@ -355,6 +375,9 @@ impl<'a> Thumbnail<'a> {
         skipped: bool,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
+        if self.state.is_minimized() {
+            return self.repaint(display_config, font_renderer);
+        }
         self.renderer.border(
             display_config,
             self.overlay_identity(display_config),
@@ -362,7 +385,8 @@ impl<'a> Thumbnail<'a> {
             focused,
             skipped,
             font_renderer,
-        )
+        )?;
+        self.repaint(display_config, font_renderer)
     }
 
     /// Sets the thumbnail to "Minimized" state and renders the localized overlay.
@@ -420,14 +444,84 @@ impl<'a> Thumbnail<'a> {
         font_renderer: &FontRenderer,
     ) -> Result<()> {
         self.reconcile_visibility(display_config)?;
+        self.repaint(display_config, font_renderer)
+    }
+
+    fn effective_preview_mode<'b>(
+        &'b self,
+        display_config: &'b DisplayConfig,
+    ) -> &'b crate::common::types::PreviewMode {
+        display_config
+            .settings_for(self.source_kind, self.effective_character_name())
+            .map(|settings| &settings.preview_mode)
+            .unwrap_or(&self.preview_mode)
+    }
+
+    /// Source damage can only change a visible Live base. Other invalidations use update/border.
+    pub(super) fn update_for_damage(
+        &mut self,
+        display_config: &DisplayConfig,
+    ) -> Result<DamageUpdate> {
+        self.reconcile_visibility(display_config)?;
+        if !self.is_visible() {
+            return Ok(DamageUpdate::Hidden);
+        }
+        if self.state.is_minimized() {
+            return Ok(DamageUpdate::Minimized);
+        }
+        if matches!(
+            self.effective_preview_mode(display_config),
+            crate::common::types::PreviewMode::Static { .. }
+        ) {
+            return Ok(DamageUpdate::Static);
+        }
+        Ok(if self.capture_live()? {
+            DamageUpdate::LiveCaptured
+        } else {
+            DamageUpdate::LiveUnavailable
+        })
+    }
+
+    /// Restore exposed contents without layering an unchanged overlay over a frozen Live base.
+    pub(super) fn update_for_expose(
+        &mut self,
+        display_config: &DisplayConfig,
+        font_renderer: &FontRenderer,
+    ) -> Result<()> {
+        self.reconcile_visibility(display_config)?;
+        if !self.is_visible() {
+            return Ok(());
+        }
+        if self.state.is_minimized()
+            || matches!(
+                self.effective_preview_mode(display_config),
+                crate::common::types::PreviewMode::Static { .. }
+            )
+        {
+            return self.repaint(display_config, font_renderer);
+        }
+        self.capture_live().map(|_| ())
+    }
+
+    /// Damage and Expose leave unavailable Live content untouched; style changes use repaint.
+    fn capture_live(&self) -> Result<bool> {
+        if !self
+            .renderer
+            .capture(self.effective_character_name(), self.dimensions)?
+        {
+            return Ok(false);
+        }
+        self.renderer
+            .overlay(self.effective_character_name(), self.dimensions)?;
+        Ok(true)
+    }
+
+    fn repaint(&self, display_config: &DisplayConfig, font_renderer: &FontRenderer) -> Result<()> {
         if !self.is_visible() {
             return Ok(());
         }
 
-        let preview_mode = display_config
-            .settings_for(self.source_kind, self.effective_character_name())
-            .map(|settings| &settings.preview_mode)
-            .unwrap_or(&self.preview_mode);
+        let preview_mode = self.effective_preview_mode(display_config);
 
         match self.state {
             ThumbnailState::Minimized => {
@@ -470,6 +564,7 @@ impl<'a> Thumbnail<'a> {
         &mut self,
         new_name: String,
         new_settings: Option<crate::common::types::CharacterSettings>,
+        skipped: bool,
         display_config: &DisplayConfig,
         font_renderer: &FontRenderer,
     ) -> Result<()> {
@@ -478,7 +573,7 @@ impl<'a> Thumbnail<'a> {
             self.remembered_character_name = Some(self.character_name.clone());
         }
 
-        // NOTE: Resize must precede update_name because it regenerates the overlay pixmap.
+        // Resizing regenerates the overlay pixmap, so rebuild the overlay afterwards.
 
         if let Some(settings) = new_settings {
             self.reposition(settings.x, settings.y).context(format!(
@@ -495,21 +590,16 @@ impl<'a> Thumbnail<'a> {
             self.preview_mode = settings.preview_mode;
         }
 
-        // Force update of name (and implicit repaint if visible)
         self.renderer
-            .update_name(
-                display_config,
-                self.overlay_identity(display_config),
-                self.dimensions,
-                font_renderer,
-            )
-            .context(format!(
-                "Failed to update name overlay to '{}'",
-                self.character_name
-            ))?;
-
-        self.update(display_config, font_renderer)
-            .context("Failed to repaint after character change")?;
+            .set_display_name(self.display_character_name(display_config))?;
+        self.reconcile_visibility(display_config)?;
+        self.border(
+            display_config,
+            self.state.is_focused(),
+            skipped,
+            font_renderer,
+        )
+        .context("Failed to repaint after character change")?;
 
         Ok(())
     }

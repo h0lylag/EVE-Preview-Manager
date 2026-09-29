@@ -554,10 +554,9 @@ pub fn check_and_create_window<'a>(
 
     if is_minimized {
         thumbnail.minimized(display_config, font_renderer)?;
-    } else {
-        // NOTE: We rely on standard X11 Damage events to trigger the first update naturally.
-        // Forcing an update here caused issues with fleeting windows.
     }
+    // The creation/startup border repaint and preview Expose supply the initial image.
+    // Capture keeps fresh map-state/geometry guards for fleeting or unavailable sources.
 
     debug!(
         window = window,
@@ -790,7 +789,12 @@ mod tests {
     use std::collections::HashMap;
     use x11rb::{
         connection::Connection,
-        protocol::{Event, xproto::*},
+        protocol::{
+            Event,
+            damage::{ConnectionExt as _, NotifyEvent},
+            xproto::*,
+        },
+        rust_connection::RustConnection,
         wrapper::ConnectionExt as _,
     };
 
@@ -1010,6 +1014,880 @@ mod tests {
             }
         }
         panic!("too many source registration messages");
+    }
+
+    fn take_damage(ctx: &AppContext<'_>, damage: u32) -> Vec<NotifyEvent> {
+        ctx.conn.get_input_focus().unwrap().reply().unwrap();
+        let mut notifications = Vec::new();
+        for _ in 0..1024 {
+            let Some(event) = ctx.conn.poll_for_event().unwrap() else {
+                return notifications;
+            };
+            match event {
+                Event::DamageNotify(event) if event.damage == damage => notifications.push(event),
+                Event::Error(error) => panic!("unexpected X11 error: {error:?}"),
+                _ => {}
+            }
+        }
+        panic!("damage fixture did not quiesce");
+    }
+
+    fn with_damage_source(
+        overlap: bool,
+        test: impl FnOnce(&mut EventContext<'_, '_>, &RustConnection, Window, Gcontext),
+    ) {
+        with_x11(|ctx| {
+            // Keep real DAMAGE negotiation local to these tests, away from focus fixtures.
+            ctx.conn
+                .damage_query_version(1, 1)
+                .unwrap()
+                .reply()
+                .unwrap();
+            with_sources(ctx, |events, _| {
+                let src = window(ctx, "YouTube", "browser");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                if !overlap {
+                    events
+                        .eve_clients
+                        .get_mut(&src)
+                        .unwrap()
+                        .reposition(700, 0)
+                        .unwrap();
+                }
+                let damage = events.eve_clients[&src].damage();
+                ctx.conn
+                    .damage_subtract(damage, 0u32, 0u32)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                take_damage(ctx, damage);
+                let (drawer, _) = x11rb::connect(None).unwrap();
+                let gc = drawer.generate_id().unwrap();
+                drawer
+                    .create_gc(gc, src, &CreateGCAux::new())
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                test(events, &drawer, src, gc);
+                drawer.free_gc(gc).unwrap().check().unwrap();
+            });
+        });
+    }
+
+    fn draw_damage(drawer: &RustConnection, src: Window, gc: Gcontext, colors: &[u32]) {
+        for &color in colors {
+            drawer
+                .change_gc(gc, &ChangeGCAux::new().foreground(color))
+                .unwrap();
+            drawer
+                .poly_fill_rectangle(
+                    src,
+                    gc,
+                    &[Rectangle {
+                        x: 0,
+                        y: 0,
+                        width: 500,
+                        height: 400,
+                    }],
+                )
+                .unwrap();
+        }
+        drawer.get_input_focus().unwrap().reply().unwrap();
+    }
+
+    fn dispatch_damage(
+        events: &mut EventContext<'_, '_>,
+        event: NotifyEvent,
+    ) -> anyhow::Result<()> {
+        let result = handle_event(events, Event::DamageNotify(event));
+        // A flush alone does not order our subtract against the drawer's next request.
+        // Wait until it has been processed, even when a hidden/error path has no round trip.
+        events
+            .app_ctx
+            .conn
+            .get_input_focus()
+            .unwrap()
+            .reply()
+            .unwrap();
+        result
+    }
+
+    fn damage_preview_color(events: &EventContext<'_, '_>, src: Window) -> u32 {
+        let thumbnail = &events.eve_clients[&src];
+        let reply = events
+            .app_ctx
+            .conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                thumbnail.window(),
+                thumbnail.dimensions.width as i16 - 10,
+                thumbnail.dimensions.height as i16 - 10,
+                1,
+                1,
+                u32::MAX,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        let bytes = reply.data.as_slice().try_into().unwrap();
+        let pixel = if events.app_ctx.conn.setup().image_byte_order == ImageOrder::LSB_FIRST {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        };
+        pixel & 0xFFFFFF
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_burst_coalesces_and_rearms() {
+        for overlap in [false, true] {
+            with_damage_source(overlap, |events, drawer, src, gc| {
+                let damage = events.eve_clients[&src].damage();
+                draw_damage(
+                    drawer,
+                    src,
+                    gc,
+                    &[0xFF0000, 0x0000FF, 0xFF0000, 0x0000FF, 0x00FF00],
+                );
+                let mut pending = take_damage(events.app_ctx, damage);
+                assert_eq!(
+                    pending.len(),
+                    1,
+                    "five draws must coalesce, overlap={overlap}"
+                );
+                dispatch_damage(events, pending.remove(0)).unwrap();
+                assert_eq!(damage_preview_color(events, src), 0x00FF00);
+                draw_damage(drawer, src, gc, &[0x0000FF]);
+                let mut pending = take_damage(events.app_ctx, damage);
+                assert_eq!(pending.len(), 1, "later draw must re-notify");
+                dispatch_damage(events, pending.remove(0)).unwrap();
+                assert_eq!(damage_preview_color(events, src), 0x0000FF);
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_hidden_preview_rearms_and_reveals() {
+        with_damage_source(false, |events, drawer, src, gc| {
+            let damage = events.eve_clients[&src].damage();
+            events
+                .eve_clients
+                .get_mut(&src)
+                .unwrap()
+                .set_visibility_blocked(true, events.display_config, events.font_renderer)
+                .unwrap();
+            for color in [0xFF0000, 0x0000FF] {
+                draw_damage(drawer, src, gc, &[color]);
+                let mut pending = take_damage(events.app_ctx, damage);
+                assert_eq!(pending.len(), 1);
+                dispatch_damage(events, pending.remove(0)).unwrap();
+                assert!(!events.eve_clients[&src].is_visible());
+            }
+            events
+                .eve_clients
+                .get_mut(&src)
+                .unwrap()
+                .set_visibility_blocked(false, events.display_config, events.font_renderer)
+                .unwrap();
+            assert_eq!(damage_preview_color(events, src), 0x0000FF);
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_static_preview_skips_invalid_color_and_rearms() {
+        with_damage_source(false, |events, drawer, src, gc| {
+            let damage = events.eve_clients[&src].damage();
+            draw_damage(drawer, src, gc, &[0x0000FF]);
+            let mut pending = take_damage(events.app_ctx, damage);
+            assert_eq!(pending.len(), 1);
+            let mut invalid = events.display_config.clone();
+            invalid
+                .custom_source_settings
+                .get_mut("YouTube")
+                .unwrap()
+                .preview_mode = crate::common::types::PreviewMode::Static {
+                color: "invalid".into(),
+            };
+            let mut failing = EventContext {
+                app_ctx: events.app_ctx,
+                daemon_config: &mut *events.daemon_config,
+                eve_clients: &mut *events.eve_clients,
+                session_state: &mut *events.session_state,
+                cycle_state: &mut *events.cycle_state,
+                group_drag_state: &mut *events.group_drag_state,
+                status_tx: events.status_tx,
+                font_renderer: events.font_renderer,
+                display_config: &invalid,
+            };
+            dispatch_damage(&mut failing, pending.remove(0)).unwrap();
+            assert_eq!(
+                failing
+                    .eve_clients
+                    .get_mut(&src)
+                    .unwrap()
+                    .update_for_damage(&invalid)
+                    .unwrap(),
+                crate::daemon::thumbnail::DamageUpdate::Static
+            );
+            assert!(events.eve_clients.contains_key(&src));
+            draw_damage(drawer, src, gc, &[0x00FF00]);
+            let mut pending = take_damage(events.app_ctx, damage);
+            assert_eq!(
+                pending.len(),
+                1,
+                "skipping a Static repaint must not stop damage notifications"
+            );
+            dispatch_damage(events, pending.remove(0)).unwrap();
+            assert_eq!(damage_preview_color(events, src), 0x00FF00);
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_id_is_authoritative_and_unknown_ids_are_ignored() {
+        with_damage_source(false, |events, drawer, src, gc| {
+            let damage = events.eve_clients[&src].damage();
+            draw_damage(drawer, src, gc, &[0x0000FF]);
+            let mut pending = take_damage(events.app_ctx, damage);
+            assert_eq!(pending.len(), 1);
+            let mut valid = pending.remove(0);
+            let mut unknown = valid;
+            unknown.damage = events.app_ctx.conn.generate_id().unwrap();
+            dispatch_damage(events, unknown).unwrap();
+            draw_damage(drawer, src, gc, &[0x00FF00]);
+            assert!(
+                take_damage(events.app_ctx, damage).is_empty(),
+                "unknown ID must not subtract live damage"
+            );
+            assert_eq!(events.eve_clients[&src].damage(), damage);
+            valid.drawable = events.app_ctx.conn.generate_id().unwrap();
+            dispatch_damage(events, valid).unwrap();
+            assert_eq!(damage_preview_color(events, src), 0x00FF00);
+            draw_damage(drawer, src, gc, &[0x0000FF]);
+            assert_eq!(take_damage(events.app_ctx, damage).len(), 1);
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_destroyed_source_cleans_tracking() {
+        with_damage_source(false, |events, drawer, src, gc| {
+            let damage = events.eve_clients[&src].damage();
+            events.session_state.update_window_position(src, 1, 2);
+            events.session_state.update_last_character(src, "YouTube");
+            draw_damage(drawer, src, gc, &[0x0000FF]);
+            let mut pending = take_damage(events.app_ctx, damage);
+            assert_eq!(pending.len(), 1);
+            events
+                .app_ctx
+                .conn
+                .destroy_window(src)
+                .unwrap()
+                .check()
+                .unwrap();
+            dispatch_damage(events, pending.remove(0)).unwrap();
+            assert!(!events.eve_clients.contains_key(&src));
+            assert!(!events.cycle_state.get_active_windows().contains_key(&src));
+            assert!(!events.session_state.window_positions.contains_key(&src));
+            assert!(
+                !events
+                    .session_state
+                    .window_last_character
+                    .contains_key(&src)
+            );
+            events
+                .app_ctx
+                .conn
+                .get_input_focus()
+                .unwrap()
+                .reply()
+                .unwrap();
+            while let Some(event) = events.app_ctx.conn.poll_for_event().unwrap() {
+                if let Event::Error(error) = event {
+                    // The server already freed these resources with the source window.
+                    // Neither pipelined core query may leak a stale-resource error here.
+                    assert!(
+                        matches!(
+                            (error.error_kind, error.minor_opcode),
+                            (x11rb::protocol::ErrorKind::DamageBadDamage, 2 | 3)
+                                | (x11rb::protocol::ErrorKind::RenderPicture, 7)
+                        ),
+                        "unexpected error after stale source cleanup: {error:?}"
+                    );
+                    assert!(![3, 14].contains(&error.major_opcode));
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_unmapped_source_rearms_after_remap() {
+        with_damage_source(false, |events, drawer, src, gc| {
+            let damage = events.eve_clients[&src].damage();
+            draw_damage(drawer, src, gc, &[0x0000FF]);
+            let mut pending = take_damage(events.app_ctx, damage);
+            assert_eq!(pending.len(), 1);
+            events
+                .app_ctx
+                .conn
+                .unmap_window(src)
+                .unwrap()
+                .check()
+                .unwrap();
+            dispatch_damage(events, pending.remove(0)).unwrap();
+            assert!(events.eve_clients.contains_key(&src));
+            assert!(take_damage(events.app_ctx, damage).is_empty());
+            events
+                .app_ctx
+                .conn
+                .map_window(src)
+                .unwrap()
+                .check()
+                .unwrap();
+            draw_damage(drawer, src, gc, &[0x00FF00]);
+            let mut pending = take_damage(events.app_ctx, damage);
+            assert_eq!(pending.len(), 1);
+            dispatch_damage(events, pending.remove(0)).unwrap();
+            assert_eq!(damage_preview_color(events, src), 0x00FF00);
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_minimized_preserves_pixels_until_expose() {
+        with_damage_source(false, |events, drawer, src, gc| {
+            draw_damage(drawer, src, gc, &[0x0000FF]);
+            let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+            thumbnail
+                .minimized(events.display_config, events.font_renderer)
+                .unwrap();
+            let minimized = preview_image(events.app_ctx, thumbnail);
+            let preview = thumbnail.window();
+            let damage = thumbnail.damage();
+            draw_damage(drawer, preview, gc, &[0xFF0000]);
+            let witness = preview_image(events.app_ctx, &events.eve_clients[&src]);
+            let pending = take_damage(events.app_ctx, damage);
+            assert_eq!(pending.len(), 1);
+            dispatch_damage(events, pending[0]).unwrap();
+            assert!(
+                preview_image(events.app_ctx, &events.eve_clients[&src]) == witness,
+                "source damage must not repaint the Minimized presentation"
+            );
+            handle_event(
+                events,
+                Event::Expose(ExposeEvent {
+                    response_type: EXPOSE_EVENT,
+                    window: preview,
+                    count: 0,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+            assert!(
+                preview_image(events.app_ctx, &events.eve_clients[&src]) == minimized,
+                "Expose must still restore the full Minimized presentation"
+            );
+            draw_damage(drawer, src, gc, &[0x00FF00]);
+            assert_eq!(take_damage(events.app_ctx, damage).len(), 1);
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn damage_unavailable_live_does_not_accumulate_overlay() {
+        for unmapped in [false, true] {
+            with_damage_source(false, |events, drawer, src, gc| {
+                draw_damage(drawer, src, gc, &[0x0000FF]);
+                let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                thumbnail
+                    .border(events.display_config, false, false, events.font_renderer)
+                    .unwrap();
+                let before = preview_image(events.app_ctx, thumbnail);
+                let pending = take_damage(events.app_ctx, thumbnail.damage());
+                assert_eq!(pending.len(), 1);
+                if unmapped {
+                    events
+                        .app_ctx
+                        .conn
+                        .unmap_window(src)
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                } else {
+                    events
+                        .app_ctx
+                        .conn
+                        .configure_window(src, &ConfigureWindowAux::new().width(1).height(1))
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                }
+                // Repeated queued notifications exercise the unavailable path without relying
+                // on whether a particular X server generates damage while a window is unmapped.
+                for _ in 0..20 {
+                    dispatch_damage(events, pending[0]).unwrap();
+                }
+                let thumbnail = &events.eve_clients[&src];
+                assert!(
+                    preview_image(events.app_ctx, thumbnail) == before,
+                    "unmapped={unmapped}: unchanged overlay must not accumulate alpha"
+                );
+                thumbnail
+                    .border(events.display_config, true, true, events.font_renderer)
+                    .unwrap();
+                assert!(
+                    preview_image(events.app_ctx, thumbnail) != before,
+                    "non-damage invalidation must still show a changed overlay on the frozen base"
+                );
+            });
+        }
+    }
+
+    fn preview_image(
+        ctx: &AppContext<'_>,
+        thumbnail: &crate::daemon::thumbnail::Thumbnail<'_>,
+    ) -> Vec<u8> {
+        ctx.conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                thumbnail.window(),
+                0,
+                0,
+                thumbnail.dimensions.width,
+                thumbnail.dimensions.height,
+                u32::MAX,
+            )
+            .unwrap()
+            .reply()
+            .unwrap()
+            .data
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn first_eve_border_cleans_fleeting_source() {
+        with_x11(|ctx| {
+            ctx.conn
+                .damage_query_version(1, 1)
+                .unwrap()
+                .reply()
+                .unwrap();
+            with_sources(ctx, |events, _| {
+                let src = window(ctx, "EVE - Alice", "eve");
+                let thumbnail = super::check_and_create_window(
+                    events.app_ctx,
+                    events.daemon_config,
+                    events.display_config,
+                    src,
+                    events.font_renderer,
+                    events.session_state,
+                    events.eve_clients,
+                    None,
+                )
+                .unwrap()
+                .unwrap();
+                events.cycle_state.add_window(
+                    Some(crate::common::types::SourceIdentity::eve("Alice")),
+                    src,
+                );
+                events.session_state.update_window_position(src, 1, 2);
+                events.session_state.update_last_character(src, "Alice");
+                events.eve_clients.insert(src, thumbnail);
+                ctx.conn.destroy_window(src).unwrap().check().unwrap();
+                crate::daemon::handlers::window::draw_initial_border(events, src).unwrap();
+                assert!(!events.eve_clients.contains_key(&src));
+                assert!(!events.cycle_state.get_active_windows().contains_key(&src));
+                assert!(!events.session_state.window_positions.contains_key(&src));
+                assert!(
+                    !events
+                        .session_state
+                        .window_last_character
+                        .contains_key(&src)
+                );
+                ctx.conn.get_input_focus().unwrap().reply().unwrap();
+                while let Some(event) = ctx.conn.poll_for_event().unwrap() {
+                    if let Event::Error(error) = event {
+                        assert!(
+                            matches!(
+                                (error.error_kind, error.minor_opcode),
+                                (x11rb::protocol::ErrorKind::DamageBadDamage, 2)
+                                    | (x11rb::protocol::ErrorKind::RenderPicture, 7)
+                            ),
+                            "unexpected first-border error: {error:?}"
+                        );
+                    }
+                }
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn border_changes_repaint_idle_bases() {
+        for mode in ["live", "static", "minimized", "hidden", "unmapped"] {
+            with_damage_source(false, |events, drawer, src, gc| {
+                let mut display = events.display_config.clone();
+                display.inactive_border_enabled = false;
+                display.active_border_size = 5;
+                display.minimized_overlay_enabled = true;
+                if mode == "static" {
+                    display
+                        .custom_source_settings
+                        .get_mut("YouTube")
+                        .unwrap()
+                        .preview_mode = crate::common::types::PreviewMode::Static {
+                        color: "#0000FF".into(),
+                    };
+                }
+                draw_damage(drawer, src, gc, &[0x0000FF]);
+                let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                thumbnail.update(&display, events.font_renderer).unwrap();
+                thumbnail
+                    .border(&display, true, true, events.font_renderer)
+                    .unwrap();
+                if mode == "minimized" {
+                    thumbnail.minimized(&display, events.font_renderer).unwrap();
+                    let before = preview_image(events.app_ctx, thumbnail);
+                    thumbnail
+                        .border(&display, true, true, events.font_renderer)
+                        .unwrap();
+                    assert!(
+                        preview_image(events.app_ctx, thumbnail) == before,
+                        "border requests must preserve minimized presentation"
+                    );
+                }
+                if mode == "hidden" {
+                    thumbnail
+                        .set_visibility_blocked(true, &display, events.font_renderer)
+                        .unwrap();
+                }
+                if mode == "unmapped" {
+                    events
+                        .app_ctx
+                        .conn
+                        .unmap_window(src)
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                }
+                thumbnail
+                    .border(&display, false, false, events.font_renderer)
+                    .unwrap();
+                if mode == "hidden" {
+                    thumbnail
+                        .set_visibility_blocked(false, &display, events.font_renderer)
+                        .unwrap();
+                }
+                let actual = preview_image(events.app_ctx, thumbnail);
+                if mode == "unmapped" {
+                    // No retained base exists: a removed opaque skip mark remains frozen.
+                    events
+                        .app_ctx
+                        .conn
+                        .map_window(src)
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                }
+                thumbnail.update(&display, events.font_renderer).unwrap();
+                let restored = preview_image(events.app_ctx, thumbnail);
+                if mode == "unmapped" {
+                    assert_ne!(actual, restored, "remap finally restores the frozen base");
+                } else {
+                    assert!(
+                        actual == restored,
+                        "{mode}: border must restore the base without damage"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn identity_changes_preserve_focus_and_current_skip_style() {
+        use crate::common::types::{SourceIdentity, ThumbnailState};
+        with_x11(|ctx| {
+            ctx.conn
+                .damage_query_version(1, 1)
+                .unwrap()
+                .reply()
+                .unwrap();
+            with_sources(ctx, |events, _| {
+                let src = window(ctx, "EVE - Alice", "eve");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                thumbnail.reposition(700, 0).unwrap();
+                thumbnail.state = ThumbnailState::Normal { focused: true };
+                events
+                    .cycle_state
+                    .toggle_skip(&SourceIdentity::eve("Alice"));
+                thumbnail
+                    .border(events.display_config, true, true, events.font_renderer)
+                    .unwrap();
+                swap_character(ctx, events, src, "Bob");
+                let thumbnail = &events.eve_clients[&src];
+                assert!(thumbnail.state.is_focused());
+                let actual = preview_image(ctx, thumbnail);
+                thumbnail
+                    .border(events.display_config, true, false, events.font_renderer)
+                    .unwrap();
+                assert!(
+                    preview_image(ctx, thumbnail) == actual,
+                    "login must remove Alice's skip mark and keep focus"
+                );
+
+                events.cycle_state.toggle_skip(&SourceIdentity::eve("Bob"));
+                thumbnail
+                    .border(events.display_config, true, true, events.font_renderer)
+                    .unwrap();
+                set_title(ctx, src, crate::common::constants::eve::LOGGED_OUT_TITLE);
+                handle_event(events, property_event(src, ctx.atoms.wm_name)).unwrap();
+                let thumbnail = &events.eve_clients[&src];
+                assert!(thumbnail.live_character_name().is_empty());
+                assert_eq!(thumbnail.effective_character_name(), "Bob");
+                assert!(thumbnail.state.is_focused());
+                let actual = preview_image(ctx, thumbnail);
+                thumbnail
+                    .border(events.display_config, true, true, events.font_renderer)
+                    .unwrap();
+                assert!(
+                    preview_image(ctx, thumbnail) == actual,
+                    "logout must keep remembered skip/focus styling"
+                );
+            });
+        });
+    }
+
+    fn take_exposes(ctx: &AppContext<'_>, preview: Window) -> Vec<ExposeEvent> {
+        ctx.conn.get_input_focus().unwrap().reply().unwrap();
+        let mut exposes = Vec::new();
+        while let Some(event) = ctx.conn.poll_for_event().unwrap() {
+            match event {
+                Event::Expose(event) if event.window == preview => exposes.push(event),
+                Event::Error(error) => panic!("unexpected X11 error: {error:?}"),
+                _ => {}
+            }
+        }
+        exposes
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn expose_preserves_unavailable_live_overlay() {
+        for unmapped in [false, true] {
+            with_damage_source(false, |events, drawer, src, gc| {
+                let mut display = events.display_config.clone();
+                display.active_border_size = 5;
+                display.text_offset = crate::common::types::TextOffset::from_border_edge(10, 10);
+                let settings = display.custom_source_settings.get_mut("YouTube").unwrap();
+                settings.override_active_border_color = Some("#80FF0000".into());
+                settings.override_text_color = Some("#80FFFFFF".into());
+                draw_damage(drawer, src, gc, &[0x0000FF]);
+                let thumbnail = events.eve_clients.get_mut(&src).unwrap();
+                thumbnail
+                    .border(&display, true, false, events.font_renderer)
+                    .unwrap();
+                let preview = thumbnail.window();
+                // The border and label above the exposed rectangle must remain intact.
+                let intact_bytes = usize::from(thumbnail.dimensions.width) * 4 * 30;
+                let before = preview_image(events.app_ctx, thumbnail)[..intact_bytes].to_vec();
+                take_exposes(events.app_ctx, preview);
+                if unmapped {
+                    events
+                        .app_ctx
+                        .conn
+                        .unmap_window(src)
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                } else {
+                    events
+                        .app_ctx
+                        .conn
+                        .configure_window(src, &ConfigureWindowAux::new().width(1).height(1))
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                }
+                for _ in 0..3 {
+                    events
+                        .app_ctx
+                        .conn
+                        .clear_area(true, preview, 40, 40, 1, 1)
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                    let exposes = take_exposes(events.app_ctx, preview);
+                    assert!(exposes.iter().any(|event| event.count == 0));
+                    for expose in exposes {
+                        handle_event(events, Event::Expose(expose)).unwrap();
+                    }
+                    let after = preview_image(events.app_ctx, &events.eve_clients[&src]);
+                    assert!(
+                        before == after[..intact_bytes],
+                        "unmapped={unmapped}: Expose must not accumulate an unchanged overlay"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn expose_restores_covered_idle_previews() {
+        for static_preview in [false, true] {
+            with_damage_source(false, |events, drawer, src, gc| {
+                let mut display = events.display_config.clone();
+                if static_preview {
+                    display
+                        .custom_source_settings
+                        .get_mut("YouTube")
+                        .unwrap()
+                        .preview_mode = crate::common::types::PreviewMode::Static {
+                        color: "#0000FF".into(),
+                    };
+                }
+                let mut events = EventContext {
+                    app_ctx: events.app_ctx,
+                    daemon_config: &mut *events.daemon_config,
+                    eve_clients: &mut *events.eve_clients,
+                    session_state: &mut *events.session_state,
+                    cycle_state: &mut *events.cycle_state,
+                    group_drag_state: &mut *events.group_drag_state,
+                    status_tx: events.status_tx,
+                    font_renderer: events.font_renderer,
+                    display_config: &display,
+                };
+                draw_damage(drawer, src, gc, &[0x00FF00]);
+                events
+                    .eve_clients
+                    .get_mut(&src)
+                    .unwrap()
+                    .update(&display, events.font_renderer)
+                    .unwrap();
+                let preview = events.eve_clients[&src].window();
+                take_exposes(events.app_ctx, preview);
+                let expected = if static_preview { 0x0000FF } else { 0x00FF00 };
+                assert_eq!(damage_preview_color(&events, src), expected);
+                let geom = drawer.get_geometry(preview).unwrap().reply().unwrap();
+                let cover = drawer.generate_id().unwrap();
+                drawer
+                    .create_window(
+                        geom.depth,
+                        cover,
+                        events.app_ctx.screen.root,
+                        geom.x,
+                        geom.y,
+                        geom.width,
+                        geom.height,
+                        0,
+                        WindowClass::INPUT_OUTPUT,
+                        events.app_ctx.screen.root_visual,
+                        &CreateWindowAux::new()
+                            .override_redirect(1)
+                            .background_pixel(0xFF0000),
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                drawer.map_window(cover).unwrap().check().unwrap();
+                drawer.unmap_window(cover).unwrap().check().unwrap();
+                let exposes = take_exposes(events.app_ctx, preview);
+                assert!(
+                    exposes.iter().any(|event| event.count == 0),
+                    "uncover must deliver a final Expose"
+                );
+                // No source damage is dispatched: this source is idle throughout uncovering.
+                assert_ne!(
+                    damage_preview_color(&events, src),
+                    expected,
+                    "fixture must lose preview contents on uncover"
+                );
+                for event in exposes {
+                    handle_event(&mut events, Event::Expose(event)).unwrap();
+                }
+                assert_eq!(damage_preview_color(&events, src), expected);
+                drawer.destroy_window(cover).unwrap().check().unwrap();
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn expose_ignores_intermediate_and_untracked_windows() {
+        with_damage_source(false, |events, drawer, src, gc| {
+            draw_damage(drawer, src, gc, &[0x00FF00]);
+            let preview = events.eve_clients[&src].window();
+            draw_damage(drawer, preview, gc, &[0x0000FF]);
+            let mut expose = ExposeEvent {
+                response_type: EXPOSE_EVENT,
+                window: preview,
+                count: 1,
+                ..Default::default()
+            };
+            handle_event(events, Event::Expose(expose)).unwrap();
+            assert_eq!(damage_preview_color(events, src), 0x0000FF);
+            expose.count = 0;
+            expose.window = src;
+            handle_event(events, Event::Expose(expose)).unwrap();
+            assert_eq!(damage_preview_color(events, src), 0x0000FF);
+            expose.window = preview;
+            handle_event(events, Event::Expose(expose)).unwrap();
+            assert_eq!(damage_preview_color(events, src), 0x00FF00);
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn expose_of_fleeting_source_cleans_tracking() {
+        with_x11(|ctx| {
+            ctx.conn
+                .damage_query_version(1, 1)
+                .unwrap()
+                .reply()
+                .unwrap();
+            with_sources(ctx, |events, _| {
+                let src = window(ctx, "YouTube", "browser");
+                handle_event(events, create_event(ctx, src)).unwrap();
+                let preview = events.eve_clients[&src].window();
+                events.session_state.update_window_position(src, 1, 2);
+                events.session_state.update_last_character(src, "YouTube");
+                // Destroy before consuming the preview's original map Expose.
+                ctx.conn.destroy_window(src).unwrap().check().unwrap();
+                let exposes = take_exposes(ctx, preview);
+                assert!(exposes.iter().any(|event| event.count == 0));
+                for event in exposes {
+                    handle_event(events, Event::Expose(event)).unwrap();
+                }
+                assert!(!events.eve_clients.contains_key(&src));
+                assert!(!events.cycle_state.get_active_windows().contains_key(&src));
+                assert!(!events.session_state.window_positions.contains_key(&src));
+                assert!(
+                    !events
+                        .session_state
+                        .window_last_character
+                        .contains_key(&src)
+                );
+                ctx.conn.get_input_focus().unwrap().reply().unwrap();
+                while let Some(event) = ctx.conn.poll_for_event().unwrap() {
+                    if let Event::Error(error) = event {
+                        assert!(
+                            matches!(
+                                (error.error_kind, error.minor_opcode),
+                                (x11rb::protocol::ErrorKind::DamageBadDamage, 2)
+                                    | (x11rb::protocol::ErrorKind::RenderPicture, 7)
+                            ),
+                            "unexpected stale Expose error: {error:?}"
+                        );
+                    }
+                }
+            });
+        });
     }
 
     #[test]

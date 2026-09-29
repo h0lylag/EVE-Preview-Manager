@@ -3,6 +3,7 @@
 mod activation;
 mod border_update;
 mod cycle_state;
+mod damage_metrics;
 mod dispatcher;
 mod focus;
 pub mod font;
