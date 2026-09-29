@@ -7,8 +7,8 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt, EventMask, Window};
 use x11rb::rust_connection::RustConnection;
 
+use super::source_registry::SourceRegistry;
 use super::thumbnail::Thumbnail;
-use crate::common::types::SourceIdentity;
 use crate::x11::AppContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,12 +101,10 @@ fn walk_owner(
 /// Ownership of `window` itself, without consulting its ancestors.
 fn direct_owner(
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active: Option<&HashMap<Window, Option<SourceIdentity>>>,
+    sources: Option<&SourceRegistry>,
     window: Window,
 ) -> Option<FocusOwner> {
-    if active.is_some_and(|windows| windows.contains_key(&window))
-        || thumbnails.contains_key(&window)
-    {
+    if sources.is_some_and(|sources| sources.contains(window)) || thumbnails.contains_key(&window) {
         return Some(FocusOwner::Source(window));
     }
     // Prefer a real source or preview over another source's cached frame.
@@ -126,13 +124,13 @@ fn direct_owner(
 pub(super) fn resolve_window(
     ctx: &AppContext<'_>,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active: Option<&HashMap<Window, Option<SourceIdentity>>>,
+    sources: Option<&SourceRegistry>,
     window: Window,
 ) -> Result<FocusOwner> {
     walk_owner(
         window,
         |w| ctx.conn.setup().roots.iter().any(|screen| screen.root == w),
-        |w| direct_owner(thumbnails, active, w),
+        |w| direct_owner(thumbnails, sources, w),
         |w| Ok(ctx.conn.query_tree(w)?.reply()?.parent),
     )
 }
@@ -167,7 +165,7 @@ const POINTER_DESCENT_LIMIT: usize = 32;
 fn pointer_owner(
     ctx: &AppContext<'_>,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active: &HashMap<Window, Option<SourceIdentity>>,
+    sources: &SourceRegistry,
 ) -> Result<FocusOwner> {
     for screen in &ctx.conn.setup().roots {
         let reply = ctx.conn.query_pointer(screen.root)?.reply()?;
@@ -179,7 +177,7 @@ fn pointer_owner(
         }
         return descend_pointer(
             reply.child,
-            |w| direct_owner(thumbnails, Some(active), w),
+            |w| direct_owner(thumbnails, Some(sources), w),
             |w| Ok(ctx.conn.query_pointer(w)?.reply()?.child),
         );
     }
@@ -189,14 +187,14 @@ fn pointer_owner(
 pub(super) fn observe(
     ctx: &AppContext<'_>,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active: &HashMap<Window, Option<SourceIdentity>>,
+    sources: &SourceRegistry,
 ) -> Result<FocusObservation> {
     let raw_focus = ctx.conn.get_input_focus()?.reply()?.focus;
     let pointer_root = raw_focus == 1;
     let owner = if pointer_root {
-        pointer_owner(ctx, thumbnails, active)?
+        pointer_owner(ctx, thumbnails, sources)?
     } else {
-        resolve_window(ctx, thumbnails, Some(active), raw_focus)?
+        resolve_window(ctx, thumbnails, Some(sources), raw_focus)?
     };
     Ok(FocusObservation {
         raw_focus,

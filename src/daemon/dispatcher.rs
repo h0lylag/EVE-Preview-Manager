@@ -12,6 +12,7 @@ use x11rb::protocol::xproto::*;
 use super::cycle_state::CycleState;
 use super::group_drag::GroupDragState;
 use super::session_state::SessionState;
+use super::source_registry::SourceRegistry;
 use super::thumbnail::Thumbnail;
 use crate::config::DaemonConfig;
 
@@ -28,6 +29,7 @@ pub(super) struct EventContext<'a, 'b> {
     pub eve_clients: &'b mut HashMap<Window, Thumbnail<'a>>,
     pub session_state: &'b mut SessionState,
     pub cycle_state: &'b mut CycleState,
+    pub sources: &'b mut SourceRegistry,
     pub group_drag_state: &'b mut GroupDragState,
     pub status_tx: &'b IpcSender<DaemonMessage>,
     pub font_renderer: &'b crate::daemon::font::FontRenderer,

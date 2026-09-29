@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use super::preview_visibility::VisibilityContext;
 use super::session_state::SessionState;
+use super::source_registry::{SourceRegistry, TrackedSource};
 use super::thumbnail::Thumbnail;
 
 fn source_window_position(ctx: &AppContext, window: Window) -> Option<Position> {
@@ -58,10 +59,12 @@ impl WindowIdentity {
         SourceIdentity::new(self.kind, self.name.clone())
     }
 
-    /// Cycle registration: unnamed (logged-out) EVE clients stay `None`, while custom
-    /// sources are always typed so they are never counted as EVE clients.
-    pub fn cycle_identity(&self) -> Option<SourceIdentity> {
-        (self.is_custom() || !self.name.is_empty()).then(|| self.source_identity())
+    /// What the source registry admits this window as.
+    pub fn tracked_source(&self) -> TrackedSource {
+        match self.kind {
+            SourceKind::Eve => TrackedSource::eve(self.name.clone()),
+            SourceKind::Custom => TrackedSource::custom(self.name.clone()),
+        }
     }
 
     pub fn is_eve(&self) -> bool {
@@ -600,7 +603,6 @@ pub fn check_and_create_window<'a>(
 }
 
 // Initial scan for existing EVE clients and custom sources to populate thumbnails.
-use super::cycle_state::CycleState;
 
 pub fn scan_eve_windows<'a>(
     ctx: &AppContext<'a>,
@@ -608,7 +610,7 @@ pub fn scan_eve_windows<'a>(
     font_renderer: &crate::daemon::font::FontRenderer,
     daemon_config: &mut DaemonConfig,
     state: &mut SessionState,
-    cycle_state: &mut CycleState,
+    sources: &mut SourceRegistry,
     status_tx: &IpcSender<DaemonMessage>,
 ) -> Result<HashMap<Window, Thumbnail<'a>>> {
     let mut eve_clients = HashMap::new();
@@ -633,14 +635,14 @@ pub fn scan_eve_windows<'a>(
             }
         };
 
-        // Register identified window with CycleState
-        cycle_state.add_window(identity.cycle_identity(), w);
+        // Register the identified window, even if no thumbnail is created
+        sources.register(w, identity.tracked_source());
         detected_windows.push((w, identity));
     }
 
     // The whole initial population is registered before any preview can map, so the
     // first preview already knows whether it is the only EVE client.
-    let eve_client_count = cycle_state.eve_client_count();
+    let eve_client_count = sources.eve_client_count();
     for (w, identity) in detected_windows {
         // 2. Try to create thumbnail
         match check_and_create_window(
@@ -815,6 +817,7 @@ mod tests {
         font::FontRenderer,
         group_drag::GroupDragState,
         session_state::SessionState,
+        source_registry::{SourceRegistry, TrackedSource},
     };
     use crate::{
         common::{
@@ -944,6 +947,7 @@ mod tests {
         let mut previews = HashMap::new();
         let mut session = SessionState::new();
         let mut cycle = CycleState::new(config.profile.cycle_groups.clone());
+        let mut sources = SourceRegistry::default();
         let mut drag = GroupDragState::default();
         let (tx, rx) = ipc::channel().unwrap();
         test(
@@ -953,6 +957,7 @@ mod tests {
                 eve_clients: &mut previews,
                 session_state: &mut session,
                 cycle_state: &mut cycle,
+                sources: &mut sources,
                 group_drag_state: &mut drag,
                 status_tx: &tx,
                 font_renderer: font,
@@ -1259,6 +1264,7 @@ mod tests {
                 eve_clients: &mut *events.eve_clients,
                 session_state: &mut *events.session_state,
                 cycle_state: &mut *events.cycle_state,
+                sources: &mut *events.sources,
                 group_drag_state: &mut *events.group_drag_state,
                 status_tx: events.status_tx,
                 font_renderer: events.font_renderer,
@@ -1332,7 +1338,7 @@ mod tests {
                 .unwrap();
             dispatch_damage(events, pending.remove(0)).unwrap();
             assert!(!events.eve_clients.contains_key(&src));
-            assert!(!events.cycle_state.get_active_windows().contains_key(&src));
+            assert!(!events.sources.contains(src));
             assert!(!events.session_state.window_positions.contains_key(&src));
             assert!(
                 !events
@@ -1533,17 +1539,14 @@ mod tests {
                 )
                 .unwrap()
                 .unwrap();
-                events.cycle_state.add_window(
-                    Some(crate::common::types::SourceIdentity::eve("Alice")),
-                    src,
-                );
+                events.sources.register(src, TrackedSource::eve("Alice"));
                 events.session_state.update_window_position(src, 1, 2);
                 events.session_state.update_last_character(src, "Alice");
                 events.eve_clients.insert(src, thumbnail);
                 ctx.conn.destroy_window(src).unwrap().check().unwrap();
                 crate::daemon::handlers::window::draw_initial_border(events, src).unwrap();
                 assert!(!events.eve_clients.contains_key(&src));
-                assert!(!events.cycle_state.get_active_windows().contains_key(&src));
+                assert!(!events.sources.contains(src));
                 assert!(!events.session_state.window_positions.contains_key(&src));
                 assert!(
                     !events
@@ -1801,6 +1804,7 @@ mod tests {
                     eve_clients: &mut *events.eve_clients,
                     session_state: &mut *events.session_state,
                     cycle_state: &mut *events.cycle_state,
+                    sources: &mut *events.sources,
                     group_drag_state: &mut *events.group_drag_state,
                     status_tx: events.status_tx,
                     font_renderer: events.font_renderer,
@@ -1908,7 +1912,7 @@ mod tests {
                     handle_event(events, Event::Expose(event)).unwrap();
                 }
                 assert!(!events.eve_clients.contains_key(&src));
-                assert!(!events.cycle_state.get_active_windows().contains_key(&src));
+                assert!(!events.sources.contains(src));
                 assert!(!events.session_state.window_positions.contains_key(&src));
                 assert!(
                     !events
@@ -1943,7 +1947,7 @@ mod tests {
                 assert_eq!(events.eve_clients.len(), 1);
                 let preview = events.eve_clients[&src].window();
                 let config_before = serde_json::to_value(&*events.daemon_config).unwrap();
-                let sources_before = events.cycle_state.get_active_windows().clone();
+                let sources_before = events.sources.clone();
                 let positions_before = events.session_state.window_positions.clone();
                 let characters_before = events.session_state.window_last_character.clone();
                 drain_messages(rx);
@@ -1956,7 +1960,7 @@ mod tests {
                         assert_eq!(events.eve_clients.len(), 1, "preview became a source");
                     }
                 }
-                assert_eq!(*events.cycle_state.get_active_windows(), sources_before);
+                assert_eq!(*events.sources, sources_before);
                 assert_eq!(events.session_state.window_positions, positions_before);
                 assert_eq!(
                     events.session_state.window_last_character,
@@ -2656,7 +2660,7 @@ mod tests {
                                     events.font_renderer,
                                     events.daemon_config,
                                     events.session_state,
-                                    events.cycle_state,
+                                    events.sources,
                                     events.status_tx,
                                 )
                                 .unwrap();
@@ -2960,11 +2964,11 @@ mod tests {
                                 events.font_renderer,
                                 events.daemon_config,
                                 events.session_state,
-                                events.cycle_state,
+                                events.sources,
                                 events.status_tx,
                             )
                             .unwrap();
-                            assert_eq!(events.cycle_state.eve_client_count(), count);
+                            assert_eq!(events.sources.eve_client_count(), count);
                             let hidden = single && count == 1;
                             for &source in &sources {
                                 assert_visible(ctx, events, source, !hidden);
@@ -2995,7 +2999,7 @@ mod tests {
                 for event in detection_events(ctx, a) {
                     handle_event(events, event).unwrap();
                 }
-                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_eq!(events.sources.eve_client_count(), 1);
                 assert_visible(ctx, events, a, false);
                 events
                     .eve_clients
@@ -3013,10 +3017,10 @@ mod tests {
                 // A late-identified login screen counts once it is recognized.
                 let b = window(ctx, "Not identified yet", "eve");
                 handle_event(events, create_event(ctx, b)).unwrap();
-                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_eq!(events.sources.eve_client_count(), 1);
                 set_title(ctx, b, "EVE");
                 handle_event(events, property_event(b, ctx.atoms.wm_name)).unwrap();
-                assert_eq!(events.cycle_state.eve_client_count(), 2);
+                assert_eq!(events.sources.eve_client_count(), 2);
                 assert_visible(ctx, events, a, true);
                 assert_visible(ctx, events, b, true);
                 // Login, logout, duplicate notifications, and minimizing keep the count.
@@ -3049,14 +3053,14 @@ mod tests {
                     }),
                 )
                 .unwrap();
-                assert_eq!(events.cycle_state.eve_client_count(), 2);
+                assert_eq!(events.sources.eve_client_count(), 2);
                 assert_visible(ctx, events, a, true);
                 // Closing the second client hides the survivor without any focus event;
                 // duplicate and preview-window destroy events are harmless.
                 destroy_source(ctx, events, b);
                 handle_event(events, destroy_event(b)).unwrap();
                 handle_event(events, destroy_event(preview)).unwrap();
-                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_eq!(events.sources.eve_client_count(), 1);
                 assert_visible(ctx, events, a, false);
                 let c = window(ctx, "EVE - C", "eve");
                 handle_event(events, create_event(ctx, c)).unwrap();
@@ -3069,7 +3073,7 @@ mod tests {
                 assert_eq!(events.eve_clients[&a].dimensions, dimensions);
                 destroy_source(ctx, events, a);
                 destroy_source(ctx, events, c);
-                assert_eq!(events.cycle_state.eve_client_count(), 0);
+                assert_eq!(events.sources.eve_client_count(), 0);
                 assert_visible(ctx, events, custom, true);
             })
         });
@@ -3095,7 +3099,7 @@ mod tests {
                 assert_visible(ctx, events, a, false);
                 handle_event(events, create_event(ctx, b)).unwrap();
                 assert!(!events.eve_clients.contains_key(&b));
-                assert_eq!(events.cycle_state.eve_client_count(), 2);
+                assert_eq!(events.sources.eve_client_count(), 2);
                 assert_visible(ctx, events, a, true);
                 destroy_source(ctx, events, b);
                 assert_visible(ctx, events, a, false);
@@ -3135,8 +3139,8 @@ mod tests {
                         })
                     };
                     handle_event(events, event).unwrap();
-                    assert!(!events.cycle_state.get_active_windows().contains_key(&b));
-                    assert_eq!(events.cycle_state.eve_client_count(), 1);
+                    assert!(!events.sources.contains(b));
+                    assert_eq!(events.sources.eve_client_count(), 1);
                     assert_visible(ctx, events, a, false);
                     handle_event(events, destroy_event(b)).unwrap();
                     assert_visible(ctx, events, a, false);
@@ -3166,7 +3170,7 @@ mod tests {
                 assert_visible(ctx, events, b, true);
                 // Only the WM frame reports destruction; the parent match removes B.
                 destroy_source(ctx, events, frame);
-                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_eq!(events.sources.eve_client_count(), 1);
                 assert_visible(ctx, events, a, false);
             })
         });
@@ -3438,7 +3442,7 @@ mod tests {
                                     events.font_renderer,
                                     events.daemon_config,
                                     events.session_state,
-                                    events.cycle_state,
+                                    events.sources,
                                     events.status_tx,
                                 )
                                 .unwrap();
@@ -4338,7 +4342,7 @@ mod tests {
                     events.font_renderer,
                     events.daemon_config,
                     events.session_state,
-                    events.cycle_state,
+                    events.sources,
                     events.status_tx,
                 )
                 .unwrap();
@@ -4373,9 +4377,7 @@ mod tests {
             with_config(ctx, config, |events, _| {
                 let source = window(ctx, "EVE - Failed", "eve");
                 let identity = super::WindowIdentity::new_eve("Failed".into());
-                events
-                    .cycle_state
-                    .add_window(identity.cycle_identity(), source);
+                events.sources.register(source, identity.tracked_source());
                 let result = super::check_and_create_window(
                     ctx,
                     events.daemon_config,
@@ -4452,9 +4454,12 @@ mod tests {
                     handle_event(events, property_event(custom, ctx.atoms.wm_name)).unwrap();
                     handle_event(events, map_event(ctx, custom)).unwrap();
 
-                    assert_eq!(events.cycle_state.eve_client_count(), 1, "{alias}");
+                    assert_eq!(events.sources.eve_client_count(), 1, "{alias}");
                     assert_eq!(
-                        events.cycle_state.get_active_windows()[&custom],
+                        events
+                            .sources
+                            .get(custom)
+                            .and_then(TrackedSource::live_identity),
                         Some(SourceIdentity::custom(alias))
                     );
                     let preview = &events.eve_clients[&custom];
@@ -4489,9 +4494,12 @@ mod tests {
                 ctx.conn.map_window(eve).unwrap().check().unwrap();
                 handle_event(events, map_event(ctx, eve)).unwrap();
 
-                assert_eq!(events.cycle_state.eve_client_count(), 1);
+                assert_eq!(events.sources.eve_client_count(), 1);
                 assert_eq!(
-                    events.cycle_state.get_active_windows()[&eve],
+                    events
+                        .sources
+                        .get(eve)
+                        .and_then(TrackedSource::live_identity),
                     Some(SourceIdentity::eve("Pilot"))
                 );
                 let preview = &events.eve_clients[&eve];
@@ -4516,7 +4524,13 @@ mod tests {
                 handle_event(events, map_event(ctx, eve)).unwrap();
 
                 let other = Some(SourceIdentity::eve("Other"));
-                assert_eq!(events.cycle_state.get_active_windows()[&eve], other);
+                assert_eq!(
+                    events
+                        .sources
+                        .get(eve)
+                        .and_then(TrackedSource::live_identity),
+                    other
+                );
                 assert_eq!(events.eve_clients[&eve].effective_source_identity(), other);
                 assert!(
                     events
@@ -4543,6 +4557,7 @@ mod tests {
                     eve_clients: &mut *events.eve_clients,
                     session_state: &mut *events.session_state,
                     cycle_state: &mut *events.cycle_state,
+                    sources: &mut *events.sources,
                     group_drag_state: &mut *events.group_drag_state,
                     status_tx: events.status_tx,
                     font_renderer: events.font_renderer,
@@ -4561,10 +4576,13 @@ mod tests {
                     handle_event(events, map_event(ctx, source)).unwrap();
                 }
 
-                assert_eq!(events.cycle_state.eve_client_count(), 1);
-                let registry = events.cycle_state.get_active_windows();
-                assert_eq!(registry[&custom], Some(SourceIdentity::custom("YouTube")));
-                assert_eq!(registry[&eve], Some(SourceIdentity::eve("Other")));
+                assert_eq!(events.sources.eve_client_count(), 1);
+                let registry = &events.sources;
+                assert_eq!(
+                    registry.get(custom),
+                    Some(&TrackedSource::custom("YouTube"))
+                );
+                assert_eq!(registry.get(eve), Some(&TrackedSource::eve("Other")));
                 let remembered = &events.session_state.window_last_character;
                 assert!(!remembered.contains_key(&custom));
                 assert_eq!(remembered[&eve], "Other");

@@ -16,6 +16,7 @@ mod preview_visibility;
 mod renderer;
 mod session_state;
 mod snapping;
+mod source_registry;
 mod thumbnail;
 pub mod window_detection;
 

@@ -60,7 +60,7 @@ pub(in crate::daemon) fn restore_focus_visibility(ctx: &mut EventContext) {
 /// Apply every active hiding reason, including when a previous reason has just cleared.
 /// Hides are applied before reveals so previews that swap places never overlap.
 pub(in crate::daemon) fn reconcile_previews(ctx: &mut EventContext) {
-    let eve_client_count = ctx.cycle_state.eve_client_count();
+    let eve_client_count = ctx.sources.eve_client_count();
     let session = &*ctx.session_state;
     let visibility = VisibilityContext::new(
         ctx.display_config,

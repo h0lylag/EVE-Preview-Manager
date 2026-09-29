@@ -9,6 +9,7 @@ use x11rb::protocol::damage::ConnectionExt as DamageExt;
 use x11rb::protocol::xproto::*;
 
 use super::super::dispatcher::EventContext;
+use super::super::source_registry::{SourceRegistry, TrackedSource};
 use super::super::thumbnail::Thumbnail;
 use super::upsert_spatial_settings;
 use crate::common::ipc::{DaemonMessage, ThumbnailSpatialUpdate};
@@ -50,7 +51,9 @@ fn remove_from_group_drag(ctx: &mut EventContext<'_, '_>, source_window: Window)
 /// The sole removal boundary for live event handling, including stale render failures.
 fn forget_source(ctx: &mut EventContext<'_, '_>, source_window: Window) {
     remove_from_group_drag(ctx, source_window);
-    ctx.cycle_state.remove_window(source_window);
+    if ctx.sources.remove(source_window).is_some() {
+        ctx.cycle_state.source_removed(source_window);
+    }
     ctx.session_state.remove_window(source_window);
     ctx.eve_clients.remove(&source_window);
     super::state::reconcile_previews(ctx);
@@ -58,11 +61,10 @@ fn forget_source(ctx: &mut EventContext<'_, '_>, source_window: Window) {
 
 fn source_window_for_destroy_event(
     destroyed_window: Window,
-    active_windows: &HashMap<Window, Option<SourceIdentity>>,
+    sources: &SourceRegistry,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
 ) -> Option<Window> {
-    if active_windows.contains_key(&destroyed_window) || thumbnails.contains_key(&destroyed_window)
-    {
+    if sources.contains(destroyed_window) || thumbnails.contains_key(&destroyed_window) {
         Some(destroyed_window)
     } else {
         thumbnails
@@ -203,8 +205,7 @@ pub fn process_detected_window(
     );
     debug!(?identity, "Identity details");
 
-    ctx.cycle_state
-        .add_window(identity.cycle_identity(), window);
+    ctx.sources.register(window, identity.tracked_source());
     // Registration can change the EVE client count before any early return below.
     super::state::reconcile_previews(ctx);
 
@@ -224,7 +225,7 @@ pub fn process_detected_window(
         ctx.session_state,
         ctx.eve_clients,
         Some(identity.clone()),
-        ctx.cycle_state.eve_client_count(),
+        ctx.sources.eve_client_count(),
     ) {
         Ok(Some(thumbnail)) => {
             let geom_result = ctx
@@ -587,11 +588,8 @@ pub fn handle_map_notify(ctx: &mut EventContext, event: MapNotifyEvent) -> Resul
 
 /// Handle DestroyNotify events - remove destroyed window
 pub fn handle_destroy_notify(ctx: &mut EventContext, event: DestroyNotifyEvent) -> Result<()> {
-    let window_to_remove = source_window_for_destroy_event(
-        event.window,
-        ctx.cycle_state.get_active_windows(),
-        ctx.eve_clients,
-    );
+    let window_to_remove =
+        source_window_for_destroy_event(event.window, ctx.sources, ctx.eve_clients);
     // Evaluate before removal: removing the source is what makes its transaction end.
     let affects_focus = window_to_remove.is_some()
         || super::super::activation::structure_change_affects_focus(ctx, event.window);
@@ -631,7 +629,7 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
     use crate::daemon::window_detection::{WindowIdentity, identify_window, match_custom_rule};
     use crate::x11::is_window_eve;
 
-    let Some(kind) = ctx.cycle_state.admitted_kind(window) else {
+    let Some(kind) = ctx.sources.kind(window) else {
         if let Some(identity) = identify_window(
             ctx.app_ctx,
             window,
@@ -671,14 +669,10 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
         // Title changes cannot alter a rendered custom preview; skip the rule queries.
         SourceKind::Custom if rendered && !remapped => None,
         SourceKind::Custom => {
-            let alias = ctx
-                .cycle_state
-                .get_active_windows()
-                .get(&window)
-                .cloned()
-                .flatten()
-                .map(|identity| identity.name)
-                .unwrap_or_default();
+            let alias = match ctx.sources.get(window) {
+                Some(TrackedSource::Custom { alias }) => alias.clone(),
+                _ => String::new(),
+            };
             match match_custom_rule(
                 ctx.app_ctx,
                 window,
@@ -763,7 +757,7 @@ fn apply_eve_rename(
         ))?;
     let current_pos = Position::new(geom.x, geom.y);
 
-    ctx.cycle_state
+    ctx.sources
         .update_character(window, new_character_name.to_string());
 
     let new_settings = ctx
@@ -933,6 +927,7 @@ mod tests {
             let display = config.build_display_config();
             let mut thumbnails = HashMap::new();
             let mut cycle = CycleState::new(Vec::new());
+            let mut sources = SourceRegistry::default();
             let mut session = SessionState::new();
             let mut members = Vec::new();
             for (name, x) in [("Lost", 600), ("Survivor", 900)] {
@@ -972,7 +967,7 @@ mod tests {
                 .unwrap();
                 thumbnail.reposition(x, 50).unwrap();
                 thumbnails.insert(src, thumbnail);
-                cycle.add_window(Some(identity), src);
+                sources.register(src, TrackedSource::from(identity));
                 session.update_window_position(src, x, 50);
                 session.update_last_character(src, name);
                 members.push(GroupDragMember {
@@ -997,6 +992,7 @@ mod tests {
                 eve_clients: &mut thumbnails,
                 session_state: &mut session,
                 cycle_state: &mut cycle,
+                sources: &mut sources,
                 group_drag_state: &mut drag,
                 status_tx: &tx,
                 font_renderer: &font,
@@ -1019,7 +1015,7 @@ mod tests {
                 );
                 assert!(finish_thumbnail_update(&mut ctx, source, Err(error.into())).is_err());
                 assert_eq!(ctx.eve_clients.len(), 2);
-                assert_eq!(ctx.cycle_state.get_active_windows().len(), 2);
+                assert_eq!(ctx.sources.len(), 2);
                 assert_eq!(ctx.session_state.window_positions.len(), 2);
                 assert_eq!(ctx.session_state.window_last_character.len(), 2);
                 assert_eq!(ctx.group_drag_state.anchor(), Some(anchor));
@@ -1038,7 +1034,7 @@ mod tests {
             )
             .unwrap();
             assert!(!ctx.eve_clients.contains_key(&source));
-            assert!(!ctx.cycle_state.get_active_windows().contains_key(&source));
+            assert!(!ctx.sources.contains(source));
             assert!(!ctx.session_state.window_positions.contains_key(&source));
             assert!(
                 !ctx.session_state
@@ -1046,7 +1042,7 @@ mod tests {
                     .contains_key(&source)
             );
             assert!(ctx.eve_clients.contains_key(&survivor));
-            assert!(ctx.cycle_state.get_active_windows().contains_key(&survivor));
+            assert!(ctx.sources.contains(survivor));
             assert_eq!(
                 ctx.session_state.window_positions[&survivor],
                 survivor_moved
@@ -1079,15 +1075,16 @@ mod tests {
 
     #[test]
     fn destroy_matcher_recognizes_tracked_source_without_thumbnail() {
-        let active_windows = HashMap::from([(42, None)]);
+        let mut sources = SourceRegistry::default();
+        sources.register(42, TrackedSource::eve(""));
         let thumbnails = HashMap::new();
 
         assert_eq!(
-            source_window_for_destroy_event(42, &active_windows, &thumbnails),
+            source_window_for_destroy_event(42, &sources, &thumbnails),
             Some(42)
         );
         assert_eq!(
-            source_window_for_destroy_event(99, &active_windows, &thumbnails),
+            source_window_for_destroy_event(99, &sources, &thumbnails),
             None
         );
     }

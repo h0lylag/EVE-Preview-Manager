@@ -25,6 +25,7 @@ use super::dispatcher::{EventContext, handle_event};
 use super::font;
 use super::group_drag::GroupDragState;
 use super::session_state::SessionState;
+use super::source_registry::SourceRegistry;
 use super::thumbnail::Thumbnail;
 
 use std::collections::HashSet;
@@ -45,6 +46,7 @@ struct DaemonResources<'a> {
     config: DaemonConfig,
     session: SessionState,
     cycle: CycleState,
+    sources: SourceRegistry,
     eve_clients: HashMap<Window, Thumbnail<'a>>,
     group_drag: GroupDragState,
 }
@@ -73,10 +75,10 @@ fn restore_interrupted_group_drag(
 fn tracked_source_window_for_window(
     ctx: &AppContext<'_>,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
+    sources: Option<&SourceRegistry>,
     window: Window,
 ) -> Option<Window> {
-    super::focus::resolve_window(ctx, thumbnails, active_windows, window)
+    super::focus::resolve_window(ctx, thumbnails, sources, window)
         .ok()
         .and_then(super::focus::FocusOwner::source)
 }
@@ -84,13 +86,13 @@ fn tracked_source_window_for_window(
 fn active_tracked_source_window(
     ctx: &AppContext<'_>,
     thumbnails: &HashMap<Window, Thumbnail<'_>>,
-    active_windows: Option<&HashMap<Window, Option<SourceIdentity>>>,
+    sources: Option<&SourceRegistry>,
 ) -> Option<Window> {
     let active_window = crate::x11::get_active_window(ctx.conn, ctx.screen, ctx.atoms)
         .ok()
         .flatten()?;
 
-    tracked_source_window_for_window(ctx, thumbnails, active_windows, active_window)
+    tracked_source_window_for_window(ctx, thumbnails, sources, active_window)
 }
 
 enum DaemonControlMessage {
@@ -541,6 +543,7 @@ async fn run_event_loop(
                         eve_clients: &mut resources.eve_clients,
                         session_state: &mut resources.session,
                         cycle_state: &mut resources.cycle,
+                        sources: &mut resources.sources,
                         group_drag_state: &mut resources.group_drag,
                         status_tx: &status_tx,
                         font_renderer: &font_renderer,
@@ -569,6 +572,7 @@ async fn run_event_loop(
                         eve_clients: &mut resources.eve_clients,
                         session_state: &mut resources.session,
                         cycle_state: &mut resources.cycle,
+                        sources: &mut resources.sources,
                         group_drag_state: &mut resources.group_drag,
 
                         status_tx: &status_tx,
@@ -594,9 +598,7 @@ async fn run_event_loop(
 
             // allow hotkeys for all tracked source windows known to the cycle state
             // (including those without thumbnails/previews)
-            for src_window in resources.cycle.get_active_windows().keys() {
-                current_windows.insert(*src_window);
-            }
+            current_windows.extend(resources.sources.windows());
 
             // allow hotkeys for thumbnail overlay, source, and known parent/frame windows
             for thumbnail in resources.eve_clients.values() {
@@ -726,7 +728,7 @@ async fn run_event_loop(
                             if tracked_source_window_for_window(
                                 &ctx,
                                 &resources.eve_clients,
-                                Some(resources.cycle.get_active_windows()),
+                                Some(&resources.sources),
                                 active_window,
                             )
                             .is_some()
@@ -784,6 +786,7 @@ async fn run_event_loop(
                             eve_clients: &mut resources.eve_clients,
                             session_state: &mut resources.session,
                             cycle_state: &mut resources.cycle,
+                            sources: &mut resources.sources,
                             group_drag_state: &mut resources.group_drag,
                             status_tx: &status_tx,
                             font_renderer: &font_renderer,
@@ -865,7 +868,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
     debug!("Received initial configuration");
 
     // 3. Initialize State from Config
-    let (mut daemon_config, config, mut session_state, mut cycle_state) =
+    let (mut daemon_config, config, mut session_state, cycle_state) =
         initialize_state(screen, initial_config).context("Failed to initialize state")?;
 
     // 3. Setup Signal Handlers
@@ -896,6 +899,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
 
     // 6. Build AppContext & 7. Initial Window Scan
     // We scope this so ctx (borrowing font_renderer) is dropped before we move font_renderer
+    let mut sources = SourceRegistry::default();
     let mut eve_clients;
     {
         let ctx = AppContext {
@@ -913,7 +917,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
             &font_renderer,
             &mut daemon_config,
             &mut session_state,
-            &mut cycle_state,
+            &mut sources,
             &status_tx,
         )
         .context("Failed to get initial list of tracked source windows")?;
@@ -926,6 +930,7 @@ pub async fn run_daemon(ipc_server_name: String) -> Result<()> {
         config: daemon_config,
         session: session_state,
         cycle: cycle_state,
+        sources,
         eve_clients,
         group_drag: GroupDragState::default(),
     };
@@ -972,6 +977,7 @@ fn handle_cycle_command<'a>(
         CycleCommand::Forward(group) => {
             if append_unidentified {
                 resources.cycle.cycle_forward_with_unidentified(
+                    &resources.sources,
                     group,
                     logged_out_map,
                     &resources.session.window_last_character,
@@ -979,6 +985,7 @@ fn handle_cycle_command<'a>(
                 )
             } else {
                 resources.cycle.cycle_forward(
+                    &resources.sources,
                     group,
                     logged_out_map,
                     resources.config.profile.hotkey_cycle_reset_index,
@@ -988,6 +995,7 @@ fn handle_cycle_command<'a>(
         CycleCommand::Backward(group) => {
             if append_unidentified {
                 resources.cycle.cycle_backward_with_unidentified(
+                    &resources.sources,
                     group,
                     logged_out_map,
                     &resources.session.window_last_character,
@@ -995,18 +1003,25 @@ fn handle_cycle_command<'a>(
                 )
             } else {
                 resources.cycle.cycle_backward(
+                    &resources.sources,
                     group,
                     logged_out_map,
                     resources.config.profile.hotkey_cycle_reset_index,
                 )
             }
         }
-        CycleCommand::LoggedOutUnidentifiedForward => resources
-            .cycle
-            .cycle_unidentified_logged_out_forward(&resources.session.window_last_character),
-        CycleCommand::LoggedOutUnidentifiedBackward => resources
-            .cycle
-            .cycle_unidentified_logged_out_backward(&resources.session.window_last_character),
+        CycleCommand::LoggedOutUnidentifiedForward => {
+            resources.cycle.cycle_unidentified_logged_out_forward(
+                &resources.sources,
+                &resources.session.window_last_character,
+            )
+        }
+        CycleCommand::LoggedOutUnidentifiedBackward => {
+            resources.cycle.cycle_unidentified_logged_out_backward(
+                &resources.sources,
+                &resources.session.window_last_character,
+            )
+        }
         CycleCommand::CharacterHotkey(binding) => {
             debug!(binding = %binding.display_name(), "Received direct-source hotkey command");
 
@@ -1019,9 +1034,11 @@ fn handle_cycle_command<'a>(
                 );
 
                 // Delegate logic to CycleState
-                resources
-                    .cycle
-                    .activate_next_in_group(source_group, logged_out_map)
+                resources.cycle.activate_next_in_group(
+                    &resources.sources,
+                    source_group,
+                    logged_out_map,
+                )
             } else {
                 warn!(
                     binding = %binding.display_name(),
@@ -1045,18 +1062,16 @@ fn handle_cycle_command<'a>(
             None
         }
         CycleCommand::ToggleSkip => {
-            let Some(window) = active_tracked_source_window(
-                ctx,
-                &resources.eve_clients,
-                Some(resources.cycle.get_active_windows()),
-            ) else {
+            let Some(window) =
+                active_tracked_source_window(ctx, &resources.eve_clients, Some(&resources.sources))
+            else {
                 warn!("Cannot toggle skip: No tracked window focused");
                 return None;
             };
             // Remembered identity remains usable even when logged-out cycling is disabled.
             let Some(identity) = resources
-                .cycle
-                .identity_for_window(window, Some(&resources.session.window_last_character))
+                .sources
+                .identity(window, Some(&resources.session.window_last_character))
                 .filter(|identity| !identity.name.is_empty())
             else {
                 warn!("Cannot toggle skip: Focused window has no source identity");
@@ -1085,6 +1100,7 @@ fn handle_cycle_command<'a>(
                 eve_clients: &mut resources.eve_clients,
                 session_state: &mut resources.session,
                 cycle_state: &mut resources.cycle,
+                sources: &mut resources.sources,
                 group_drag_state: &mut resources.group_drag,
                 status_tx,
                 font_renderer,
@@ -1102,6 +1118,7 @@ mod tests {
     use crate::common::types::{Dimensions, PreviewMode};
     use crate::config::profile::{CycleSlot, Profile};
     use crate::daemon::font::FontRenderer;
+    use crate::daemon::source_registry::TrackedSource;
     use crate::x11::CachedFormats;
     use x11rb::wrapper::ConnectionExt as _;
 
@@ -1174,28 +1191,30 @@ mod tests {
                         .profile
                         .hotkey_logged_out_unidentified_cycle_mode = mode;
                     let alice = SourceIdentity::eve("Alice");
-                    resources.cycle.add_window(Some(alice.clone()), 10);
-                    resources.cycle.add_window(None, 20);
-                    resources.cycle.add_window(None, 30);
-                    resources.cycle.add_window(None, 40);
+                    resources
+                        .sources
+                        .register(10, TrackedSource::from(alice.clone()));
+                    resources.sources.register(20, TrackedSource::eve(""));
+                    resources.sources.register(30, TrackedSource::eve(""));
+                    resources.sources.register(40, TrackedSource::eve(""));
                     resources
                         .session
                         .window_last_character
                         .insert(40, "Bob".into());
                     let keys = HashMap::new();
-                    let mut run =
-                        |command| {
-                            let target =
-                                handle_cycle_command(&command, resources, ctx, font, tx, &keys);
-                            if let Some((window, identity)) = &target {
-                                // The main loop records the current window after activation.
-                                assert!(resources.cycle.set_current_by_window_with_identity(
-                                    *window,
-                                    identity.as_ref()
-                                ));
-                            }
-                            target
-                        };
+                    let mut run = |command| {
+                        let target =
+                            handle_cycle_command(&command, resources, ctx, font, tx, &keys);
+                        if let Some((window, identity)) = &target {
+                            // The main loop records the current window after activation.
+                            assert!(resources.cycle.set_current_by_window_with_identity(
+                                &resources.sources,
+                                *window,
+                                identity.as_ref()
+                            ));
+                        }
+                        target
+                    };
                     assert_eq!(
                         run(CycleCommand::LoggedOutUnidentifiedForward),
                         Some((20, None))
@@ -1217,11 +1236,11 @@ mod tests {
                         (CycleCommand::Forward(group.clone()), 20),
                         (CycleCommand::Backward(group), 30),
                     ] {
-                        assert!(
-                            resources
-                                .cycle
-                                .set_current_by_window_with_identity(10, Some(&alice))
-                        );
+                        assert!(resources.cycle.set_current_by_window_with_identity(
+                            &resources.sources,
+                            10,
+                            Some(&alice)
+                        ));
                         let expected = if mode == LoggedOutUnidentifiedCycleMode::AppendToGroups {
                             Some((unidentified_window, None))
                         } else {
@@ -1260,14 +1279,15 @@ mod tests {
             runtime_hidden: false,
         };
         let (_, _, _, mut cycle) = initialize_state(&Screen::default(), config.clone()).unwrap();
-        cycle.add_window(Some(SourceIdentity::eve("Alice")), 1);
-        cycle.add_window(Some(SourceIdentity::eve("Bob")), 2);
+        let mut sources = SourceRegistry::default();
+        sources.register(1, TrackedSource::eve("Alice"));
+        sources.register(2, TrackedSource::eve("Bob"));
         assert_eq!(
-            cycle.cycle_forward("Fleet", None, false),
+            cycle.cycle_forward(&sources, "Fleet", None, false),
             Some((1, Some(SourceIdentity::eve("Alice"))))
         );
         assert_eq!(
-            cycle.cycle_forward("Other", None, false),
+            cycle.cycle_forward(&sources, "Other", None, false),
             Some((2, Some(SourceIdentity::eve("Bob"))))
         );
         for invalid in ["Fleet", "fleet", "", " Fleet "] {
@@ -1318,6 +1338,7 @@ mod tests {
         let mut resources = DaemonResources {
             config,
             cycle,
+            sources: SourceRegistry::default(),
             session: SessionState::new(),
             eve_clients: HashMap::new(),
             group_drag: GroupDragState::default(),
@@ -1465,7 +1486,9 @@ mod tests {
                     thumbnail.border(&display, true, true, font).unwrap();
                 }
                 thumbnail.update(&display, font).unwrap();
-                resources.cycle.add_window(Some(identity.clone()), src);
+                resources
+                    .sources
+                    .register(src, TrackedSource::from(identity.clone()));
                 resources.cycle.toggle_skip(&identity);
                 resources.eve_clients.insert(src, thumbnail);
 
@@ -1725,10 +1748,12 @@ mod tests {
                 let eve = window(ctx, ctx.screen.root);
                 let custom = window(ctx, ctx.screen.root);
                 let child = window(ctx, eve);
-                resources.cycle.add_window(Some(alice.clone()), eve);
                 resources
-                    .cycle
-                    .add_window(Some(custom_alice.clone()), custom);
+                    .sources
+                    .register(eve, TrackedSource::from(alice.clone()));
+                resources
+                    .sources
+                    .register(custom, TrackedSource::from(custom_alice.clone()));
                 assert!(!resources.config.profile.thumbnail_enabled);
                 assert!(resources.eve_clients.is_empty());
                 focus(ctx, Some(eve));
@@ -1738,7 +1763,9 @@ mod tests {
                 let group = resources.config.profile.cycle_groups[0].name.clone();
                 for _ in 0..3 {
                     assert_eq!(
-                        resources.cycle.cycle_forward(&group, None, false),
+                        resources
+                            .cycle
+                            .cycle_forward(&resources.sources, &group, None, false),
                         Some((custom, Some(custom_alice.clone())))
                     );
                 }
@@ -1749,7 +1776,9 @@ mod tests {
                 toggle(ctx, resources, font, tx);
                 assert!(resources.cycle.is_skipped(Some(&custom_alice)));
                 assert_eq!(
-                    resources.cycle.cycle_forward(&group, None, false),
+                    resources
+                        .cycle
+                        .cycle_forward(&resources.sources, &group, None, false),
                     Some((eve, Some(alice.clone())))
                 );
                 toggle(ctx, resources, font, tx);
@@ -1757,7 +1786,7 @@ mod tests {
 
                 // Remembered identity works independently of the logged-out cycling option.
                 resources.config.profile.hotkey_logged_out_cycle = false;
-                resources.cycle.add_window(None, eve);
+                resources.sources.register(eve, TrackedSource::eve(""));
                 resources
                     .session
                     .window_last_character
@@ -1767,14 +1796,16 @@ mod tests {
                 assert!(resources.cycle.is_skipped(Some(&alice)));
                 toggle(ctx, resources, font, tx);
                 let bob = SourceIdentity::eve("Bob");
-                resources.cycle.add_window(Some(bob.clone()), eve);
+                resources
+                    .sources
+                    .register(eve, TrackedSource::from(bob.clone()));
                 toggle(ctx, resources, font, tx);
                 assert!(resources.cycle.is_skipped(Some(&bob)));
                 assert!(!resources.cycle.is_skipped(Some(&alice)));
                 toggle(ctx, resources, font, tx);
 
                 let unknown = window(ctx, ctx.screen.root);
-                resources.cycle.add_window(None, unknown);
+                resources.sources.register(unknown, TrackedSource::eve(""));
                 let untracked = window(ctx, ctx.screen.root);
                 // Stale session data must not identify an untracked window.
                 resources
@@ -1815,7 +1846,9 @@ mod tests {
                 ] {
                     let frame = window(ctx, ctx.screen.root);
                     let src = window(ctx, frame);
-                    resources.cycle.add_window(Some(identity.clone()), src);
+                    resources
+                        .sources
+                        .register(src, TrackedSource::from(identity.clone()));
                     let display = resources.config.build_display_config();
                     let thumbnail = Thumbnail::new(
                         ctx,
@@ -1887,7 +1920,9 @@ mod tests {
                 with_daemon(render_ctx, |resources, font, tx| {
                     let identity = SourceIdentity::eve("Alice");
                     let src = window(ctx, ctx.screen.root);
-                    resources.cycle.add_window(Some(identity.clone()), src);
+                    resources
+                        .sources
+                        .register(src, TrackedSource::from(identity.clone()));
                     let display = resources.config.build_display_config();
                     let thumbnail = Thumbnail::new(
                         render_ctx,
@@ -1961,9 +1996,10 @@ mod tests {
             let a = window(ctx, ctx.screen.root);
             let b = window(ctx, ctx.screen.root);
             let mut cycle = CycleState::new(config.profile.cycle_groups.clone());
+            let mut sources = SourceRegistry::default();
             let mut thumbnails = HashMap::new();
             for (src, name) in [(a, "Alice"), (b, "Bob")] {
-                cycle.add_window(Some(SourceIdentity::eve(name)), src);
+                sources.register(src, TrackedSource::eve(name));
                 ctx.conn
                     .change_window_attributes(
                         src,
@@ -1993,7 +2029,11 @@ mod tests {
                 thumbnails.insert(src, thumbnail);
             }
             let preview_b = thumbnails[&b].window();
-            cycle.set_current_by_window_with_identity(a, Some(&SourceIdentity::eve("Alice")));
+            cycle.set_current_by_window_with_identity(
+                &sources,
+                a,
+                Some(&SourceIdentity::eve("Alice")),
+            );
             super::super::border_update::sync_focused_borders(
                 &mut thumbnails,
                 &cycle,
@@ -2053,6 +2093,7 @@ mod tests {
                 config,
                 session: SessionState::new(),
                 cycle,
+                sources,
                 eve_clients: thumbnails,
                 group_drag: GroupDragState::default(),
             };
@@ -2371,6 +2412,7 @@ mod tests {
             let font = FontRenderer::resolve_from_config(ctx.conn, "sans-serif", 12.0).unwrap();
             let mut resources = DaemonResources {
                 cycle: CycleState::new(config.profile.cycle_groups.clone()),
+                sources: SourceRegistry::default(),
                 config,
                 session: SessionState::default(),
                 eve_clients: HashMap::new(),
@@ -2378,8 +2420,8 @@ mod tests {
             };
             let source = window(ctx, ctx.screen.root);
             resources
-                .cycle
-                .add_window(Some(SourceIdentity::eve("Alice")), source);
+                .sources
+                .register(source, TrackedSource::eve("Alice"));
             // The real WM focus gate accepts every command, so each one is fully processed.
             focus(ctx, Some(source));
             ctx.conn

@@ -2,9 +2,9 @@ pub(super) mod input;
 pub(super) mod state;
 pub(super) mod window;
 
-use super::cycle_state::CycleState;
 use super::session_state::SessionState;
-use crate::common::types::{CharacterSettings, SourceKind};
+use super::source_registry::SourceRegistry;
+use crate::common::types::CharacterSettings;
 use crate::config::DisplayConfig;
 use std::collections::HashMap;
 use x11rb::protocol::xproto::Window;
@@ -13,29 +13,24 @@ use x11rb::protocol::xproto::Window;
 /// Preview rendering is intentionally irrelevant; thumbnails are only used later
 /// for optional border cleanup.
 pub(super) fn source_windows_to_minimize(
-    cycle_state: &CycleState,
+    sources: &SourceRegistry,
     session_state: &SessionState,
     display_config: &DisplayConfig,
     activated_window: Window,
 ) -> Vec<Window> {
-    cycle_state
-        .get_active_windows()
-        .iter()
-        .filter_map(|(&source_window, source_identity)| {
+    sources
+        .windows()
+        .filter(|&source_window| {
             if source_window == activated_window {
-                return None;
+                return false;
             }
 
-            let settings = match source_identity {
-                Some(identity) => display_config.settings_for(identity.kind, &identity.name),
-                None => session_state
-                    .window_last_character
-                    .get(&source_window)
-                    .and_then(|name| display_config.settings_for(SourceKind::Eve, name)),
-            };
+            // Live identity first; logged-out EVE clients use their remembered character.
+            let settings = sources
+                .identity(source_window, Some(&session_state.window_last_character))
+                .and_then(|identity| display_config.settings_for(identity.kind, &identity.name));
 
-            (!settings.is_some_and(|settings| settings.exempt_from_minimize))
-                .then_some(source_window)
+            !settings.is_some_and(|settings| settings.exempt_from_minimize)
         })
         .collect()
 }
@@ -64,9 +59,10 @@ pub(super) fn upsert_spatial_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::{Dimensions, PreviewMode, SourceIdentity};
+    use crate::common::types::{Dimensions, PreviewMode};
     use crate::config::DaemonConfig;
     use crate::config::profile::Profile;
+    use crate::daemon::source_registry::TrackedSource;
 
     fn test_display_config() -> DisplayConfig {
         let profile = Profile {
@@ -92,26 +88,26 @@ mod tests {
 
     #[test]
     fn minimization_uses_tracked_windows_when_rendering_is_disabled() {
-        let mut cycle_state = CycleState::new(Vec::new());
-        cycle_state.add_window(Some(SourceIdentity::eve("Active")), 1);
-        cycle_state.add_window(Some(SourceIdentity::eve("Other")), 2);
+        let mut sources = SourceRegistry::default();
+        sources.register(1, TrackedSource::eve("Active"));
+        sources.register(2, TrackedSource::eve("Other"));
 
         let display_config = test_display_config();
         let session_state = SessionState::new();
         assert!(!display_config.enabled);
 
         assert_eq!(
-            source_windows_to_minimize(&cycle_state, &session_state, &display_config, 1),
+            source_windows_to_minimize(&sources, &session_state, &display_config, 1),
             vec![2]
         );
     }
 
     #[test]
     fn minimization_uses_typed_settings_for_same_name_sources() {
-        let mut cycle_state = CycleState::new(Vec::new());
-        cycle_state.add_window(Some(SourceIdentity::eve("Active")), 1);
-        cycle_state.add_window(Some(SourceIdentity::eve("Shared")), 2);
-        cycle_state.add_window(Some(SourceIdentity::custom("Shared")), 3);
+        let mut sources = SourceRegistry::default();
+        sources.register(1, TrackedSource::eve("Active"));
+        sources.register(2, TrackedSource::eve("Shared"));
+        sources.register(3, TrackedSource::custom("Shared"));
 
         let mut display_config = test_display_config();
         display_config
@@ -123,17 +119,17 @@ mod tests {
         let session_state = SessionState::new();
 
         assert_eq!(
-            source_windows_to_minimize(&cycle_state, &session_state, &display_config, 1),
+            source_windows_to_minimize(&sources, &session_state, &display_config, 1),
             vec![2]
         );
     }
 
     #[test]
     fn minimization_uses_remembered_identity_but_keeps_unidentified_windows() {
-        let mut cycle_state = CycleState::new(Vec::new());
-        cycle_state.add_window(Some(SourceIdentity::eve("Active")), 1);
-        cycle_state.add_window(None, 2);
-        cycle_state.add_window(None, 3);
+        let mut sources = SourceRegistry::default();
+        sources.register(1, TrackedSource::eve("Active"));
+        sources.register(2, TrackedSource::eve(""));
+        sources.register(3, TrackedSource::eve(""));
 
         let mut session_state = SessionState::new();
         session_state
@@ -146,7 +142,7 @@ mod tests {
             .insert("Remembered".to_string(), exempt_settings());
 
         assert_eq!(
-            source_windows_to_minimize(&cycle_state, &session_state, &display_config, 1),
+            source_windows_to_minimize(&sources, &session_state, &display_config, 1),
             vec![3]
         );
     }

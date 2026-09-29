@@ -1,14 +1,15 @@
 //! Hotkey cycle state management
 //!
-//! Tracks active source windows and their cycle order for hotkey-based navigation.
-//! Normal cycling follows configured cycle groups. Optional logged-out modes can
-//! include remembered logged-out clients or unidentified login-screen clients.
+//! Navigates the sources in a `SourceRegistry` for hotkey-based cycling. Normal cycling
+//! follows configured cycle groups. Optional logged-out modes can include remembered
+//! logged-out clients or unidentified login-screen clients.
 
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
 use x11rb::protocol::xproto::Window;
 
-use crate::common::types::{SourceIdentity, SourceKind};
+use super::source_registry::SourceRegistry;
+use crate::common::types::SourceIdentity;
 
 /// State for a single cycle group
 #[derive(Debug, Clone)]
@@ -31,7 +32,7 @@ enum CycleCandidate {
 
 pub type CycleActivation = (Window, Option<SourceIdentity>);
 
-/// Tracks source windows and their typed identities for cycle order.
+/// Cycle positions, cursor, and skip state over the registered sources.
 pub struct CycleState {
     /// Active cycle groups: group_name -> GroupState
     groups: HashMap<String, GroupState>,
@@ -39,14 +40,6 @@ pub struct CycleState {
     /// Latest requested source while activation is pending, otherwise observed focus.
     /// Used to resolve starting position for cycling, especially for detached sources.
     current_window: Option<Window>,
-
-    /// Active windows: source_window_id -> live typed identity.
-    /// Logged-out EVE windows keep None, while remembered identity is
-    /// resolved from SessionState by source window id when needed.
-    active_windows: HashMap<Window, Option<SourceIdentity>>,
-
-    /// Source windows in first-detected order for unidentified logged-out cycling.
-    active_window_order: Vec<Window>,
 
     /// Sources temporarily skipped from cycling.
     skipped_sources: HashSet<SourceIdentity>,
@@ -82,110 +75,26 @@ impl CycleState {
         Self {
             groups,
             current_window: None,
-            active_windows: HashMap::new(),
-            active_window_order: Vec::new(),
             skipped_sources: HashSet::new(),
             last_active_group: None,
         }
     }
 
-    /// Admit a source window, or update the live name of an admitted EVE client.
-    ///
-    /// Admission is final: a registered window keeps its kind, and a custom source keeps
-    /// its alias, until it is removed. Only an EVE client's character name may change.
-    pub fn add_window(&mut self, identity: Option<SourceIdentity>, window: Window) {
-        if let Some(existing) = self.active_windows.get(&window) {
-            let keeps_admission = match (existing, &identity) {
-                (Some(existing), Some(identity)) if existing.kind.is_custom() => {
-                    existing == identity
-                }
-                (Some(existing), Some(identity)) => identity.kind == existing.kind,
-                (Some(existing), None) => existing.kind.is_eve(),
-                (None, Some(identity)) => identity.kind.is_eve(),
-                (None, None) => true,
-            };
-            if !keeps_admission {
-                warn!(existing = ?existing, rejected = ?identity, window, "Ignoring identity change for admitted source");
-                return;
-            }
-        } else {
-            self.active_window_order.push(window);
+    /// Keep cycle positions valid after `window` left the registry.
+    /// Call only when the registry actually removed it.
+    pub(super) fn source_removed(&mut self, window: Window) {
+        // If a tracked window disappeared, keep group indices in range.
+        self.clamp_indices();
+
+        // Clear current_window if it matches
+        if self.current_window == Some(window) {
+            self.current_window = None;
         }
-        debug!(identity = ?identity, window = window, "Adding window for source");
-        self.active_windows.insert(window, identity);
-
-        // Cycle commands filter this superset against configured groups, remembered
-        // logged-out identities, or unidentified login-screen candidates.
-    }
-
-    /// Kind fixed at admission, or None for an unregistered window.
-    pub(super) fn admitted_kind(&self, window: Window) -> Option<SourceKind> {
-        self.active_windows.get(&window).map(|identity| {
-            identity
-                .as_ref()
-                .map_or(SourceKind::Eve, |identity| identity.kind)
-        })
-    }
-
-    /// Remove window (called from DestroyNotify)
-    pub fn remove_window(&mut self, window: Window) {
-        if let Some(identity) = self.active_windows.remove(&window) {
-            debug!(identity = ?identity, window = window, "Removing window for source");
-            self.active_window_order
-                .retain(|tracked| *tracked != window);
-
-            // If a tracked window disappeared, keep group indices in range.
-            self.clamp_indices();
-
-            // Clear current_window if it matches
-            if self.current_window == Some(window) {
-                self.current_window = None;
-            }
-        }
-    }
-
-    /// Update an admitted EVE client's live character name (called on login/logout).
-    /// Never admits a window and never applies to custom sources.
-    pub fn update_character(&mut self, window: Window, new_name: String) {
-        if self.admitted_kind(window) != Some(SourceKind::Eve) {
-            debug!(
-                window,
-                "Ignoring character update for a window not admitted as EVE"
-            );
-            return;
-        }
-        let identity = (!new_name.is_empty()).then(|| SourceIdentity::eve(new_name));
-        self.add_window(identity, window);
-    }
-
-    fn active_window_for_identity(
-        active_windows: &HashMap<Window, Option<SourceIdentity>>,
-        identity: &SourceIdentity,
-    ) -> Option<Window> {
-        active_windows
-            .iter()
-            .find_map(|(&window, active)| (active.as_ref() == Some(identity)).then_some(window))
-    }
-
-    fn unidentified_logged_out_windows(
-        active_windows: &HashMap<Window, Option<SourceIdentity>>,
-        active_window_order: &[Window],
-        logged_out_map: &HashMap<Window, String>,
-    ) -> Vec<Window> {
-        active_window_order
-            .iter()
-            .copied()
-            .filter(|window| {
-                active_windows.get(window).is_some_and(Option::is_none)
-                    && !logged_out_map.contains_key(window)
-            })
-            .collect()
     }
 
     fn cycle_candidates(
         order: &[SourceIdentity],
-        active_windows: &HashMap<Window, Option<SourceIdentity>>,
-        active_window_order: &[Window],
+        sources: &SourceRegistry,
         unidentified_logged_out_map: Option<&HashMap<Window, String>>,
     ) -> Vec<CycleCandidate> {
         let mut candidates: Vec<CycleCandidate> =
@@ -193,47 +102,14 @@ impl CycleState {
 
         if let Some(map) = unidentified_logged_out_map {
             candidates.extend(
-                Self::unidentified_logged_out_windows(active_windows, active_window_order, map)
+                sources
+                    .unidentified_logged_out(map)
                     .into_iter()
                     .map(CycleCandidate::Unidentified),
             );
         }
 
         candidates
-    }
-
-    fn logged_out_window_for_identity(
-        active_windows: &HashMap<Window, Option<SourceIdentity>>,
-        identity: &SourceIdentity,
-        logged_out_map: Option<&HashMap<Window, String>>,
-    ) -> Option<Window> {
-        if !identity.kind.is_eve() || identity.name.is_empty() {
-            return None;
-        }
-
-        let map = logged_out_map?;
-
-        active_windows
-            .iter()
-            .filter(|(_, live_identity)| live_identity.is_none())
-            .find_map(|(&window, _)| {
-                map.get(&window)
-                    .is_some_and(|last_char| last_char == &identity.name)
-                    .then_some(window)
-            })
-    }
-
-    pub(super) fn identity_for_window(
-        &self,
-        window: Window,
-        logged_out_map: Option<&HashMap<Window, String>>,
-    ) -> Option<SourceIdentity> {
-        match self.active_windows.get(&window)? {
-            Some(identity) => Some(identity.clone()),
-            None => logged_out_map
-                .and_then(|map| map.get(&window))
-                .map(|name| SourceIdentity::eve(name.clone())),
-        }
     }
 
     /// Toggle skip status for a source.
@@ -263,11 +139,13 @@ impl CycleState {
     /// - `logged_out_map`: Optional window→last_character mapping for including logged-out windows
     pub fn cycle_forward(
         &mut self,
+        sources: &SourceRegistry,
         group_name: &str,
         logged_out_map: Option<&HashMap<Window, String>>,
         reset_on_switch: bool,
     ) -> Option<CycleActivation> {
         self.cycle_group(
+            sources,
             group_name,
             logged_out_map,
             None,
@@ -280,12 +158,14 @@ impl CycleState {
     /// clients appended in discovery order.
     pub fn cycle_forward_with_unidentified(
         &mut self,
+        sources: &SourceRegistry,
         group_name: &str,
         logged_out_map: Option<&HashMap<Window, String>>,
         unidentified_logged_out_map: &HashMap<Window, String>,
         reset_on_switch: bool,
     ) -> Option<CycleActivation> {
         self.cycle_group(
+            sources,
             group_name,
             logged_out_map,
             Some(unidentified_logged_out_map),
@@ -297,11 +177,13 @@ impl CycleState {
     /// Move to the previous source in the specified group (backward cycle hotkey).
     pub fn cycle_backward(
         &mut self,
+        sources: &SourceRegistry,
         group_name: &str,
         logged_out_map: Option<&HashMap<Window, String>>,
         reset_on_switch: bool,
     ) -> Option<CycleActivation> {
         self.cycle_group(
+            sources,
             group_name,
             logged_out_map,
             None,
@@ -314,12 +196,14 @@ impl CycleState {
     /// logged-out clients appended after the configured entries.
     pub fn cycle_backward_with_unidentified(
         &mut self,
+        sources: &SourceRegistry,
         group_name: &str,
         logged_out_map: Option<&HashMap<Window, String>>,
         unidentified_logged_out_map: &HashMap<Window, String>,
         reset_on_switch: bool,
     ) -> Option<CycleActivation> {
         self.cycle_group(
+            sources,
             group_name,
             logged_out_map,
             Some(unidentified_logged_out_map),
@@ -330,6 +214,7 @@ impl CycleState {
 
     fn cycle_group(
         &mut self,
+        sources: &SourceRegistry,
         group_name: &str,
         logged_out_map: Option<&HashMap<Window, String>>,
         unidentified_logged_out_map: Option<&HashMap<Window, String>>,
@@ -344,12 +229,7 @@ impl CycleState {
             }
         };
 
-        let candidates = Self::cycle_candidates(
-            &group_order,
-            &self.active_windows,
-            &self.active_window_order,
-            unidentified_logged_out_map,
-        );
+        let candidates = Self::cycle_candidates(&group_order, sources, unidentified_logged_out_map);
 
         if candidates.is_empty() {
             if unidentified_logged_out_map.is_some() {
@@ -366,11 +246,8 @@ impl CycleState {
             return None;
         }
 
-        if self.active_windows.is_empty() && logged_out_map.is_none() {
-            warn!(
-                active_windows = self.active_windows.len(),
-                "No active windows to cycle"
-            );
+        if sources.is_empty() && logged_out_map.is_none() {
+            warn!(active_windows = sources.len(), "No active windows to cycle");
             return None;
         }
 
@@ -439,18 +316,12 @@ impl CycleState {
                         continue;
                     }
 
-                    if let Some(window) =
-                        Self::active_window_for_identity(&self.active_windows, identity)
-                    {
+                    if let Some(window) = sources.window_for_identity(identity) {
                         debug!(group = group_name, identity = ?identity, index = group_state.current_index, direction = ?direction, "Cycling to active source");
                         return Some((window, Some(identity.clone())));
                     }
 
-                    if let Some(window) = Self::logged_out_window_for_identity(
-                        &self.active_windows,
-                        identity,
-                        logged_out_map,
-                    ) {
+                    if let Some(window) = sources.logged_out_window_for(identity, logged_out_map) {
                         debug!(group = group_name, identity = ?identity, index = group_state.current_index, window = window, direction = ?direction, "Cycling to logged-out EVE character");
                         return Some((window, Some(identity.clone())));
                     }
@@ -472,10 +343,11 @@ impl CycleState {
     /// Updates current_index to maintain consistency with cycle state
     pub fn activate_identity(
         &mut self,
+        sources: &SourceRegistry,
         identity: &SourceIdentity,
         logged_out_map: Option<&HashMap<Window, String>>,
     ) -> Option<CycleActivation> {
-        if let Some(window) = Self::active_window_for_identity(&self.active_windows, identity) {
+        if let Some(window) = sources.window_for_identity(identity) {
             debug!(identity = ?identity, window = window, "Activating source via direct hotkey");
 
             for group in self.groups.values_mut() {
@@ -491,9 +363,7 @@ impl CycleState {
             return Some((window, Some(identity.clone())));
         }
 
-        if let Some(window) =
-            Self::logged_out_window_for_identity(&self.active_windows, identity, logged_out_map)
-        {
+        if let Some(window) = sources.logged_out_window_for(identity, logged_out_map) {
             debug!(identity = ?identity, window = window, "Activating logged-out EVE character via direct hotkey");
 
             for group in self.groups.values_mut() {
@@ -541,28 +411,27 @@ impl CycleState {
 
     pub fn cycle_unidentified_logged_out_forward(
         &mut self,
+        sources: &SourceRegistry,
         logged_out_map: &HashMap<Window, String>,
     ) -> Option<CycleActivation> {
-        self.cycle_unidentified_logged_out(logged_out_map, CycleDirection::Forward)
+        self.cycle_unidentified_logged_out(sources, logged_out_map, CycleDirection::Forward)
     }
 
     pub fn cycle_unidentified_logged_out_backward(
         &mut self,
+        sources: &SourceRegistry,
         logged_out_map: &HashMap<Window, String>,
     ) -> Option<CycleActivation> {
-        self.cycle_unidentified_logged_out(logged_out_map, CycleDirection::Backward)
+        self.cycle_unidentified_logged_out(sources, logged_out_map, CycleDirection::Backward)
     }
 
     fn cycle_unidentified_logged_out(
         &mut self,
+        sources: &SourceRegistry,
         logged_out_map: &HashMap<Window, String>,
         direction: CycleDirection,
     ) -> Option<CycleActivation> {
-        let candidates = Self::unidentified_logged_out_windows(
-            &self.active_windows,
-            &self.active_window_order,
-            logged_out_map,
-        );
+        let candidates = sources.unidentified_logged_out(logged_out_map);
 
         if candidates.is_empty() {
             warn!("No unidentified logged-out clients to cycle");
@@ -604,13 +473,14 @@ impl CycleState {
     /// logged-out EVE windows whose live thumbnail name is empty.
     pub fn set_current_by_window_with_identity(
         &mut self,
+        sources: &SourceRegistry,
         window: Window,
         identity: Option<&SourceIdentity>,
     ) -> bool {
         self.current_window = Some(window);
 
-        if let Some(active_identity) = self.active_windows.get(&window).cloned() {
-            if let Some(active_identity) = active_identity {
+        if let Some(source) = sources.get(window) {
+            if let Some(active_identity) = source.live_identity() {
                 self.set_current_group_index(&active_identity);
             } else if let Some(identity) = identity {
                 self.set_current_group_index(identity);
@@ -640,6 +510,7 @@ impl CycleState {
     /// 2. Sources outside the Default group are appended in stable name/kind order.
     pub fn activate_next_in_group(
         &mut self,
+        sources: &SourceRegistry,
         group: &[SourceIdentity],
         logged_out_map: Option<&HashMap<Window, String>>,
     ) -> Option<CycleActivation> {
@@ -682,7 +553,7 @@ impl CycleState {
         // Start from the exact current window when possible, so remembered
         // logged-out EVE clients cycle from the clicked or focused source.
         let start_pos = if let Some(curr_win) = self.current_window
-            && let Some(curr_identity) = self.identity_for_window(curr_win, logged_out_map)
+            && let Some(curr_identity) = sources.identity(curr_win, logged_out_map)
             && let Some(pos) = sorted_candidates
                 .iter()
                 .position(|candidate| **candidate == curr_identity)
@@ -713,7 +584,9 @@ impl CycleState {
                 continue;
             }
 
-            if let Some((window, identity)) = self.activate_identity(identity, logged_out_map) {
+            if let Some((window, identity)) =
+                self.activate_identity(sources, identity, logged_out_map)
+            {
                 debug!(identity = ?identity, "Activated next in group (advanced)");
                 return Some((window, identity));
             }
@@ -732,57 +605,13 @@ impl CycleState {
     pub fn get_current_window(&self) -> Option<Window> {
         self.current_window
     }
-
-    /// Count source IDs independently of rendering, groups, skip state, or live names.
-    pub fn eve_client_count(&self) -> usize {
-        self.active_windows
-            .values()
-            .filter(|identity| match identity {
-                None => true,
-                Some(identity) => identity.kind.is_eve(),
-            })
-            .count()
-    }
-
-    /// Get all active source windows known to cycle state.
-    pub fn get_active_windows(&self) -> &HashMap<Window, Option<SourceIdentity>> {
-        &self.active_windows
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::profile::{CycleGroup, CycleSlot};
-
-    #[test]
-    fn window_identity_prefers_live_source_and_requires_tracking() {
-        let mut state = CycleState::new(Vec::new());
-        let remembered = HashMap::from([
-            (1, "Old Eve".to_string()),
-            (2, "Alice".to_string()),
-            (3, "Stale".to_string()),
-        ]);
-        state.add_window(Some(SourceIdentity::custom("Alice")), 1);
-        state.add_window(None, 2);
-        state.add_window(None, 4);
-        assert_eq!(
-            state.identity_for_window(1, Some(&remembered)),
-            Some(SourceIdentity::custom("Alice"))
-        );
-        assert_eq!(
-            state.identity_for_window(2, Some(&remembered)),
-            Some(SourceIdentity::eve("Alice"))
-        );
-        assert_eq!(state.identity_for_window(2, None), None);
-        assert_eq!(state.identity_for_window(3, Some(&remembered)), None);
-        assert_eq!(state.identity_for_window(4, Some(&remembered)), None);
-        state.add_window(Some(SourceIdentity::eve("Bob")), 2);
-        assert_eq!(
-            state.identity_for_window(2, Some(&remembered)),
-            Some(SourceIdentity::eve("Bob"))
-        );
-    }
+    use crate::daemon::source_registry::TrackedSource;
 
     fn test_group(name: &str, characters: &[&str]) -> crate::config::profile::CycleGroup {
         CycleGroup {
@@ -805,16 +634,23 @@ mod tests {
         }
     }
 
-    fn add_eve(state: &mut CycleState, name: &str, window: Window) {
-        state.add_window(Some(SourceIdentity::eve(name.to_string())), window);
+    fn add_eve(sources: &mut SourceRegistry, name: &str, window: Window) {
+        sources.register(window, TrackedSource::eve(name));
     }
 
-    fn add_source(state: &mut CycleState, name: &str, window: Window) {
-        state.add_window(Some(SourceIdentity::custom(name.to_string())), window);
+    fn add_source(sources: &mut SourceRegistry, name: &str, window: Window) {
+        sources.register(window, TrackedSource::custom(name));
     }
 
-    fn add_logged_out(state: &mut CycleState, window: Window) {
-        state.add_window(None, window);
+    fn add_logged_out(sources: &mut SourceRegistry, window: Window) {
+        sources.register(window, TrackedSource::eve(""));
+    }
+
+    /// Mirror forget_source: cycle cleanup runs only for an actual registry removal.
+    fn remove(state: &mut CycleState, sources: &mut SourceRegistry, window: Window) {
+        if sources.remove(window).is_some() {
+            state.source_removed(window);
+        }
     }
 
     fn eve_activation(window: Window, name: &str) -> Option<CycleActivation> {
@@ -833,11 +669,12 @@ mod tests {
     fn test_cycle_forward_multi_group() {
         let group1 = test_group("G1", &["A", "B"]);
         let mut state = CycleState::new(vec![group1]);
-        add_eve(&mut state, "A", 100);
-        add_eve(&mut state, "B", 200);
+        let mut sources = SourceRegistry::default();
+        add_eve(&mut sources, "A", 100);
+        add_eve(&mut sources, "B", 200);
 
         assert_eq!(
-            state.cycle_forward("G1", None, false),
+            state.cycle_forward(&sources, "G1", None, false),
             eve_activation(200, "B")
         );
     }
@@ -848,30 +685,32 @@ mod tests {
         let group2 = test_group("G2", &["D", "E"]);
 
         let mut state = CycleState::new(vec![group1, group2]);
-        add_eve(&mut state, "A", 100);
-        add_eve(&mut state, "B", 200);
-        add_eve(&mut state, "C", 300);
-        add_eve(&mut state, "D", 400);
-        add_eve(&mut state, "E", 500);
+
+        let mut sources = SourceRegistry::default();
+        add_eve(&mut sources, "A", 100);
+        add_eve(&mut sources, "B", 200);
+        add_eve(&mut sources, "C", 300);
+        add_eve(&mut sources, "D", 400);
+        add_eve(&mut sources, "E", 500);
 
         assert_eq!(
-            state.cycle_forward("G1", None, false),
+            state.cycle_forward(&sources, "G1", None, false),
             eve_activation(200, "B")
         );
         assert_eq!(
-            state.cycle_forward("G2", None, false),
+            state.cycle_forward(&sources, "G2", None, false),
             eve_activation(500, "E")
         );
         assert_eq!(
-            state.cycle_forward("G1", None, false),
+            state.cycle_forward(&sources, "G1", None, false),
             eve_activation(300, "C")
         );
         assert_eq!(
-            state.cycle_forward("G2", None, false),
+            state.cycle_forward(&sources, "G2", None, false),
             eve_activation(400, "D")
         );
         assert_eq!(
-            state.cycle_forward("G1", None, true),
+            state.cycle_forward(&sources, "G1", None, true),
             eve_activation(100, "A")
         );
     }
@@ -882,51 +721,53 @@ mod tests {
 
         let group = test_group("G1", &["A", "B"]);
         let mut state = CycleState::new(vec![group]);
+        let mut sources = SourceRegistry::default();
 
         // Multiple logged-out thumbnails all have an empty live character name,
         // so clicks must anchor current_window to the exact source window.
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
 
         let identity = SourceIdentity::eve("A".to_string());
-        assert!(state.set_current_by_window_with_identity(111, Some(&identity)));
+        assert!(state.set_current_by_window_with_identity(&sources, 111, Some(&identity)));
         assert_eq!(state.get_current_window(), Some(111));
         assert_eq!(state.groups.get("G1").unwrap().current_index, 0);
 
         let logged_out = HashMap::from([(111, "A".to_string()), (222, "B".to_string())]);
         assert_eq!(
-            state.cycle_forward("G1", Some(&logged_out), false),
+            state.cycle_forward(&sources, "G1", Some(&logged_out), false),
             eve_activation(222, "B")
         );
     }
 
     #[test]
     fn test_multiple_logged_out_windows_preserve_source_ids() {
-        let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
+        let mut sources = SourceRegistry::default();
 
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
 
-        assert_eq!(state.get_active_windows().len(), 2);
-        assert_eq!(state.get_active_windows().get(&111), Some(&None));
-        assert_eq!(state.get_active_windows().get(&222), Some(&None));
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources.get(111), Some(&TrackedSource::eve("")));
+        assert_eq!(sources.get(222), Some(&TrackedSource::eve("")));
     }
 
     #[test]
     fn test_remove_logged_out_window_removes_exact_source_and_current() {
         let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
 
         let identity = SourceIdentity::eve("A".to_string());
-        assert!(state.set_current_by_window_with_identity(111, Some(&identity)));
+        assert!(state.set_current_by_window_with_identity(&sources, 111, Some(&identity)));
 
-        state.remove_window(222);
-        assert!(state.get_active_windows().contains_key(&111));
-        assert!(!state.get_active_windows().contains_key(&222));
+        remove(&mut state, &mut sources, 222);
+        assert!(sources.contains(111));
+        assert!(!sources.contains(222));
         assert_eq!(state.get_current_window(), Some(111));
 
-        state.remove_window(111);
+        remove(&mut state, &mut sources, 111);
         assert_eq!(state.get_current_window(), None);
     }
 
@@ -935,13 +776,15 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
+
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
 
         let logged_out = HashMap::from([(111, "A".to_string()), (222, "B".to_string())]);
 
         assert_eq!(
-            state.cycle_forward("G1", Some(&logged_out), false),
+            state.cycle_forward(&sources, "G1", Some(&logged_out), false),
             eve_activation(222, "B")
         );
     }
@@ -951,12 +794,14 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("G1", &["A"])]);
-        add_logged_out(&mut state, 111);
 
-        assert!(state.set_current_by_window_with_identity(111, None));
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+
+        assert!(state.set_current_by_window_with_identity(&sources, 111, None));
         assert_eq!(state.get_current_window(), Some(111));
         assert_eq!(
-            state.cycle_forward("G1", Some(&HashMap::new()), false),
+            state.cycle_forward(&sources, "G1", Some(&HashMap::new()), false),
             None
         );
     }
@@ -964,11 +809,12 @@ mod tests {
     #[test]
     fn test_logged_out_cycling_is_disabled_without_logged_out_map() {
         let mut state = CycleState::new(vec![test_group("G1", &["A"])]);
-        add_logged_out(&mut state, 111);
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
 
-        assert_eq!(state.cycle_forward("G1", None, false), None);
+        assert_eq!(state.cycle_forward(&sources, "G1", None, false), None);
         assert_eq!(
-            state.activate_identity(&SourceIdentity::eve("A".to_string()), None),
+            state.activate_identity(&sources, &SourceIdentity::eve("A".to_string()), None),
             None
         );
     }
@@ -978,19 +824,21 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("G1", &[])]);
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
+
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
 
         let logged_out = HashMap::new();
 
         assert_eq!(
-            state.cycle_unidentified_logged_out_forward(&logged_out),
+            state.cycle_unidentified_logged_out_forward(&sources, &logged_out),
             unidentified_activation(111)
         );
 
-        assert!(state.set_current_by_window_with_identity(111, None));
+        assert!(state.set_current_by_window_with_identity(&sources, 111, None));
         assert_eq!(
-            state.cycle_unidentified_logged_out_forward(&logged_out),
+            state.cycle_unidentified_logged_out_forward(&sources, &logged_out),
             unidentified_activation(222)
         );
     }
@@ -1000,12 +848,14 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("G1", &[])]);
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
 
-        assert!(state.set_current_by_window_with_identity(111, None));
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
+
+        assert!(state.set_current_by_window_with_identity(&sources, 111, None));
         assert_eq!(
-            state.cycle_unidentified_logged_out_backward(&HashMap::new()),
+            state.cycle_unidentified_logged_out_backward(&sources, &HashMap::new()),
             unidentified_activation(222)
         );
     }
@@ -1015,13 +865,15 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("G1", &[])]);
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
+
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
 
         let logged_out = HashMap::from([(111, "A".to_string())]);
 
         assert_eq!(
-            state.cycle_unidentified_logged_out_forward(&logged_out),
+            state.cycle_unidentified_logged_out_forward(&sources, &logged_out),
             unidentified_activation(222)
         );
     }
@@ -1031,12 +883,14 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("G1", &[])]);
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
-        state.remove_window(111);
+
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
+        remove(&mut state, &mut sources, 111);
 
         assert_eq!(
-            state.cycle_unidentified_logged_out_forward(&HashMap::new()),
+            state.cycle_unidentified_logged_out_forward(&sources, &HashMap::new()),
             unidentified_activation(222)
         );
     }
@@ -1046,16 +900,18 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
-        add_eve(&mut state, "A", 100);
-        add_eve(&mut state, "B", 200);
-        add_logged_out(&mut state, 333);
+
+        let mut sources = SourceRegistry::default();
+        add_eve(&mut sources, "A", 100);
+        add_eve(&mut sources, "B", 200);
+        add_logged_out(&mut sources, 333);
 
         assert_eq!(
-            state.cycle_forward_with_unidentified("G1", None, &HashMap::new(), false),
+            state.cycle_forward_with_unidentified(&sources, "G1", None, &HashMap::new(), false),
             eve_activation(200, "B")
         );
         assert_eq!(
-            state.cycle_forward_with_unidentified("G1", None, &HashMap::new(), false),
+            state.cycle_forward_with_unidentified(&sources, "G1", None, &HashMap::new(), false),
             unidentified_activation(333)
         );
     }
@@ -1063,16 +919,17 @@ mod tests {
     #[test]
     fn test_unidentified_logged_out_cycle_disabled_preserves_group_behavior() {
         let mut state = CycleState::new(vec![test_group("G1", &["A", "B"])]);
-        add_eve(&mut state, "A", 100);
-        add_eve(&mut state, "B", 200);
-        add_logged_out(&mut state, 333);
+        let mut sources = SourceRegistry::default();
+        add_eve(&mut sources, "A", 100);
+        add_eve(&mut sources, "B", 200);
+        add_logged_out(&mut sources, 333);
 
         assert_eq!(
-            state.cycle_forward("G1", None, false),
+            state.cycle_forward(&sources, "G1", None, false),
             eve_activation(200, "B")
         );
         assert_eq!(
-            state.cycle_forward("G1", None, false),
+            state.cycle_forward(&sources, "G1", None, false),
             eve_activation(100, "A")
         );
     }
@@ -1082,15 +939,18 @@ mod tests {
         use std::collections::HashMap;
 
         let mut state = CycleState::new(vec![test_group("Default", &["A", "B"])]);
-        add_logged_out(&mut state, 111);
-        add_logged_out(&mut state, 222);
+
+        let mut sources = SourceRegistry::default();
+        add_logged_out(&mut sources, 111);
+        add_logged_out(&mut sources, 222);
 
         let logged_out = HashMap::from([(111, "A".to_string()), (222, "B".to_string())]);
         let identity = SourceIdentity::eve("A".to_string());
-        assert!(state.set_current_by_window_with_identity(111, Some(&identity)));
+        assert!(state.set_current_by_window_with_identity(&sources, 111, Some(&identity)));
 
         assert_eq!(
             state.activate_next_in_group(
+                &sources,
                 &[
                     SourceIdentity::eve("A".to_string()),
                     SourceIdentity::eve("B".to_string())
@@ -1110,16 +970,17 @@ mod tests {
                 CycleSlot::Source("h0ly lag".to_string()),
             ],
         )]);
+        let mut sources = SourceRegistry::default();
 
-        add_eve(&mut state, "h0ly lag", 100);
-        add_source(&mut state, "h0ly lag", 200);
+        add_eve(&mut sources, "h0ly lag", 100);
+        add_source(&mut sources, "h0ly lag", 200);
 
         assert_eq!(
-            state.cycle_forward("G1", None, false),
+            state.cycle_forward(&sources, "G1", None, false),
             source_activation(200, "h0ly lag")
         );
         assert_eq!(
-            state.cycle_forward("G1", None, false),
+            state.cycle_forward(&sources, "G1", None, false),
             eve_activation(100, "h0ly lag")
         );
     }
@@ -1127,24 +988,32 @@ mod tests {
     #[test]
     fn test_eve_cycle_slot_does_not_match_same_name_custom_source() {
         let mut state = CycleState::new(vec![test_group("G1", &["h0ly lag"])]);
-        add_source(&mut state, "h0ly lag", 200);
+        let mut sources = SourceRegistry::default();
+        add_source(&mut sources, "h0ly lag", 200);
 
-        assert_eq!(state.cycle_forward("G1", None, false), None);
+        assert_eq!(state.cycle_forward(&sources, "G1", None, false), None);
     }
 
     #[test]
     fn direct_hotkey_after_appended_unidentified_client() {
         let mut state = CycleState::new(vec![test_group("Default", &["Pilot"])]);
-        add_eve(&mut state, "Pilot", 10);
-        add_logged_out(&mut state, 20);
+        let mut sources = SourceRegistry::default();
+        add_eve(&mut sources, "Pilot", 10);
+        add_logged_out(&mut sources, 20);
         assert_eq!(
-            state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), false),
+            state.cycle_forward_with_unidentified(
+                &sources,
+                "Default",
+                None,
+                &HashMap::new(),
+                false
+            ),
             unidentified_activation(20)
         );
-        state.set_current_by_window_with_identity(20, None);
+        state.set_current_by_window_with_identity(&sources, 20, None);
 
         assert_eq!(
-            state.activate_next_in_group(&[SourceIdentity::eve("Pilot")], None),
+            state.activate_next_in_group(&sources, &[SourceIdentity::eve("Pilot")], None),
             eve_activation(10, "Pilot")
         );
     }
@@ -1152,24 +1021,43 @@ mod tests {
     #[test]
     fn manually_focused_appended_client_sets_forward_and_backward_start() {
         let mut state = CycleState::new(vec![test_group("Default", &["Pilot"])]);
-        add_eve(&mut state, "Pilot", 10);
-        add_logged_out(&mut state, 20);
-        add_logged_out(&mut state, 30);
-        state.set_current_by_window_with_identity(30, None);
+        let mut sources = SourceRegistry::default();
+        add_eve(&mut sources, "Pilot", 10);
+        add_logged_out(&mut sources, 20);
+        add_logged_out(&mut sources, 30);
+        state.set_current_by_window_with_identity(&sources, 30, None);
 
         assert_eq!(
-            state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), false),
+            state.cycle_forward_with_unidentified(
+                &sources,
+                "Default",
+                None,
+                &HashMap::new(),
+                false
+            ),
             eve_activation(10, "Pilot")
         );
         assert_eq!(
-            state.cycle_backward_with_unidentified("Default", None, &HashMap::new(), false),
+            state.cycle_backward_with_unidentified(
+                &sources,
+                "Default",
+                None,
+                &HashMap::new(),
+                false
+            ),
             unidentified_activation(20)
         );
 
         // Removing an earlier appended client must not leave a stale index.
-        state.remove_window(20);
+        remove(&mut state, &mut sources, 20);
         assert_eq!(
-            state.cycle_backward_with_unidentified("Default", None, &HashMap::new(), false),
+            state.cycle_backward_with_unidentified(
+                &sources,
+                "Default",
+                None,
+                &HashMap::new(),
+                false
+            ),
             eve_activation(10, "Pilot")
         );
     }
@@ -1177,13 +1065,14 @@ mod tests {
     #[test]
     fn group_reset_takes_precedence_over_focused_appended_client() {
         let mut state = CycleState::new(vec![test_group("Default", &["Pilot"])]);
-        add_eve(&mut state, "Pilot", 10);
-        add_logged_out(&mut state, 20);
-        add_logged_out(&mut state, 30);
-        state.set_current_by_window_with_identity(20, None);
+        let mut sources = SourceRegistry::default();
+        add_eve(&mut sources, "Pilot", 10);
+        add_logged_out(&mut sources, 20);
+        add_logged_out(&mut sources, 30);
+        state.set_current_by_window_with_identity(&sources, 20, None);
 
         assert_eq!(
-            state.cycle_forward_with_unidentified("Default", None, &HashMap::new(), true),
+            state.cycle_forward_with_unidentified(&sources, "Default", None, &HashMap::new(), true),
             eve_activation(10, "Pilot")
         );
     }
@@ -1199,90 +1088,18 @@ mod tests {
             hotkey_forward: None,
             hotkey_backward: None,
         }]);
+        let mut sources = SourceRegistry::default();
         for (window, name) in [(10, "Alice"), (20, "Bob"), (30, "Charlie")] {
-            state.add_window(Some(SourceIdentity::eve(name)), window);
+            sources.register(window, TrackedSource::eve(name));
         }
-        state.set_current_by_window_with_identity(20, None);
+        state.set_current_by_window_with_identity(&sources, 20, None);
         let index = state.groups["Default"].current_index;
         state.clear_current_window();
         assert_eq!(state.get_current_window(), None);
         assert_eq!(state.groups["Default"].current_index, index);
         assert_eq!(
-            state.cycle_forward("Default", None, false),
+            state.cycle_forward(&sources, "Default", None, false),
             Some((30, Some(SourceIdentity::eve("Charlie"))))
         );
-    }
-
-    #[test]
-    fn eve_count_tracks_windows_independently_of_cycle_eligibility() {
-        let mut state = CycleState::new(Vec::new());
-        assert_eq!(state.eve_client_count(), 0);
-        let alice = SourceIdentity::eve("Alice");
-        state.add_window(Some(alice.clone()), 10);
-        state.add_window(Some(alice.clone()), 10);
-        assert_eq!(state.eve_client_count(), 1);
-        state.add_window(None, 20);
-        state.add_window(Some(SourceIdentity::custom("Alice")), 30);
-        state.add_window(Some(SourceIdentity::custom("")), 40);
-        state.toggle_skip(&alice);
-        assert_eq!(state.eve_client_count(), 2);
-        state.update_character(10, "Bob".into());
-        state.update_character(10, String::new());
-        assert_eq!(state.eve_client_count(), 2);
-        state.remove_window(20);
-        state.remove_window(20);
-        state.remove_window(999);
-        assert_eq!(state.eve_client_count(), 1);
-        state.remove_window(10);
-        assert_eq!(state.eve_client_count(), 0);
-        assert_eq!(state.get_active_windows().len(), 2);
-    }
-
-    #[test]
-    fn admission_fixes_kind_and_custom_alias() {
-        let mut state = CycleState::new(Vec::new());
-        state.add_window(Some(SourceIdentity::custom("YouTube")), 1);
-        state.add_window(None, 2);
-        state.add_window(Some(SourceIdentity::eve("Pilot")), 3);
-        let order = state.active_window_order.clone();
-
-        // Custom sources can change neither kind nor alias, directly or via character updates.
-        state.add_window(Some(SourceIdentity::eve("Impostor")), 1);
-        state.add_window(None, 1);
-        state.add_window(Some(SourceIdentity::custom("Discord")), 1);
-        state.update_character(1, "Impostor".into());
-        state.update_character(1, String::new());
-        // EVE clients, logged in or out, never become custom sources.
-        state.add_window(Some(SourceIdentity::custom("YouTube")), 2);
-        state.add_window(Some(SourceIdentity::custom("Pilot")), 3);
-        assert_eq!(state.admitted_kind(1), Some(SourceKind::Custom));
-        assert_eq!(state.admitted_kind(2), Some(SourceKind::Eve));
-        assert_eq!(state.admitted_kind(3), Some(SourceKind::Eve));
-        assert_eq!(
-            state.get_active_windows()[&1],
-            Some(SourceIdentity::custom("YouTube"))
-        );
-        assert_eq!(state.get_active_windows()[&2], None);
-        assert_eq!(state.eve_client_count(), 2);
-
-        // Login, swap and logout remain EVE name transitions.
-        state.update_character(2, "Alice".into());
-        state.add_window(Some(SourceIdentity::eve("Bob")), 3);
-        state.update_character(3, String::new());
-        assert_eq!(
-            state.get_active_windows()[&2],
-            Some(SourceIdentity::eve("Alice"))
-        );
-        assert_eq!(state.get_active_windows()[&3], None);
-        assert_eq!(state.active_window_order, order);
-
-        // Character updates never admit a window; removal ends the admission.
-        state.update_character(4, "Ghost".into());
-        assert_eq!(state.admitted_kind(4), None);
-        assert_eq!(state.eve_client_count(), 2);
-        assert_eq!(state.active_window_order, order);
-        state.remove_window(1);
-        state.add_window(Some(SourceIdentity::eve("Reused")), 1);
-        assert_eq!(state.admitted_kind(1), Some(SourceKind::Eve));
     }
 }

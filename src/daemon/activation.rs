@@ -159,19 +159,14 @@ pub(super) fn begin(
     timestamp: u32,
     kind: ActivationOrigin,
 ) {
-    let origin = focus::observe(
-        ctx.app_ctx,
-        ctx.eve_clients,
-        ctx.cycle_state.get_active_windows(),
-    )
-    .ok();
+    let origin = focus::observe(ctx.app_ctx, ctx.eve_clients, ctx.sources).ok();
     let now = Instant::now();
     let minimize = ctx.daemon_config.profile.client_minimize_on_switch;
     ctx.session_state
         .focus
         .request(target, origin, minimize, kind, now);
     ctx.cycle_state
-        .set_current_by_window_with_identity(target, identity);
+        .set_current_by_window_with_identity(ctx.sources, target, identity);
     sync_focused_borders(
         ctx.eve_clients,
         ctx.cycle_state,
@@ -229,7 +224,7 @@ fn minimize_after_confirmation(ctx: &mut EventContext<'_, '_>, pending: &Pending
         return;
     }
     let mut windows = handlers::source_windows_to_minimize(
-        ctx.cycle_state,
+        ctx.sources,
         ctx.session_state,
         ctx.display_config,
         pending.target,
@@ -252,11 +247,7 @@ fn minimize_after_confirmation(ctx: &mut EventContext<'_, '_>, pending: &Pending
         windows.push(manager);
     }
     for window in windows {
-        let observed = focus::observe(
-            ctx.app_ctx,
-            ctx.eve_clients,
-            ctx.cycle_state.get_active_windows(),
-        );
+        let observed = focus::observe(ctx.app_ctx, ctx.eve_clients, ctx.sources);
         if observed
             .as_ref()
             .ok()
@@ -291,11 +282,7 @@ fn minimize_after_confirmation(ctx: &mut EventContext<'_, '_>, pending: &Pending
 
 /// Query current focus; event mode/detail and optimistic borders are never evidence.
 pub(super) fn reconcile(ctx: &mut EventContext<'_, '_>, now: Instant) {
-    let observed = focus::observe(
-        ctx.app_ctx,
-        ctx.eve_clients,
-        ctx.cycle_state.get_active_windows(),
-    );
+    let observed = focus::observe(ctx.app_ctx, ctx.eve_clients, ctx.sources);
     // Decide at the time the synchronous focus query completed: a delayed reply must not
     // count as arriving before a deadline. Explicit (future) test clocks stay authoritative.
     let now = now.max(Instant::now());
@@ -306,10 +293,7 @@ pub(super) fn reconcile(ctx: &mut EventContext<'_, '_>, now: Instant) {
         .pending
         .as_ref()
         .is_none_or(|pending| {
-            ctx.cycle_state
-                .get_active_windows()
-                .contains_key(&pending.target)
-                || ctx.eve_clients.contains_key(&pending.target)
+            ctx.sources.contains(pending.target) || ctx.eve_clients.contains_key(&pending.target)
         });
     if let Some(reason) = ctx
         .session_state
@@ -402,8 +386,11 @@ pub(super) fn reconcile(ctx: &mut EventContext<'_, '_>, now: Instant) {
                     .get(&source)
                     .cloned()
                     .map(SourceIdentity::eve);
-                ctx.cycle_state
-                    .set_current_by_window_with_identity(source, remembered.as_ref());
+                ctx.cycle_state.set_current_by_window_with_identity(
+                    ctx.sources,
+                    source,
+                    remembered.as_ref(),
+                );
                 let kind = if matches!(observation.owner, FocusOwner::Source(_)) {
                     BorderFocus::Observed
                 } else {
@@ -444,7 +431,7 @@ pub(super) fn reconcile(ctx: &mut EventContext<'_, '_>, now: Instant) {
 /// including our own previews unmapped by focus-loss hiding, cannot.
 pub(super) fn structure_change_affects_focus(ctx: &EventContext<'_, '_>, window: Window) -> bool {
     ctx.eve_clients.contains_key(&window)
-        || ctx.cycle_state.get_active_windows().contains_key(&window)
+        || ctx.sources.contains(window)
         || ctx
             .session_state
             .focus
@@ -743,6 +730,7 @@ mod display_tests {
         DaemonConfig,
         profile::{CycleSlot, Profile},
     };
+    use crate::daemon::source_registry::{SourceRegistry, TrackedSource};
     use crate::daemon::{
         cycle_state::CycleState, dispatcher::handle_event, font::FontRenderer,
         group_drag::GroupDragState, thumbnail::Thumbnail,
@@ -847,6 +835,7 @@ mod display_tests {
         let display = config.build_display_config();
         let font = FontRenderer::resolve_from_config(&conn, "sans-serif", 12.0).unwrap();
         let mut cycle = CycleState::new(config.profile.cycle_groups.clone());
+        let mut sources = SourceRegistry::default();
         let mut thumbnails = HashMap::new();
         let windows = Windows {
             a: window(&app, screen.root),
@@ -854,7 +843,7 @@ mod display_tests {
             manager: window(&app, screen.root),
         };
         for (source, name) in [(windows.a, "Alice"), (windows.b, "Bob")] {
-            cycle.add_window(Some(SourceIdentity::eve(name)), source);
+            sources.register(source, TrackedSource::eve(name));
             conn.change_property8(
                 PropMode::REPLACE,
                 source,
@@ -930,6 +919,7 @@ mod display_tests {
             eve_clients: &mut thumbnails,
             session_state: &mut session,
             cycle_state: &mut cycle,
+            sources: &mut sources,
             group_drag_state: &mut drag,
             status_tx: &status,
             font_renderer: &font,
@@ -1100,8 +1090,7 @@ mod display_tests {
     fn superseding_request_keeps_cursor_when_older_target_receives_focus() {
         with_fixture(|ctx, wm, w| {
             let c = window(ctx.app_ctx, ctx.app_ctx.screen.root);
-            ctx.cycle_state
-                .add_window(Some(SourceIdentity::custom("Custom")), c);
+            ctx.sources.register(c, TrackedSource::custom("Custom"));
             begin(ctx, w.b, None, 0, ActivationOrigin::Hotkey);
             begin(ctx, c, None, 0, ActivationOrigin::Hotkey);
             set_focus(ctx, w.b);
@@ -1237,13 +1226,9 @@ mod display_tests {
                 );
             }
             for raw in [0, 1, root] {
-                let resolved = focus::resolve_window(
-                    ctx.app_ctx,
-                    ctx.eve_clients,
-                    Some(ctx.cycle_state.get_active_windows()),
-                    raw,
-                )
-                .unwrap();
+                let resolved =
+                    focus::resolve_window(ctx.app_ctx, ctx.eve_clients, Some(&*ctx.sources), raw)
+                        .unwrap();
                 assert!(resolved.source().is_none());
             }
             begin(ctx, w.b, None, 0, ActivationOrigin::Hotkey);
@@ -1277,11 +1262,10 @@ mod display_tests {
             let custom = window(ctx.app_ctx, ctx.app_ctx.screen.root);
             let remembered = window(ctx.app_ctx, ctx.app_ctx.screen.root);
             let no_preview = window(ctx.app_ctx, ctx.app_ctx.screen.root);
-            ctx.cycle_state
-                .add_window(Some(SourceIdentity::custom("Alice")), custom);
-            ctx.cycle_state.add_window(None, remembered);
-            ctx.cycle_state
-                .add_window(Some(SourceIdentity::eve("NoPreview")), no_preview);
+            ctx.sources.register(custom, TrackedSource::custom("Alice"));
+            ctx.sources.register(remembered, TrackedSource::eve(""));
+            ctx.sources
+                .register(no_preview, TrackedSource::eve("NoPreview"));
             ctx.session_state
                 .window_last_character
                 .insert(remembered, "Remembered".into());
@@ -1300,6 +1284,7 @@ mod display_tests {
                 eve_clients: ctx.eve_clients,
                 session_state: ctx.session_state,
                 cycle_state: ctx.cycle_state,
+                sources: ctx.sources,
                 group_drag_state: ctx.group_drag_state,
                 status_tx: ctx.status_tx,
                 font_renderer: ctx.font_renderer,
@@ -1488,8 +1473,7 @@ mod display_tests {
                     }
                     "superseded" => {
                         let c = window(ctx.app_ctx, root);
-                        ctx.cycle_state
-                            .add_window(Some(SourceIdentity::custom("Custom")), c);
+                        ctx.sources.register(c, TrackedSource::custom("Custom"));
                         begin(ctx, c, None, 0, ActivationOrigin::Hotkey);
                         let deadline = ctx.session_state.focus.pending.as_ref().unwrap().deadline;
                         reconcile(ctx, deadline);
