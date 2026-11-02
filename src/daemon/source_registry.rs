@@ -147,9 +147,10 @@ impl SourceRegistry {
     /// Admit a source window, or apply a title observation to an admitted EVE client.
     ///
     /// Admission is final: a registered window keeps its kind, and a custom source its
-    /// alias, until it is removed. Any other change is rejected without mutation. For an
-    /// admitted EVE client only the observed live character matters; its history is kept.
-    pub fn register(&mut self, window: Window, source: TrackedSource) {
+    /// alias, until it is removed. Any other change is rejected without mutation and
+    /// returns false, so the caller must not act on it. For an admitted EVE client only
+    /// the observed live character matters; its history is kept.
+    pub fn register(&mut self, window: Window, source: TrackedSource) -> bool {
         match (self.sources.get_mut(&window), source) {
             (None, source) => {
                 info!(source = ?source, window, "Registering source window");
@@ -167,8 +168,10 @@ impl SourceRegistry {
                 if *alias == new => {}
             (Some(existing), rejected) => {
                 warn!(existing = ?existing, rejected = ?rejected, window, "Ignoring identity change for admitted source");
+                return false;
             }
         }
+        true
     }
 
     /// Apply an accepted title observation to an admitted EVE client (login, swap, or
@@ -413,20 +416,21 @@ mod tests {
     #[test]
     fn admission_fixes_kind_and_custom_alias() {
         let mut sources = SourceRegistry::default();
-        sources.register(1, TrackedSource::custom("YouTube"));
-        sources.register(2, TrackedSource::eve(""));
-        sources.register(3, TrackedSource::eve("Pilot"));
+        assert!(sources.register(1, TrackedSource::custom("YouTube")));
+        assert!(sources.register(2, TrackedSource::eve("")));
+        assert!(sources.register(3, TrackedSource::eve("Pilot")));
         let order = sources.order.clone();
 
         // Custom sources can change neither kind nor alias, directly or via character updates.
-        sources.register(1, TrackedSource::eve("Impostor"));
-        sources.register(1, TrackedSource::eve(""));
-        sources.register(1, TrackedSource::custom("Discord"));
+        assert!(!sources.register(1, TrackedSource::eve("Impostor")));
+        assert!(!sources.register(1, TrackedSource::eve("")));
+        assert!(!sources.register(1, TrackedSource::custom("Discord")));
+        assert!(sources.register(1, TrackedSource::custom("YouTube")));
         sources.update_character(1, "Impostor".into());
         sources.update_character(1, String::new());
         // EVE clients, logged in or out, never become custom sources.
-        sources.register(2, TrackedSource::custom("YouTube"));
-        sources.register(3, TrackedSource::custom("Pilot"));
+        assert!(!sources.register(2, TrackedSource::custom("YouTube")));
+        assert!(!sources.register(3, TrackedSource::custom("Pilot")));
         assert_eq!(sources.kind(1), Some(SourceKind::Custom));
         assert_eq!(sources.kind(2), Some(SourceKind::Eve));
         assert_eq!(sources.kind(3), Some(SourceKind::Eve));
@@ -436,7 +440,7 @@ mod tests {
 
         // Login, swap and logout remain EVE session transitions.
         sources.update_character(2, "Alice".into());
-        sources.register(3, TrackedSource::eve("Bob"));
+        assert!(sources.register(3, TrackedSource::eve("Bob")));
         sources.update_character(3, String::new());
         assert_eq!(sources.get(2), Some(&TrackedSource::eve("Alice")));
         assert_eq!(

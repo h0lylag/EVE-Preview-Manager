@@ -40,6 +40,29 @@ pub enum LoggedOutCycling {
     IncludeRemembered,
 }
 
+impl LoggedOutCycling {
+    /// The identity `window` cycles as: its live identity, or under `IncludeRemembered`
+    /// also a logged-out client's last character.
+    fn identity_of(self, sources: &SourceRegistry, window: Window) -> Option<SourceIdentity> {
+        match self {
+            Self::LiveOnly => sources.live_identity(window),
+            Self::IncludeRemembered => sources.effective_identity(window),
+        }
+    }
+
+    /// A logged-out client last logged in as `identity`, when the policy includes them.
+    fn logged_out_window(
+        self,
+        sources: &SourceRegistry,
+        identity: &SourceIdentity,
+    ) -> Option<Window> {
+        match self {
+            Self::LiveOnly => None,
+            Self::IncludeRemembered => sources.logged_out_window_for(identity),
+        }
+    }
+}
+
 /// Cycle positions, cursor, and skip state over the registered sources.
 pub struct CycleState {
     /// Active cycle groups: group_name -> GroupState
@@ -118,18 +141,6 @@ impl CycleState {
         }
 
         candidates
-    }
-
-    /// A logged-out client last logged in as `identity`, when the policy includes them.
-    fn logged_out_window(
-        sources: &SourceRegistry,
-        identity: &SourceIdentity,
-        logged_out: LoggedOutCycling,
-    ) -> Option<Window> {
-        match logged_out {
-            LoggedOutCycling::LiveOnly => None,
-            LoggedOutCycling::IncludeRemembered => sources.logged_out_window_for(identity),
-        }
     }
 
     /// Toggle skip status for a source.
@@ -339,7 +350,7 @@ impl CycleState {
                         return Some((window, Some(identity.clone())));
                     }
 
-                    if let Some(window) = Self::logged_out_window(sources, identity, logged_out) {
+                    if let Some(window) = logged_out.logged_out_window(sources, identity) {
                         debug!(group = group_name, identity = ?identity, index = group_state.current_index, window = window, direction = ?direction, "Cycling to logged-out EVE character");
                         return Some((window, Some(identity.clone())));
                     }
@@ -365,40 +376,28 @@ impl CycleState {
         identity: &SourceIdentity,
         logged_out: LoggedOutCycling,
     ) -> Option<CycleActivation> {
-        if let Some(window) = sources.window_for_identity(identity) {
+        let window = if let Some(window) = sources.window_for_identity(identity) {
             debug!(identity = ?identity, window = window, "Activating source via direct hotkey");
-
-            for group in self.groups.values_mut() {
-                if let Some(index) = group
-                    .order
-                    .iter()
-                    .position(|candidate| candidate == identity)
-                {
-                    group.current_index = index;
-                }
-            }
-
-            return Some((window, Some(identity.clone())));
-        }
-
-        if let Some(window) = Self::logged_out_window(sources, identity, logged_out) {
+            window
+        } else if let Some(window) = logged_out.logged_out_window(sources, identity) {
             debug!(identity = ?identity, window = window, "Activating logged-out EVE character via direct hotkey");
+            window
+        } else {
+            debug!(identity = ?identity, "Source not active, cannot activate");
+            return None;
+        };
 
-            for group in self.groups.values_mut() {
-                if let Some(index) = group
-                    .order
-                    .iter()
-                    .position(|candidate| candidate == identity)
-                {
-                    group.current_index = index;
-                }
+        for group in self.groups.values_mut() {
+            if let Some(index) = group
+                .order
+                .iter()
+                .position(|candidate| candidate == identity)
+            {
+                group.current_index = index;
             }
-
-            return Some((window, Some(identity.clone())));
         }
 
-        debug!(identity = ?identity, "Source not active, cannot activate");
-        None
+        Some((window, Some(identity.clone())))
     }
 
     fn set_current_group_index(&mut self, identity: &SourceIdentity) -> bool {
@@ -568,10 +567,7 @@ impl CycleState {
         // Start from the exact current window when possible, so remembered
         // logged-out EVE clients cycle from the clicked or focused source.
         let start_pos = if let Some(curr_win) = self.current_window
-            && let Some(curr_identity) = match logged_out {
-                LoggedOutCycling::LiveOnly => sources.live_identity(curr_win),
-                LoggedOutCycling::IncludeRemembered => sources.effective_identity(curr_win),
-            }
+            && let Some(curr_identity) = logged_out.identity_of(sources, curr_win)
             && let Some(pos) = sorted_candidates
                 .iter()
                 .position(|candidate| **candidate == curr_identity)

@@ -205,7 +205,11 @@ pub fn process_detected_window(
     );
     debug!(?identity, "Identity details");
 
-    ctx.sources.register(window, identity.tracked_source());
+    // An identity that contradicts the window's admission would refresh or create its
+    // preview, and save settings, under the wrong kind or alias.
+    if !ctx.sources.register(window, identity.tracked_source()) {
+        return Ok(());
+    }
     // Registration can change the EVE client count before any early return below.
     super::state::reconcile_previews(ctx);
 

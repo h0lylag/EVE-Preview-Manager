@@ -625,8 +625,11 @@ pub fn scan_eve_windows<'a>(
             }
         };
 
-        // Register the identified window, even if no thumbnail is created
-        sources.register(w, identity.tracked_source());
+        // Register the identified window, even if no thumbnail is created. A rejected
+        // identity contradicts an earlier admission, so no preview may use it.
+        if !sources.register(w, identity.tracked_source()) {
+            continue;
+        }
         detected_windows.push((w, identity));
     }
 
@@ -4654,6 +4657,32 @@ mod tests {
                 assert!(!events.eve_clients[&eve].state.is_minimized());
                 assert_eq!(events.eve_clients[&eve].character_name, "Alice");
                 assert_eq!(events.sources.get(eve), Some(&TrackedSource::eve("Bob")));
+            });
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn rejected_identity_never_reaches_the_preview() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, _| {
+                let custom = window(ctx, "YouTube", "browser");
+                handle_event(events, create_event(ctx, custom)).unwrap();
+                assert!(events.eve_clients.contains_key(&custom));
+
+                // An identity that contradicts the admission must not refresh the preview
+                // as EVE, which would save EVE settings under the custom alias.
+                crate::daemon::handlers::window::process_detected_window(
+                    events,
+                    custom,
+                    super::WindowIdentity::new_eve("Impostor".into()),
+                )
+                .unwrap();
+                assert_eq!(
+                    events.sources.get(custom),
+                    Some(&TrackedSource::custom("YouTube"))
+                );
+                assert!(events.daemon_config.character_thumbnails.is_empty());
             });
         });
     }
