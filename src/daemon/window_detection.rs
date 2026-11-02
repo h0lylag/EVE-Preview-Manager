@@ -4629,4 +4629,32 @@ mod tests {
             });
         }
     }
+
+    #[test]
+    #[ignore = "requires isolated Xvfb and EPM_X11_TESTS=1"]
+    fn failed_preview_rename_still_refreshes_a_remapped_source() {
+        with_x11(|ctx| {
+            with_sources(ctx, |events, _| {
+                let eve = window(ctx, "EVE - Alice", "eve");
+                handle_event(events, create_event(ctx, eve)).unwrap();
+                // Model real minimization, then a swap the preview cannot follow.
+                ctx.conn.unmap_window(eve).unwrap().check().unwrap();
+                events
+                    .eve_clients
+                    .get_mut(&eve)
+                    .unwrap()
+                    .minimized(events.display_config, events.font_renderer)
+                    .unwrap();
+                fail_preview_rename(ctx, events, eve, "EVE - Bob");
+
+                // Restoring retries the rename, which fails again, yet the refresh must still
+                // leave minimized rendering. The gone preview may fail to repaint.
+                ctx.conn.map_window(eve).unwrap().check().unwrap();
+                let _ = handle_event(events, map_event(ctx, eve));
+                assert!(!events.eve_clients[&eve].state.is_minimized());
+                assert_eq!(events.eve_clients[&eve].character_name, "Alice");
+                assert_eq!(events.sources.get(eve), Some(&TrackedSource::eve("Bob")));
+            });
+        });
+    }
 }

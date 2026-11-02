@@ -8,7 +8,7 @@
 //! read it; none of them own it.
 
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use x11rb::protocol::xproto::Window;
 
 use crate::common::types::{SourceIdentity, SourceKind};
@@ -33,15 +33,22 @@ impl EveSession {
     }
 
     /// Apply an accepted title observation: a character logs in or swaps; the login
-    /// screen logs out and keeps the previous character as history.
-    fn observe(&mut self, character: String) {
+    /// screen logs out and keeps the previous character as history. Returns whether the
+    /// session changed.
+    fn observe(&mut self, character: String) -> bool {
         if !character.is_empty() {
+            if self.live() == Some(character.as_str()) {
+                return false;
+            }
             *self = Self::LoggedIn(character);
         } else if let Self::LoggedIn(previous) = self {
             *self = Self::LoggedOut {
                 last: Some(std::mem::take(previous)),
             };
+        } else {
+            return false;
         }
+        true
     }
 
     fn live(&self) -> Option<&str> {
@@ -145,15 +152,16 @@ impl SourceRegistry {
     pub fn register(&mut self, window: Window, source: TrackedSource) {
         match (self.sources.get_mut(&window), source) {
             (None, source) => {
-                debug!(source = ?source, window, "Registering source window");
+                info!(source = ?source, window, "Registering source window");
                 self.order.push(window);
                 self.sources.insert(window, source);
             }
             (Some(TrackedSource::Eve(session)), TrackedSource::Eve(observed)) => {
-                session.observe(match observed {
+                let character = match observed {
                     EveSession::LoggedIn(character) => character,
                     EveSession::LoggedOut { .. } => String::new(),
-                });
+                };
+                observe_session(window, session, character);
             }
             (Some(TrackedSource::Custom { alias }), TrackedSource::Custom { alias: new })
                 if *alias == new => {}
@@ -167,7 +175,7 @@ impl SourceRegistry {
     /// logout). Never admits a window and never applies to custom sources.
     pub fn update_character(&mut self, window: Window, new_name: String) {
         match self.sources.get_mut(&window) {
-            Some(TrackedSource::Eve(session)) => session.observe(new_name),
+            Some(TrackedSource::Eve(session)) => observe_session(window, session, new_name),
             _ => debug!(
                 window,
                 "Ignoring character update for a window not admitted as EVE"
@@ -192,6 +200,7 @@ impl SourceRegistry {
     }
 
     /// Kind fixed at admission, or None for an unregistered window.
+    #[cfg(test)]
     pub fn kind(&self, window: Window) -> Option<SourceKind> {
         self.get(window).map(TrackedSource::kind)
     }
@@ -277,9 +286,36 @@ impl SourceRegistry {
     }
 }
 
+/// Apply a title observation to an admitted EVE client. Changes are logged at info level,
+/// so default logs show which character each window was last tied to.
+fn observe_session(window: Window, session: &mut EveSession, character: String) {
+    if session.observe(character) {
+        info!(window, session = ?session, "EVE client session changed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observations_report_only_session_changes() {
+        let mut session = EveSession::new(String::new());
+        // The login screen and repeated titles leave the session as it is.
+        assert!(!session.observe(String::new()));
+        assert!(session.observe("Alice".into()));
+        assert!(!session.observe("Alice".into()));
+        // A swap and a logout each change it once.
+        assert!(session.observe("Bob".into()));
+        assert!(session.observe(String::new()));
+        assert!(!session.observe(String::new()));
+        assert_eq!(
+            session,
+            EveSession::LoggedOut {
+                last: Some("Bob".into())
+            }
+        );
+    }
 
     #[test]
     fn identity_queries_prefer_live_names_and_require_registration() {

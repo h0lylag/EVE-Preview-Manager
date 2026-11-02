@@ -626,7 +626,7 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
     use crate::daemon::window_detection::{WindowIdentity, identify_window, match_custom_rule};
     use crate::x11::is_window_eve;
 
-    let Some(kind) = ctx.sources.kind(window) else {
+    let Some(source) = ctx.sources.get(window) else {
         if let Some(identity) = identify_window(
             ctx.app_ctx,
             window,
@@ -640,8 +640,8 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
     };
     let rendered = ctx.eve_clients.contains_key(&window);
 
-    let identity = match kind {
-        SourceKind::Eve => {
+    let identity = match source {
+        TrackedSource::Eve(_) => {
             match is_window_eve(ctx.app_ctx.conn, window, ctx.app_ctx.atoms).context(format!(
                 "Failed to check if window {} is EVE client during identity change",
                 window
@@ -649,8 +649,17 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
                 Some(eve_window) => {
                     let name = eve_window.character_name().to_string();
                     // Unrendered clients record the observation when registered below.
-                    if rendered {
-                        apply_eve_rename(ctx, window, &name)?;
+                    if rendered && let Err(error) = apply_eve_rename(ctx, window, &name) {
+                        // The registry already holds the new name, and a later observation
+                        // retries the rename. A source that maps again still needs its refresh.
+                        if !remapped {
+                            return Err(error);
+                        }
+                        warn!(
+                            window,
+                            error = ?error,
+                            "Failed to rename preview; refreshing it anyway"
+                        );
                     }
                     Some(WindowIdentity::new_eve(name))
                 }
@@ -666,37 +675,30 @@ fn observe_source(ctx: &mut EventContext, window: Window, remapped: bool) -> Res
                 }),
             }
         }
-        // Title changes cannot alter a rendered custom preview; skip the rule queries.
-        SourceKind::Custom if rendered && !remapped => None,
-        SourceKind::Custom => {
-            let alias = match ctx.sources.get(window) {
-                Some(TrackedSource::Custom { alias }) => alias.clone(),
-                _ => String::new(),
-            };
-            match match_custom_rule(
-                ctx.app_ctx,
-                window,
-                &ctx.daemon_config.profile.custom_windows,
-            )
-            .context(format!(
-                "Failed to match custom rules for window {}",
-                window
-            ))? {
-                Some(identity) if identity.name == alias => Some(identity),
-                // No title reclassifies a custom source, and its alias stays the admitted one.
-                _ => rendered.then(|| WindowIdentity {
-                    rule: ctx
-                        .daemon_config
-                        .profile
-                        .custom_windows
-                        .iter()
-                        .find(|rule| rule.alias == alias)
-                        .cloned(),
-                    name: alias,
-                    kind: SourceKind::Custom,
-                }),
-            }
-        }
+        // No title reclassifies a custom source or changes its alias, so a rendered preview
+        // needs no rule queries; it refreshes under the admitted alias when its source maps.
+        TrackedSource::Custom { alias } if rendered => remapped.then(|| WindowIdentity {
+            rule: ctx
+                .daemon_config
+                .profile
+                .custom_windows
+                .iter()
+                .find(|rule| rule.alias == *alias)
+                .cloned(),
+            name: alias.clone(),
+            kind: SourceKind::Custom,
+        }),
+        // An unrendered custom source gets a preview only while its title matches its alias.
+        TrackedSource::Custom { alias } => match_custom_rule(
+            ctx.app_ctx,
+            window,
+            &ctx.daemon_config.profile.custom_windows,
+        )
+        .context(format!(
+            "Failed to match custom rules for window {}",
+            window
+        ))?
+        .filter(|identity| identity.name == *alias),
     };
 
     // A rendered preview refreshes only when its source maps again.
@@ -712,28 +714,26 @@ fn apply_eve_rename(
     window: Window,
     new_character_name: &str,
 ) -> Result<()> {
-    let old_name = ctx.eve_clients[&window].character_name.clone();
+    // The registry follows the source even if updating the preview fails below; a later
+    // observation retries while the preview still shows the old name.
+    ctx.sources
+        .update_character(window, new_character_name.to_string());
+    let remembered = ctx.sources.remembered_character(window).map(str::to_string);
+    let thumbnail = ctx
+        .eve_clients
+        .get_mut(&window)
+        .expect("Checked contains_key");
+    thumbnail.sync_remembered_character_name(remembered.clone());
+    let old_name = thumbnail.character_name.clone();
 
-    // Repeated property notifications must not interrupt a click or drag. The registry
-    // still records them: a failed rename can leave it ahead of the preview.
+    // Repeated property notifications must not interrupt a click or drag.
     if old_name == new_character_name {
-        ctx.sources
-            .update_character(window, new_character_name.to_string());
-        let remembered = ctx.sources.remembered_character(window).map(str::to_string);
-        if let Some(thumbnail) = ctx.eve_clients.get_mut(&window) {
-            thumbnail.sync_remembered_character_name(remembered);
-        }
         return Ok(());
     }
     // Restore the old identity's layout before capturing geometry or applying the
     // new identity's settings. Those settings may hide the preview via an override.
     super::input::cancel_preview_input(ctx, window);
 
-    // The registry follows the source even if updating the preview fails below; a later
-    // observation retries while the preview still shows the old name.
-    ctx.sources
-        .update_character(window, new_character_name.to_string());
-    let remembered = ctx.sources.remembered_character(window).map(str::to_string);
     let skipped = ctx
         .cycle_state
         .is_skipped(ctx.sources.effective_identity(window).as_ref());
@@ -741,7 +741,6 @@ fn apply_eve_rename(
         .eve_clients
         .get_mut(&window)
         .expect("Checked contains_key");
-    thumbnail.sync_remembered_character_name(remembered.clone());
 
     let geom = ctx
         .app_ctx
